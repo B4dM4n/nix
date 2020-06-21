@@ -216,14 +216,17 @@ struct CmdFlakeListInputs : FlakeCommand, MixJSON
 
 struct CmdFlakeCheck : FlakeCommand
 {
-    bool build = true;
+    StringSet buildSystems;
 
-    CmdFlakeCheck()
+    CmdFlakeCheck() : buildSystems{settings.thisSystem.get()}
     {
         addFlag({
-            .longName = "no-build",
-            .description = "Do not build checks.",
-            .handler = {&build, false}
+            .longName = "build-systems",
+            .description = "Specify systems to build checks for",
+            .labels = {"systems"},
+            .handler = {[&](std::string ss) {
+                buildSystems = tokenizeString<StringSet>(ss);
+            }}
         });
     }
 
@@ -241,7 +244,7 @@ struct CmdFlakeCheck : FlakeCommand
 
     void run(nix::ref<nix::Store> store) override
     {
-        settings.readOnlyMode = !build;
+        settings.readOnlyMode = buildSystems.empty();
 
         auto state = getEvalState();
         auto flake = lockFlake();
@@ -435,7 +438,7 @@ struct CmdFlakeCheck : FlakeCommand
                                     auto drvPath = checkDerivation(
                                         fmt("%s.%s.%s", name, attr.name, attr2.name),
                                         *attr2.value, *attr2.pos);
-                                    if ((std::string) attr.name == settings.thisSystem.get())
+                                    if (buildSystems.count(attr.name))
                                         drvPaths.push_back({drvPath});
                                 }
                             }
@@ -553,7 +556,7 @@ struct CmdFlakeCheck : FlakeCommand
                 });
         }
 
-        if (build && !drvPaths.empty()) {
+        if (!drvPaths.empty()) {
             Activity act(*logger, lvlInfo, actUnknown, "running flake checks");
             store->buildPaths(drvPaths);
         }
