@@ -603,6 +603,11 @@ void RemoteStore::addToStore(const ValidPathInfo & info, Source & source,
             });
 
             {
+                struct timespec t;
+                t.tv_sec = 0;
+                t.tv_nsec = 1000 * 1000;
+                nanosleep(&t, 0);
+
                 FramedSink sink(conn, ex);
                 copyNAR(source, sink);
                 sink.flush();
