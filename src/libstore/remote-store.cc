@@ -177,6 +177,7 @@ ref<RemoteStore::Connection> UDSRemoteStore::openConnection()
 
 void RemoteStore::initConnection(Connection & conn)
 {
+    logger->log(lvlInfo, "RemoteStore::initConnection");
     /* Send the magic greeting, check for the reply. */
     try {
         conn.to << WORKER_MAGIC_1;
@@ -215,6 +216,7 @@ void RemoteStore::initConnection(Connection & conn)
 
 void RemoteStore::setOptions(Connection & conn)
 {
+    logger->log(lvlInfo, "RemoteStore::setOptions");
     conn.to << wopSetOptions
        << settings.keepFailed
        << settings.keepGoing
@@ -297,6 +299,7 @@ ConnectionHandle RemoteStore::getConnection()
 
 bool RemoteStore::isValidPathUncached(const StorePath & path)
 {
+    logger->log(lvlInfo, fmt("RemoteStore::isValidPathUncached %s", printStorePath(path)));
     auto conn(getConnection());
     conn->to << wopIsValidPath << printStorePath(path);
     conn.processStderr();
@@ -306,6 +309,7 @@ bool RemoteStore::isValidPathUncached(const StorePath & path)
 
 StorePathSet RemoteStore::queryValidPaths(const StorePathSet & paths, SubstituteFlag maybeSubstitute)
 {
+    logger->log(lvlInfo, "RemoteStore::queryValidPaths");
     auto conn(getConnection());
     if (GET_PROTOCOL_MINOR(conn->daemonVersion) < 12) {
         StorePathSet res;
@@ -323,6 +327,7 @@ StorePathSet RemoteStore::queryValidPaths(const StorePathSet & paths, Substitute
 
 StorePathSet RemoteStore::queryAllValidPaths()
 {
+    logger->log(lvlInfo, "RemoteStore::queryAllValidPaths");
     auto conn(getConnection());
     conn->to << wopQueryAllValidPaths;
     conn.processStderr();
@@ -332,6 +337,7 @@ StorePathSet RemoteStore::queryAllValidPaths()
 
 StorePathSet RemoteStore::querySubstitutablePaths(const StorePathSet & paths)
 {
+    logger->log(lvlInfo, "RemoteStore::querySubstitutablePaths");
     auto conn(getConnection());
     if (GET_PROTOCOL_MINOR(conn->daemonVersion) < 12) {
         StorePathSet res;
@@ -352,6 +358,7 @@ StorePathSet RemoteStore::querySubstitutablePaths(const StorePathSet & paths)
 
 void RemoteStore::querySubstitutablePathInfos(const StorePathCAMap & pathsMap, SubstitutablePathInfos & infos)
 {
+    logger->log(lvlInfo, "RemoteStore::querySubstitutablePathInfos");
     if (pathsMap.empty()) return;
 
     auto conn(getConnection());
@@ -402,6 +409,7 @@ void RemoteStore::querySubstitutablePathInfos(const StorePathCAMap & pathsMap, S
 void RemoteStore::queryPathInfoUncached(const StorePath & path,
     Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept
 {
+    logger->log(lvlInfo, "RemoteStore::queryPathInfoUncached");
     try {
         std::shared_ptr<ValidPathInfo> info;
         {
@@ -439,6 +447,7 @@ void RemoteStore::queryPathInfoUncached(const StorePath & path,
 void RemoteStore::queryReferrers(const StorePath & path,
     StorePathSet & referrers)
 {
+    logger->log(lvlInfo, "RemoteStore::queryReferrers");
     auto conn(getConnection());
     conn->to << wopQueryReferrers << printStorePath(path);
     conn.processStderr();
@@ -449,6 +458,7 @@ void RemoteStore::queryReferrers(const StorePath & path,
 
 StorePathSet RemoteStore::queryValidDerivers(const StorePath & path)
 {
+    logger->log(lvlInfo, "RemoteStore::queryValidDerivers");
     auto conn(getConnection());
     conn->to << wopQueryValidDerivers << printStorePath(path);
     conn.processStderr();
@@ -458,6 +468,7 @@ StorePathSet RemoteStore::queryValidDerivers(const StorePath & path)
 
 StorePathSet RemoteStore::queryDerivationOutputs(const StorePath & path)
 {
+    logger->log(lvlInfo, "RemoteStore::queryDerivationOutputs");
     auto conn(getConnection());
     if (GET_PROTOCOL_MINOR(conn->daemonVersion) >= 0x16) {
         return Store::queryDerivationOutputs(path);
@@ -470,6 +481,7 @@ StorePathSet RemoteStore::queryDerivationOutputs(const StorePath & path)
 
 OutputPathMap RemoteStore::queryDerivationOutputMap(const StorePath & path)
 {
+    logger->log(lvlInfo, "RemoteStore::queryDerivationOutputMap");
     auto conn(getConnection());
     conn->to << wopQueryDerivationOutputMap << printStorePath(path);
     conn.processStderr();
@@ -479,6 +491,7 @@ OutputPathMap RemoteStore::queryDerivationOutputMap(const StorePath & path)
 
 std::optional<StorePath> RemoteStore::queryPathFromHashPart(const std::string & hashPart)
 {
+    logger->log(lvlInfo, "RemoteStore::queryPathFromHashPart");
     auto conn(getConnection());
     conn->to << wopQueryPathFromHashPart << hashPart;
     conn.processStderr();
@@ -491,6 +504,7 @@ std::optional<StorePath> RemoteStore::queryPathFromHashPart(const std::string & 
 void RemoteStore::addToStore(const ValidPathInfo & info, Source & source,
     RepairFlag repair, CheckSigsFlag checkSigs)
 {
+    logger->log(lvlInfo, "RemoteStore::addToStore");
     auto conn(getConnection());
 
     if (GET_PROTOCOL_MINOR(conn->daemonVersion) < 18) {
@@ -611,6 +625,7 @@ void RemoteStore::addToStore(const ValidPathInfo & info, Source & source,
 StorePath RemoteStore::addToStore(const string & name, const Path & _srcPath,
     FileIngestionMethod method, HashType hashAlgo, PathFilter & filter, RepairFlag repair)
 {
+    logger->log(lvlInfo, fmt("RemoteStore::addToStore %s", name));
     if (repair) throw Error("repairing is not supported when building through the Nix daemon");
 
     auto conn(getConnection());
@@ -664,6 +679,7 @@ StorePath RemoteStore::addTextToStore(const string & name, const string & s,
 
 void RemoteStore::buildPaths(const std::vector<StorePathWithOutputs> & drvPaths, BuildMode buildMode)
 {
+    logger->log(lvlInfo, "RemoteStore::buildPaths");
     auto conn(getConnection());
     conn->to << wopBuildPaths;
     assert(GET_PROTOCOL_MINOR(conn->daemonVersion) >= 13);
@@ -686,6 +702,7 @@ void RemoteStore::buildPaths(const std::vector<StorePathWithOutputs> & drvPaths,
 BuildResult RemoteStore::buildDerivation(const StorePath & drvPath, const BasicDerivation & drv,
     BuildMode buildMode)
 {
+    logger->log(lvlInfo, "RemoteStore::buildDerivation");
     auto conn(getConnection());
     conn->to << wopBuildDerivation << printStorePath(drvPath);
     writeDerivation(conn->to, *this, drv);
@@ -701,6 +718,7 @@ BuildResult RemoteStore::buildDerivation(const StorePath & drvPath, const BasicD
 
 void RemoteStore::ensurePath(const StorePath & path)
 {
+    logger->log(lvlInfo, "RemoteStore::ensurePath");
     auto conn(getConnection());
     conn->to << wopEnsurePath << printStorePath(path);
     conn.processStderr();
@@ -710,6 +728,7 @@ void RemoteStore::ensurePath(const StorePath & path)
 
 void RemoteStore::addTempRoot(const StorePath & path)
 {
+    logger->log(lvlInfo, "RemoteStore::addTempRoot");
     auto conn(getConnection());
     conn->to << wopAddTempRoot << printStorePath(path);
     conn.processStderr();
@@ -719,6 +738,7 @@ void RemoteStore::addTempRoot(const StorePath & path)
 
 void RemoteStore::addIndirectRoot(const Path & path)
 {
+    logger->log(lvlInfo, "RemoteStore::addIndirectRoot");
     auto conn(getConnection());
     conn->to << wopAddIndirectRoot << path;
     conn.processStderr();
@@ -728,6 +748,7 @@ void RemoteStore::addIndirectRoot(const Path & path)
 
 void RemoteStore::syncWithGC()
 {
+    logger->log(lvlInfo, "RemoteStore::syncWithGC");
     auto conn(getConnection());
     conn->to << wopSyncWithGC;
     conn.processStderr();
@@ -737,6 +758,7 @@ void RemoteStore::syncWithGC()
 
 Roots RemoteStore::findRoots(bool censor)
 {
+    logger->log(lvlInfo, "RemoteStore::findRoots");
     auto conn(getConnection());
     conn->to << wopFindRoots;
     conn.processStderr();
@@ -753,6 +775,7 @@ Roots RemoteStore::findRoots(bool censor)
 
 void RemoteStore::collectGarbage(const GCOptions & options, GCResults & results)
 {
+    logger->log(lvlInfo, "RemoteStore::collectGarbage");
     auto conn(getConnection());
 
     conn->to
@@ -778,6 +801,7 @@ void RemoteStore::collectGarbage(const GCOptions & options, GCResults & results)
 
 void RemoteStore::optimiseStore()
 {
+    logger->log(lvlInfo, "RemoteStore::optimiseStore");
     auto conn(getConnection());
     conn->to << wopOptimiseStore;
     conn.processStderr();
@@ -787,6 +811,7 @@ void RemoteStore::optimiseStore()
 
 bool RemoteStore::verifyStore(bool checkContents, RepairFlag repair)
 {
+    logger->log(lvlInfo, "RemoteStore::verifyStore");
     auto conn(getConnection());
     conn->to << wopVerifyStore << checkContents << repair;
     conn.processStderr();
@@ -796,6 +821,7 @@ bool RemoteStore::verifyStore(bool checkContents, RepairFlag repair)
 
 void RemoteStore::addSignatures(const StorePath & storePath, const StringSet & sigs)
 {
+    logger->log(lvlInfo, "RemoteStore::addSignatures");
     auto conn(getConnection());
     conn->to << wopAddSignatures << printStorePath(storePath) << sigs;
     conn.processStderr();
@@ -807,6 +833,7 @@ void RemoteStore::queryMissing(const std::vector<StorePathWithOutputs> & targets
     StorePathSet & willBuild, StorePathSet & willSubstitute, StorePathSet & unknown,
     uint64_t & downloadSize, uint64_t & narSize)
 {
+    logger->log(lvlInfo, "RemoteStore::queryMissing");
     {
         auto conn(getConnection());
         if (GET_PROTOCOL_MINOR(conn->daemonVersion) < 19)
