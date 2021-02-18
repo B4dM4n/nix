@@ -2668,7 +2668,8 @@ void DerivationGoal::runChild()
 
 #if __linux__
         /* Change the personality to 32-bit if we're doing an
-           i686-linux build on an x86_64-linux machine. */
+           i686-linux build on an x86_64-linux machine or an
+           armv?l-linux build on an aarch64-linux machine. */
         struct utsname utsbuf;
         uname(&utsbuf);
         if (drv->platform == "i686-linux") {
