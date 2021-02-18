@@ -2671,16 +2671,23 @@ void DerivationGoal::runChild()
            i686-linux build on an x86_64-linux machine. */
         struct utsname utsbuf;
         uname(&utsbuf);
-        if (drv->platform == "i686-linux" &&
-            (settings.thisSystem == "x86_64-linux" ||
-             (!strcmp(utsbuf.sysname, "Linux") && !strcmp(utsbuf.machine, "x86_64")))) {
-            if (personality(PER_LINUX32) == -1)
-                throw SysError("cannot set i686-linux personality");
+        if (drv->platform == "i686-linux") {
+          if ((settings.thisSystem == "x86_64-linux" ||
+              (!strcmp(utsbuf.sysname, "Linux") && !strcmp(utsbuf.machine, "x86_64"))) &&
+              personality(PER_LINUX32) == -1)
+            throw SysError("cannot set i686-linux personality");
+        } else if (drv->platform == "armv6l-linux" ||
+                  drv->platform == "armv7l-linux" ||
+                  drv->platform == "armv8l-linux") {
+          if ((settings.thisSystem == "aarch64-linux" ||
+              (!strcmp(utsbuf.sysname, "Linux") && !strcmp(utsbuf.machine, "aarch64"))) &&
+              personality(PER_LINUX32) == -1)
+            throw SysError("cannot set armv8l-linux personality");
         }
 
         /* Impersonate a Linux 2.6 machine to get some determinism in
            builds that depend on the kernel version. */
-        if ((drv->platform == "i686-linux" || drv->platform == "x86_64-linux") && settings.impersonateLinux26) {
+        if (hasSuffix(drv->platform, "-linux") && settings.impersonateLinux26) {
             int cur = personality(0xffffffff);
             if (cur != -1) personality(cur | 0x0020000 /* == UNAME26 */);
         }
