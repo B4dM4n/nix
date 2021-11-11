@@ -73,6 +73,7 @@ nix_tests = \
   brotli.sh \
   zstd.sh \
   compression-levels.sh \
+  nix-copy-raw.sh \
   nix-copy-ssh.sh \
   post-hook.sh \
   function-trace.sh \
