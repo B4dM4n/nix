@@ -11,7 +11,7 @@ let
 
           sourceInfo =
             if key == lockFile.root
-            then rootSrc
+            then rootSrc // { lockFile = builtins.toFile "flake.lock" (lockFileStr + "\n"); }
             else fetchTree (node.info or {} // removeAttrs node.locked ["dir"]);
 
           subdir = if key == lockFile.root then rootSubdir else node.locked.dir or "";

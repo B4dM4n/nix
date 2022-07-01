@@ -18,7 +18,7 @@ struct PathInputScheme : InputScheme
         input.attrs.insert_or_assign("path", url.path);
 
         for (auto & [name, value] : url.query)
-            if (name == "rev" || name == "narHash")
+            if (name == "rev" || name == "narHash" || name == "lockFile")
                 input.attrs.insert_or_assign(name, value);
             else if (name == "revCount" || name == "lastModified") {
                 if (auto n = string2Int<uint64_t>(value))
@@ -43,7 +43,7 @@ struct PathInputScheme : InputScheme
                attributes. This is useful for making a pinned tree
                work the same as the repository from which is exported
                (e.g. path:/nix/store/...-source?lastModified=1585388205&rev=b0c285...). */
-            if (name == "type" || name == "rev" || name == "revCount" || name == "lastModified" || name == "narHash" || name == "path")
+            if (name == "type" || name == "rev" || name == "revCount" || name == "lastModified" || name == "narHash" || name == "path" || name == "lockFile")
                 // checked in Input::fromAttrs
                 ;
             else

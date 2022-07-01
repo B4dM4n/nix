@@ -39,6 +39,7 @@ struct GitArchiveInputScheme : InputScheme
         std::optional<Hash> rev;
         std::optional<std::string> ref;
         std::optional<std::string> host_url;
+        std::optional<std::string> lockFile;
 
         auto size = path.size();
         if (size == 3) {
@@ -83,6 +84,8 @@ struct GitArchiveInputScheme : InputScheme
                     throw BadURL("URL '%s' contains an invalid instance host", url.url);
                 host_url = value;
             }
+            else if (name == "lockFile")
+                lockFile = value;
             // FIXME: barf on unsupported attributes
         }
 
@@ -96,6 +99,7 @@ struct GitArchiveInputScheme : InputScheme
         if (rev) input.attrs.insert_or_assign("rev", rev->gitRev());
         if (ref) input.attrs.insert_or_assign("ref", *ref);
         if (host_url) input.attrs.insert_or_assign("host", *host_url);
+        if (lockFile) input.attrs.insert_or_assign("lockFile", *lockFile);
 
         return input;
     }
@@ -105,7 +109,7 @@ struct GitArchiveInputScheme : InputScheme
         if (maybeGetStrAttr(attrs, "type") != type()) return {};
 
         for (auto & [name, value] : attrs)
-            if (name != "type" && name != "owner" && name != "repo" && name != "ref" && name != "rev" && name != "narHash" && name != "lastModified" && name != "host")
+            if (name != "type" && name != "owner" && name != "repo" && name != "ref" && name != "rev" && name != "narHash" && name != "lastModified" && name != "host" && name != "lockFile")
                 throw Error("unsupported input attribute '%s'", name);
 
         getStrAttr(attrs, "owner");
@@ -126,10 +130,16 @@ struct GitArchiveInputScheme : InputScheme
         assert(!(ref && rev));
         if (ref) path += "/" + *ref;
         if (rev) path += "/" + rev->to_string(Base16, false);
-        return ParsedURL {
+
+        ParsedURL url = {
             .scheme = type(),
             .path = path,
         };
+
+        if (auto lockFile = maybeGetStrAttr(input.attrs, "lockFile"))
+            url.query.insert_or_assign("lockFile", *lockFile);
+
+        return url;
     }
 
     bool hasAllInfo(const Input & input) const override

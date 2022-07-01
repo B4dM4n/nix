@@ -422,6 +422,8 @@
       };
 
     in {
+      # TODO: remove
+      inherit (self) lockFile;
 
       # A Nixpkgs overlay that overrides the 'nix' and
       # 'nix.perl-bindings' packages.

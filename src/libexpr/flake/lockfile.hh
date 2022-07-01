@@ -11,6 +11,8 @@ class StorePath;
 
 namespace nix::flake {
 
+struct Flake;
+
 typedef std::vector<FlakeId> InputPath;
 
 struct LockedNode;
@@ -59,6 +61,10 @@ struct LockFile
     std::string to_string() const;
 
     static LockFile read(const Path & path);
+
+    static LockFile mustRead(const Path & path);
+
+    static LockFile fromFlake(const Flake & flake);
 
     void write(const Path & path) const;
 

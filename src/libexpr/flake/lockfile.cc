@@ -1,4 +1,5 @@
 #include "lockfile.hh"
+#include "flake.hh"
 #include "store-api.hh"
 #include "url-parts.hh"
 
@@ -187,7 +188,22 @@ std::string LockFile::to_string() const
 LockFile LockFile::read(const Path & path)
 {
     if (!pathExists(path)) return LockFile();
+    return LockFile::mustRead(path);
+}
+
+LockFile LockFile::mustRead(const Path & path)
+{
     return LockFile(nlohmann::json::parse(readFile(path)), path);
+}
+
+LockFile LockFile::fromFlake(const Flake & flake)
+{
+    if (auto lockFile = flake.originalRef.input.getLockFile())
+        return LockFile::mustRead(*lockFile);
+    else
+        // FIXME: symlink attack
+        return LockFile::read(
+            flake.sourceInfo->actualPath + "/" + flake.lockedRef.subdir + "/flake.lock");
 }
 
 std::ostream & operator <<(std::ostream & stream, const LockFile & lockFile)

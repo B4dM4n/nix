@@ -268,6 +268,8 @@ struct GitInputScheme : InputScheme
                 attrs.emplace(name, value);
             else if (name == "shallow" || name == "submodules")
                 attrs.emplace(name, Explicit<bool> { value == "1" });
+            else if (name == "lockFile")
+                attrs.insert_or_assign(name, value);
             else
                 url2.query.emplace(name, value);
         }
@@ -282,7 +284,9 @@ struct GitInputScheme : InputScheme
         if (maybeGetStrAttr(attrs, "type") != "git") return {};
 
         for (auto & [name, value] : attrs)
-            if (name != "type" && name != "url" && name != "ref" && name != "rev" && name != "shallow" && name != "submodules" && name != "lastModified" && name != "revCount" && name != "narHash" && name != "allRefs" && name != "name")
+            if (name != "type" && name != "url" && name != "ref" && name != "rev" && name != "shallow" &&
+                name != "submodules" && name != "lastModified" && name != "revCount" && name != "narHash" &&
+                name != "allRefs" && name != "name" && name != "lockFile")
                 throw Error("unsupported Git input attribute '%s'", name);
 
         parseURL(getStrAttr(attrs, "url"));
@@ -308,6 +312,8 @@ struct GitInputScheme : InputScheme
         if (auto ref = input.getRef()) url.query.insert_or_assign("ref", *ref);
         if (maybeGetBoolAttr(input.attrs, "shallow").value_or(false))
             url.query.insert_or_assign("shallow", "1");
+        if (auto lockFile = maybeGetStrAttr(input.attrs, "lockFile"))
+            url.query.insert_or_assign("lockFile", *lockFile);
         return url;
     }
 

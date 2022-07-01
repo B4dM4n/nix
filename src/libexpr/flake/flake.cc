@@ -334,10 +334,7 @@ LockedFlake lockFlake(
     }
 
     try {
-
-        // FIXME: symlink attack
-        auto oldLockFile = LockFile::read(
-            flake.sourceInfo->actualPath + "/" + flake.lockedRef.subdir + "/flake.lock");
+        auto oldLockFile = LockFile::fromFlake(flake);
 
         debug("old lock file: %s", oldLockFile);
 
@@ -569,8 +566,7 @@ LockedFlake lockFlake(
                                 inputFlake.inputs, childNode, inputPath,
                                 oldLock
                                 ? std::dynamic_pointer_cast<const Node>(oldLock)
-                                : LockFile::read(
-                                    inputFlake.sourceInfo->actualPath + "/" + inputFlake.lockedRef.subdir + "/flake.lock").root.get_ptr(),
+                                : LockFile::fromFlake(inputFlake).root.get_ptr(),
                                 oldLock ? lockRootPath : inputPath,
                                 localPath,
                                 false);

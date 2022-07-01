@@ -29,6 +29,7 @@ static void fixupInput(Input & input)
     input.getLastModified();
     if (input.getNarHash())
         input.locked = true;
+    input.getLockFile();
 }
 
 Input Input::fromURL(const ParsedURL & url)
@@ -262,6 +263,13 @@ std::optional<uint64_t> Input::getRevCount() const
 std::optional<time_t> Input::getLastModified() const
 {
     if (auto n = maybeGetIntAttr(attrs, "lastModified"))
+        return *n;
+    return {};
+}
+
+std::optional<std::string> Input::getLockFile() const
+{
+    if (auto n = maybeGetStrAttr(attrs, "lockFile"))
         return *n;
     return {};
 }

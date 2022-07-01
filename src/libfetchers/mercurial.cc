@@ -58,7 +58,7 @@ struct MercurialInputScheme : InputScheme
         attrs.emplace("type", "hg");
 
         for (auto &[name, value] : url.query) {
-            if (name == "rev" || name == "ref")
+            if (name == "rev" || name == "ref" || name == "lockFile")
                 attrs.emplace(name, value);
             else
                 url2.query.emplace(name, value);
@@ -74,7 +74,7 @@ struct MercurialInputScheme : InputScheme
         if (maybeGetStrAttr(attrs, "type") != "hg") return {};
 
         for (auto & [name, value] : attrs)
-            if (name != "type" && name != "url" && name != "ref" && name != "rev" && name != "revCount" && name != "narHash" && name != "name")
+            if (name != "type" && name != "url" && name != "ref" && name != "rev" && name != "revCount" && name != "narHash" && name != "name" && name != "lockFile")
                 throw Error("unsupported Mercurial input attribute '%s'", name);
 
         parseURL(getStrAttr(attrs, "url"));
@@ -95,6 +95,8 @@ struct MercurialInputScheme : InputScheme
         url.scheme = "hg+" + url.scheme;
         if (auto rev = input.getRev()) url.query.insert_or_assign("rev", rev->gitRev());
         if (auto ref = input.getRef()) url.query.insert_or_assign("ref", *ref);
+        if (auto lockFile = maybeGetStrAttr(input.attrs, "lockFile"))
+            url.query.insert_or_assign("lockFile", *lockFile);
         return url;
     }
 

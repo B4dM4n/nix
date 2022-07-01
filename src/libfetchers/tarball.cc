@@ -198,8 +198,9 @@ struct CurlInputScheme : InputScheme
         input.attrs.insert_or_assign("type", inputType());
         input.attrs.insert_or_assign("url", urlWithoutApplicationScheme.to_string());
         auto narHash = url.query.find("narHash");
-        if (narHash != url.query.end())
-            input.attrs.insert_or_assign("narHash", narHash->second);
+        for (auto & [name, value] : url.query)
+            if (name == "narHash" || name == "lockFile")
+                input.attrs.insert_or_assign(name, value);
         return input;
     }
 
@@ -208,7 +209,7 @@ struct CurlInputScheme : InputScheme
         auto type = maybeGetStrAttr(attrs, "type");
         if (type != inputType()) return {};
 
-        std::set<std::string> allowedNames = {"type", "url", "narHash", "name", "unpack"};
+        std::set<std::string> allowedNames = {"type", "url", "narHash", "name", "unpack", "lockFile"};
         for (auto & [name, value] : attrs)
             if (!allowedNames.count(name))
                 throw Error("unsupported %s input attribute '%s'", *type, name);
@@ -227,6 +228,8 @@ struct CurlInputScheme : InputScheme
         // files don't have a canonical representation.
         if (auto narHash = input.getNarHash())
             url.query.insert_or_assign("narHash", narHash->to_string(SRI, true));
+        if (auto lockFile = maybeGetStrAttr(input.attrs, "lockFile"))
+            url.query.insert_or_assign("lockFile", *lockFile);
         return url;
     }
 
