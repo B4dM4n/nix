@@ -619,6 +619,33 @@ void DerivationGoal::tryToBuild()
         }
     }
 
+    if (!derivationGroups) {
+        derivationGroups = StringSet{};
+
+        for (auto & m : settings.derivationGroups.get_parsed()) {
+            auto & group = m.first;
+
+            for (auto & field_matcher : m.second) {
+                std::string field = "";
+                if (auto search = drv->env.find(field_matcher.first); search != drv->env.end())
+                    field = search->second;
+
+                if (!std::regex_match(field, field_matcher.second))
+                    goto skipMatcher;
+
+            }
+            derivationGroups->insert(group);
+            skipMatcher:
+            ;
+        }
+        if (!derivationGroups->empty())
+            createDirs(settings.nixStateDir + "/derivation-groups");
+    }
+
+    for (auto & g : *derivationGroups) {
+        lockFiles.insert(fmt("%s/derivation-groups/%s", settings.nixStateDir, g));
+    }
+
     if (!outputLocks.lockPaths(lockFiles, "", false)) {
         if (!actLock)
             actLock = std::make_unique<Activity>(*logger, lvlWarn, actBuildWaiting,

@@ -128,6 +128,8 @@ struct DerivationGoal : public Goal
     /* The remote machine on which we're building. */
     std::string machineName;
 
+    std::optional<StringSet> derivationGroups;
+
     DerivationGoal(const StorePath & drvPath,
         const OutputsSpec & wantedOutputs, Worker & worker,
         BuildMode buildMode = bmNormal);

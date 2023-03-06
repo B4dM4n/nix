@@ -7,6 +7,7 @@
 
 #include <map>
 #include <limits>
+#include <regex>
 
 #include <sys/types.h>
 
@@ -44,6 +45,26 @@ struct PluginFilesSetting : public BaseSetting<Paths>
     }
 
     void set(const std::string & str, bool append = false) override;
+};
+
+struct DerivationGroupsSetting : public BaseSetting<Strings>
+{
+    typedef std::pair<std::string, std::vector<std::pair<std::string, std::regex>>> Matcher;
+    std::optional<std::vector<Matcher>> parsed;
+
+    DerivationGroupsSetting(Config * options,
+        const Strings & def,
+        const std::string & name,
+        const std::string & description,
+        const std::set<std::string> & aliases = {})
+        : BaseSetting<Strings>(def, true, name, description, aliases)
+    {
+        options->addSetting(this);
+    }
+
+    void set(const std::string & str, bool append = false) override;
+
+    const std::vector<Matcher> & get_parsed();
 };
 
 const uint32_t maxIdsPerBuild =
@@ -941,6 +962,20 @@ public:
 
     Setting<size_t> narBufferSize{this, 32 * 1024 * 1024, "nar-buffer-size",
         "Maximum size of NARs before spilling them to disk."};
+
+    DerivationGroupsSetting derivationGroups{
+        this, {}, "derivation-groups",
+        R"(
+          A whitespace-separated list of matchers.
+
+          A matcher has the following structure: <group>[,<field>=<regex>]
+
+          The matchers are applied to all derivations before building and
+          if all specified fields of a derivation match the given regex, the
+          derivation is assigned to the specified group.
+
+          Inside the group, only one derivation will be build at a time.
+        )"};
 
     Setting<bool> allowSymlinkedStore{
         this, false, "allow-symlinked-store",

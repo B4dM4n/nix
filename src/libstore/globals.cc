@@ -257,6 +257,43 @@ void PluginFilesSetting::set(const std::string & str, bool append)
     BaseSetting<Paths>::set(str, append);
 }
 
+void DerivationGroupsSetting::set(const std::string & str, bool append)
+{
+    parsed.reset();
+    BaseSetting<Strings>::set(str, append);
+}
+
+const std::vector<DerivationGroupsSetting::Matcher> & DerivationGroupsSetting::get_parsed() {
+    if (!parsed) {
+        parsed = std::vector<DerivationGroupsSetting::Matcher>{};
+        for (auto &m : get()) {
+            auto parts = tokenizeString<Strings>(m, ",");
+            if (parts.empty())
+                throw UsageError("configuration setting '%s' contains invalid matcher (missing ',')", name);
+            std::string group = parts.front();
+            parts.pop_front();
+            std::vector<std::pair<std::string, std::regex>> fields;
+
+            for (auto & f : parts) {
+                auto index = f.find('=');
+                if (index == std::string::npos)
+                    throw UsageError("configuration setting '%s' contains invalid matcher (missing '=')", name);
+
+                std::string field(f.substr(0, index));
+                try {
+                    std::regex field_match(f.substr(index + 1));
+
+                    fields.push_back(std::make_pair(field, field_match));
+                } catch (std::regex_error & e) {
+                    throw UsageError("configuration setting '%s' contains invalid matcher (invalid regular expression '%s')", name, f.substr(index + 1));
+                }
+            }
+            parsed->push_back(std::make_pair(group, fields));
+        }
+    }
+
+    return *parsed;
+}
 
 void initPlugins()
 {
