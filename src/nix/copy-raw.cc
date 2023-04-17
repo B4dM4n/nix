@@ -5,30 +5,14 @@
 
 using namespace nix;
 
-struct CmdCopyRaw : InstallablesCommand
+struct CmdCopyRaw : virtual CopyCommand, virtual InstallablesCommand
 {
-    std::string srcUri, dstUri;
-
     CheckSigsFlag checkSigs = CheckSigs;
 
     SubstituteFlag substitute = NoSubstitute;
 
     CmdCopyRaw()
     {
-        addFlag({
-            .longName = "from",
-            .description = "URL of the source Nix store.",
-            .labels = {"store-uri"},
-            .handler = {&srcUri},
-        });
-
-        addFlag({
-            .longName = "to",
-            .description = "URL of the destination Nix store.",
-            .labels = {"store-uri"},
-            .handler = {&dstUri},
-        });
-
         addFlag({
             .longName = "no-check-sigs",
             .description = "Do not require that paths are signed by trusted keys.",
@@ -57,14 +41,11 @@ struct CmdCopyRaw : InstallablesCommand
 
     Category category() override { return catSecondary; }
 
-    void run(ref<Store> srcStore) override
+    void run(ref<Store> srcStore, Installables && installables) override
     {
-        if (srcUri.empty() && dstUri.empty())
-            throw UsageError("you must pass '--from' and/or '--to'");
-
         settings.readOnlyMode = true;
 
-        ref<Store> dstStore = dstUri.empty() ? openStore() : openStore(dstUri);
+        auto dstStore = getDstStore();
 
         BuiltPaths builtPaths;
         for (const auto & i : installables) {
