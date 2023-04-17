@@ -19,12 +19,13 @@ nlohmann::json DerivedPath::Built::toJSON(ref<Store> store) const {
     res["drvPath"] = store->printStorePath(drvPath);
     // Fallback for the input-addressed derivation case: We expect to always be
     // able to print the output paths, so let’s do it
-    const auto knownOutputs = store->queryPartialDerivationOutputMap(drvPath);
-    for (const auto& output : outputs) {
-        auto knownOutput = get(knownOutputs, output);
-        res["outputs"][output] = (knownOutput && *knownOutput)
-          ? store->printStorePath(**knownOutput)
-          : nullptr;
+    const auto outputMap = store->queryPartialDerivationOutputMap(drvPath);
+    for (const auto & [output, outputPathOpt] : outputMap) {
+        if (!outputs.contains(output)) continue;
+        if (outputPathOpt)
+            res["outputs"][output] = store->printStorePath(*outputPathOpt);
+        else
+            res["outputs"][output] = nullptr;
     }
     return res;
 }
@@ -62,7 +63,7 @@ std::string DerivedPath::Built::to_string(const Store & store) const
 {
     return store.printStorePath(drvPath)
         + "!"
-        + (outputs.empty() ? std::string { "*" } : concatStringsSep(",", outputs));
+        + outputs.to_string();
 }
 
 std::string DerivedPath::to_string(const Store & store) const
@@ -78,16 +79,12 @@ DerivedPath::Opaque DerivedPath::Opaque::parse(const Store & store, std::string_
     return {store.parseStorePath(s)};
 }
 
-DerivedPath::Built DerivedPath::Built::parse(const Store & store, std::string_view s)
+DerivedPath::Built DerivedPath::Built::parse(const Store & store, std::string_view drvS, std::string_view outputsS)
 {
-    size_t n = s.find("!");
-    assert(n != s.npos);
-    auto drvPath = store.parseStorePath(s.substr(0, n));
-    auto outputsS = s.substr(n + 1);
-    std::set<std::string> outputs;
-    if (outputsS != "*")
-        outputs = tokenizeString<std::set<std::string>>(outputsS, ",");
-    return {drvPath, outputs};
+    return {
+        .drvPath = store.parseStorePath(drvS),
+        .outputs = OutputsSpec::parse(outputsS),
+    };
 }
 
 DerivedPath DerivedPath::parse(const Store & store, std::string_view s)
@@ -95,7 +92,7 @@ DerivedPath DerivedPath::parse(const Store & store, std::string_view s)
     size_t n = s.find("!");
     return n == s.npos
         ? (DerivedPath) DerivedPath::Opaque::parse(store, s)
-        : (DerivedPath) DerivedPath::Built::parse(store, s);
+        : (DerivedPath) DerivedPath::Built::parse(store, s.substr(0, n), s.substr(n + 1));
 }
 
 RealisedPath::Set BuiltPath::toRealisedPaths(Store & store) const
@@ -108,7 +105,7 @@ RealisedPath::Set BuiltPath::toRealisedPaths(Store & store) const
                 auto drvHashes =
                     staticOutputHashes(store, store.readDerivation(p.drvPath));
                 for (auto& [outputName, outputPath] : p.outputs) {
-                    if (settings.isExperimentalFeatureEnabled(
+                    if (experimentalFeatureSettings.isEnabled(
                                 Xp::CaDerivations)) {
                         auto drvOutput = get(drvHashes, outputName);
                         if (!drvOutput)

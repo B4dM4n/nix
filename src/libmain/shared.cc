@@ -84,8 +84,18 @@ void printMissing(ref<Store> store, const StorePathSet & willBuild,
                 downloadSizeMiB,
                 narSizeMiB);
         }
-        for (auto & i : willSubstitute)
-            printMsg(lvl, "  %s", store->printStorePath(i));
+        std::vector<const StorePath *> willSubstituteSorted = {};
+        std::for_each(willSubstitute.begin(), willSubstitute.end(),
+                   [&](const StorePath &p) { willSubstituteSorted.push_back(&p); });
+        std::sort(willSubstituteSorted.begin(), willSubstituteSorted.end(),
+                  [](const StorePath *lhs, const StorePath *rhs) {
+                    if (lhs->name() == rhs->name())
+                      return lhs->to_string() < rhs->to_string();
+                    else
+                      return lhs->name() < rhs->name();
+                  });
+        for (auto p : willSubstituteSorted)
+            printMsg(lvl, "  %s", store->printStorePath(*p));
     }
 
     if (!unknown.empty()) {
@@ -235,6 +245,7 @@ void initNix()
 #endif
 
     preloadNSS();
+    initLibStore();
 }
 
 
@@ -346,7 +357,7 @@ void parseCmdLine(const std::string & programName, const Strings & args,
 
 void printVersion(const std::string & programName)
 {
-    std::cout << format("%1% (Nix) %2%") % programName % nixVersion << std::endl;
+    std::cout << fmt("%1% (Nix) %2%", programName, nixVersion) << std::endl;
     if (verbosity > lvlInfo) {
         Strings cfg;
 #if HAVE_BOEHMGC
@@ -362,6 +373,7 @@ void printVersion(const std::string & programName)
             << "\n";
         std::cout << "Store directory: " << settings.nixStore << "\n";
         std::cout << "State directory: " << settings.nixStateDir << "\n";
+        std::cout << "Data directory: " << settings.nixDataDir << "\n";
     }
     throw Exit();
 }
@@ -402,8 +414,6 @@ int handleExceptions(const std::string & programName, std::function<void()> fun)
         return 1;
     } catch (BaseError & e) {
         logError(e.info());
-        if (e.hasTrace() && !loggerSettings.showTrace.get())
-            printError("(use '--show-trace' to show detailed location information)");
         return e.status;
     } catch (std::bad_alloc & e) {
         printError(error + "out of memory");
