@@ -1,4 +1,5 @@
 #pragma once
+///@file
 
 #include "eval.hh"
 #include "path.hh"
@@ -13,7 +14,7 @@ namespace nix {
 struct DrvInfo
 {
 public:
-    typedef std::map<std::string, StorePath> Outputs;
+    typedef std::map<std::string, std::optional<StorePath>> Outputs;
 
 private:
     EvalState * state;
@@ -25,7 +26,10 @@ private:
     mutable std::string outputName;
     Outputs outputs;
 
-    bool failed = false; // set if we get an AssertionError
+    /**
+     * Set if we get an AssertionError
+     */
+    bool failed = false;
 
     Bindings * attrs = nullptr, * meta = nullptr;
 
@@ -34,7 +38,10 @@ private:
     bool checkMeta(Value & v);
 
 public:
-    std::string attrPath; /* path towards the derivation */
+    /**
+     * path towards the derivation
+     */
+    std::string attrPath;
 
     DrvInfo(EvalState & state) : state(&state) { };
     DrvInfo(EvalState & state, std::string attrPath, Bindings * attrs);
@@ -46,8 +53,11 @@ public:
     StorePath requireDrvPath() const;
     StorePath queryOutPath() const;
     std::string queryOutputName() const;
-    /** Return the list of outputs. The "outputs to install" are determined by `meta.outputsToInstall`. */
-    Outputs queryOutputs(bool onlyOutputsToInstall = false);
+    /**
+     * Return the unordered map of output names to (optional) output paths.
+     * The "outputs to install" are determined by `meta.outputsToInstall`.
+     */
+    Outputs queryOutputs(bool withPaths = true, bool onlyOutputsToInstall = false);
 
     StringSet queryMetaNames();
     Value * queryMeta(const std::string & name);
@@ -72,14 +82,16 @@ public:
 
 
 #if HAVE_BOEHMGC
-typedef std::list<DrvInfo, traceable_allocator<DrvInfo> > DrvInfos;
+typedef std::list<DrvInfo, traceable_allocator<DrvInfo>> DrvInfos;
 #else
 typedef std::list<DrvInfo> DrvInfos;
 #endif
 
 
-/* If value `v' denotes a derivation, return a DrvInfo object
-   describing it. Otherwise return nothing. */
+/**
+ * If value `v` denotes a derivation, return a DrvInfo object
+ * describing it. Otherwise return nothing.
+ */
 std::optional<DrvInfo> getDerivation(EvalState & state,
     Value & v, bool ignoreAssertionFailures);
 

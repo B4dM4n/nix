@@ -48,24 +48,9 @@ FdSink::~FdSink()
 }
 
 
-size_t threshold = 256 * 1024 * 1024;
-
-static void warnLargeDump()
-{
-    warn("dumping very large path (> 256 MiB); this may run out of memory");
-}
-
-
 void FdSink::write(std::string_view data)
 {
     written += data.size();
-    static bool warned = false;
-    if (warn && !warned) {
-        if (written > threshold) {
-            warnLargeDump();
-            warned = true;
-        }
-    }
     try {
         writeFull(fd, data);
     } catch (SysError & e) {
@@ -201,6 +186,22 @@ static DefaultStackAllocator defaultAllocatorSingleton;
 StackAllocator *StackAllocator::defaultAllocator = &defaultAllocatorSingleton;
 
 
+std::shared_ptr<void> (*create_coro_gc_hook)() = []() -> std::shared_ptr<void> {
+    return {};
+};
+
+/* This class is used for entry and exit hooks on coroutines */
+class CoroutineContext {
+    /* Disable GC when entering the coroutine without the boehm patch,
+     * since it doesn't find the main thread stack in this case.
+     * std::shared_ptr<void> performs type-erasure, so it will call the right
+     * deleter. */
+    const std::shared_ptr<void> coro_gc_hook = create_coro_gc_hook();
+public:
+    CoroutineContext() {};
+    ~CoroutineContext() {};
+};
+
 std::unique_ptr<FinishSink> sourceToSink(std::function<void(Source &)> fun)
 {
     struct SourceToSink : FinishSink
@@ -221,7 +222,8 @@ std::unique_ptr<FinishSink> sourceToSink(std::function<void(Source &)> fun)
             if (in.empty()) return;
             cur = in;
 
-            if (!coro)
+            if (!coro) {
+                CoroutineContext ctx;
                 coro = coro_t::push_type(VirtualStackAllocator{}, [&](coro_t::pull_type & yield) {
                     LambdaSource source([&](char *out, size_t out_len) {
                         if (cur.empty()) {
@@ -238,17 +240,24 @@ std::unique_ptr<FinishSink> sourceToSink(std::function<void(Source &)> fun)
                     });
                     fun(source);
                 });
+            }
 
             if (!*coro) { abort(); }
 
-            if (!cur.empty()) (*coro)(false);
+            if (!cur.empty()) {
+                CoroutineContext ctx;
+                (*coro)(false);
+            }
         }
 
         void finish() override
         {
             if (!coro) return;
             if (!*coro) abort();
-            (*coro)(true);
+            {
+                CoroutineContext ctx;
+                (*coro)(true);
+            }
             if (*coro) abort();
         }
     };
@@ -279,18 +288,23 @@ std::unique_ptr<Source> sinkToSource(
 
         size_t read(char * data, size_t len) override
         {
-            if (!coro)
+            if (!coro) {
+                CoroutineContext ctx;
                 coro = coro_t::pull_type(VirtualStackAllocator{}, [&](coro_t::push_type & yield) {
                     LambdaSink sink([&](std::string_view data) {
                         if (!data.empty()) yield(std::string(data));
                     });
                     fun(sink);
                 });
+            }
 
             if (!*coro) { eof(); abort(); }
 
             if (pos == cur.size()) {
-                if (!cur.empty()) (*coro)();
+                if (!cur.empty()) {
+                    CoroutineContext ctx;
+                    (*coro)();
+                }
                 cur = coro->get();
                 pos = 0;
             }
@@ -353,11 +367,11 @@ Sink & operator << (Sink & sink, const StringSet & s)
 
 Sink & operator << (Sink & sink, const Error & ex)
 {
-    auto info = ex.info();
+    auto & info = ex.info();
     sink
         << "Error"
         << info.level
-        << info.name
+        << "Error" // removed
         << info.msg.str()
         << 0 // FIXME: info.errPos
         << info.traces.size();
@@ -426,12 +440,11 @@ Error readError(Source & source)
     auto type = readString(source);
     assert(type == "Error");
     auto level = (Verbosity) readInt(source);
-    auto name = readString(source);
+    auto name = readString(source); // removed
     auto msg = readString(source);
     ErrorInfo info {
         .level = level,
-        .name = name,
-        .msg = hintformat(std::move(format("%s") % msg)),
+        .msg = hintformat(fmt("%s", msg)),
     };
     auto havePos = readNum<size_t>(source);
     assert(havePos == 0);
@@ -440,7 +453,7 @@ Error readError(Source & source)
         havePos = readNum<size_t>(source);
         assert(havePos == 0);
         info.traces.push_back(Trace {
-            .hint = hintformat(std::move(format("%s") % readString(source)))
+            .hint = hintformat(fmt("%s", readString(source)))
         });
     }
     return Error(std::move(info));
@@ -449,11 +462,6 @@ Error readError(Source & source)
 
 void StringSink::operator () (std::string_view data)
 {
-    static bool warned = false;
-    if (!warned && s.size() > threshold) {
-        warnLargeDump();
-        warned = true;
-    }
     s.append(data);
 }
 
