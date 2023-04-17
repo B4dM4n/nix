@@ -20,7 +20,7 @@ nlohmann::json builtPathsToJSON(const std::vector<BuiltPathWithResult> & buildab
     return res;
 }
 
-struct CmdInstantiate : InstallablesCommand, MixJSON
+struct CmdInstantiate : virtual InstallablesCommand, virtual MixJSON
 {
     CmdInstantiate()
     {
@@ -38,7 +38,7 @@ struct CmdInstantiate : InstallablesCommand, MixJSON
           ;
     }
 
-    void run(ref<Store> store) override
+    void run(ref<Store> store, Installables && installables) override
     {
         auto buildables = Installable::build(getEvalStore(), store, Realise::Derivation, installables, bmNormal);
 
