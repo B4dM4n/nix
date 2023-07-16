@@ -185,6 +185,8 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
     if (i->inBuildSlot) {
         assert(nrLocalBuilds > 0);
         nrLocalBuilds--;
+        // wake postponed builds to give the build hook a chance to fill the free slot
+        lastWokenUp = steady_time_point::min();
     }
 
     children.erase(i);

@@ -143,7 +143,8 @@ static int main_build_remote(int argc, char * * argv)
                                 m.systemTypes.end(),
                                 neededSystem) != m.systemTypes.end()) &&
                         m.allSupported(requiredFeatures) &&
-                        m.mandatoryMet(requiredFeatures))
+                        m.mandatoryMet(requiredFeatures) &&
+                        (m.storeUri != "ssh://localhost" || canBuildLocally))
                     {
                         rightType = true;
                         AutoCloseFD free;
@@ -223,6 +224,12 @@ static int main_build_remote(int argc, char * * argv)
 
                         std::cerr << "# decline\n";
                     }
+                    break;
+                }
+
+                if (canBuildLocally && bestMachine->storeUri == "ssh://localhost") {
+                    // let the calling nix process build it
+                    std::cerr << "# decline\n";
                     break;
                 }
 

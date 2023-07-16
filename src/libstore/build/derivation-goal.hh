@@ -125,6 +125,12 @@ struct DerivationGoal : public Goal
 
     std::map<ActivityId, Activity> builderActivities;
 
+    /**
+     * Give the build hook another chance of distributing the build, if all
+     * local slots are full.
+    */
+    bool buildHookRetried = false;
+
     /* The remote machine on which we're building. */
     std::string machineName;
 

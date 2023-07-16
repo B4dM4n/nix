@@ -679,6 +679,7 @@ void DerivationGoal::tryToBuild()
                         fmt("waiting for a machine to build '%s'", yellowtxt(worker.store.printStorePath(drvPath))));
                 worker.waitForAWhile(shared_from_this());
                 outputLocks.unlock();
+                buildHookRetried = false;
                 return;
             case rpDecline:
                 /* We should do it ourselves. */

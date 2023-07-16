@@ -173,7 +173,13 @@ void LocalDerivationGoal::tryLocalBuild()
     unsigned int curBuilds = worker.getNrLocalBuilds();
     if (curBuilds >= settings.maxBuildJobs) {
         state = &DerivationGoal::tryToBuild;
-        worker.waitForBuildSlot(shared_from_this());
+        // give the build hook another chance of distributing the build
+        if (buildHookRetried || !worker.tryBuildHook) {
+            worker.waitForBuildSlot(shared_from_this());
+        } else {
+            buildHookRetried = true;
+            worker.wakeUp(shared_from_this());
+        }
         outputLocks.unlock();
         return;
     }
