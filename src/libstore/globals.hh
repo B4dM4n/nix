@@ -50,7 +50,7 @@ struct PluginFilesSetting : public BaseSetting<Paths>
 struct DerivationGroupsSetting : public BaseSetting<Strings>
 {
     typedef std::pair<std::string, std::vector<std::pair<std::string, std::regex>>> Matcher;
-    std::optional<std::vector<Matcher>> parsed;
+    typedef std::vector<Matcher> Matchers;
 
     DerivationGroupsSetting(Config * options,
         const Strings & def,
@@ -62,9 +62,7 @@ struct DerivationGroupsSetting : public BaseSetting<Strings>
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
-
-    const std::vector<Matcher> & get_parsed();
+    Matchers get_parsed() const;
 };
 
 const uint32_t maxIdsPerBuild =
