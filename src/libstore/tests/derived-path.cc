@@ -27,11 +27,13 @@ Gen<DerivedPath::Built> Arbitrary<DerivedPath::Built>::arbitrary()
 
 Gen<DerivedPath> Arbitrary<DerivedPath>::arbitrary()
 {
-    switch (*gen::inRange<uint8_t>(0, 1)) {
+    switch (*gen::inRange<uint8_t>(0, std::variant_size_v<DerivedPath::Raw>)) {
     case 0:
         return gen::just<DerivedPath>(*gen::arbitrary<DerivedPath::Opaque>());
-    default:
+    case 1:
         return gen::just<DerivedPath>(*gen::arbitrary<DerivedPath::Built>());
+    default:
+        assert(false);
     }
 }
 
@@ -49,6 +51,14 @@ class DerivedPathTest : public LibStoreTest
 // See https://github.com/emil-e/rapidcheck/blob/master/doc/gtest.md#rc_gtest_fixture_propfixture-name-args
 TEST_F(DerivedPathTest, force_init)
 {
+}
+
+RC_GTEST_FIXTURE_PROP(
+    DerivedPathTest,
+    prop_legacy_round_rip,
+    (const DerivedPath & o))
+{
+    RC_ASSERT(o == DerivedPath::parseLegacy(*store, o.to_string_legacy(*store)));
 }
 
 RC_GTEST_FIXTURE_PROP(

@@ -1,9 +1,9 @@
 #pragma once
+///@file
 
 #include "types.hh"
 #include "config.hh"
 #include "util.hh"
-#include "experimental-features.hh"
 
 #include <map>
 #include <limits>
@@ -27,7 +27,7 @@ struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
+    unsigned int parse(const std::string & str) const override;
 };
 
 struct PluginFilesSetting : public BaseSetting<Paths>
@@ -44,7 +44,7 @@ struct PluginFilesSetting : public BaseSetting<Paths>
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
+    Paths parse(const std::string & str) const override;
 };
 
 struct DerivationGroupsSetting : public BaseSetting<Strings>
@@ -85,40 +85,63 @@ class Settings : public Config {
 
     bool isWSL1();
 
+    Path getDefaultSSLCertFile();
+
 public:
 
     Settings();
 
     Path nixPrefix;
 
-    /* The directory where we store sources and derived files. */
+    /**
+     * The directory where we store sources and derived files.
+     */
     Path nixStore;
 
     Path nixDataDir; /* !!! fix */
 
-    /* The directory where we log various operations. */
+    /**
+     * The directory where we log various operations.
+     */
     Path nixLogDir;
 
-    /* The directory where state is stored. */
+    /**
+     * The directory where state is stored.
+     */
     Path nixStateDir;
 
-    /* The directory where system configuration files are stored. */
+    /**
+     * The directory where system configuration files are stored.
+     */
     Path nixConfDir;
 
-    /* A list of user configuration files to load. */
+    /**
+     * A list of user configuration files to load.
+     */
     std::vector<Path> nixUserConfFiles;
 
-    /* The directory where the main programs are stored. */
+    /**
+     * The directory where the main programs are stored.
+     */
     Path nixBinDir;
 
-    /* The directory where the man pages are stored. */
+    /**
+     * The directory where the man pages are stored.
+     */
     Path nixManDir;
 
-    /* File name of the socket the daemon listens to.  */
+    /**
+     * File name of the socket the daemon listens to.
+     */
     Path nixDaemonSocketFile;
 
     Setting<std::string> storeUri{this, getEnv("NIX_REMOTE").value_or("auto"), "store",
-        "The default Nix store to use."};
+        R"(
+          The [URL of the Nix store](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format)
+          to use for most operations.
+          See [`nix help-stores`](@docroot@/command-ref/new-cli/nix3-help-stores.md)
+          for supported store types and settings.
+        )"};
 
     Setting<bool> keepFailed{this, false, "keep-failed",
         "Whether to keep temporary directories of failed builds."};
@@ -135,7 +158,9 @@ public:
         )",
         {"build-fallback"}};
 
-    /* Whether to show build log output in real time. */
+    /**
+     * Whether to show build log output in real time.
+     */
     bool verboseBuild = true;
 
     Setting<size_t> logLines{this, 10, "log-lines",
@@ -155,6 +180,15 @@ public:
         )",
         {"build-max-jobs"}};
 
+    Setting<unsigned int> maxSubstitutionJobs{
+        this, 16, "max-substitution-jobs",
+        R"(
+          This option defines the maximum number of substitution jobs that Nix
+          will try to run in parallel. The default is `16`. The minimum value
+          one can choose is `1` and lower values will be interpreted as `1`.
+        )",
+        {"substitution-max-jobs"}};
+
     Setting<unsigned int> buildCores{
         this,
         getDefaultCores(),
@@ -171,8 +205,10 @@ public:
         )",
         {"build-cores"}, false};
 
-    /* Read-only mode.  Don't copy stuff to the store, don't change
-       the database. */
+    /**
+     * Read-only mode.  Don't copy stuff to the store, don't change
+     * the database.
+     */
     bool readOnlyMode = false;
 
     Setting<std::string> thisSystem{
@@ -322,16 +358,6 @@ public:
           users in `build-users-group`.
 
           UIDs are allocated starting at 872415232 (0x34000000) on Linux and 56930 on macOS.
-
-          > **Warning**
-          > This is an experimental feature.
-
-          To enable it, add the following to [`nix.conf`](#):
-
-          ```
-          extra-experimental-features = auto-allocate-uids
-          auto-allocate-uids = true
-          ```
         )"};
 
     Setting<uint32_t> startId{this,
@@ -361,16 +387,6 @@ public:
 
           Cgroups are required and enabled automatically for derivations
           that require the `uid-range` system feature.
-
-          > **Warning**
-          > This is an experimental feature.
-
-          To enable it, add the following to [`nix.conf`](#):
-
-          ```
-          extra-experimental-features = cgroups
-          use-cgroups = true
-          ```
         )"};
     #endif
 
@@ -471,9 +487,6 @@ public:
           at the moment the garbage collector is run.
         )",
         {"env-keep-derivations"}};
-
-    /* Whether to lock the Nix client and worker to the same CPU. */
-    bool lockCPU;
 
     Setting<SandboxMode> sandboxMode{
         this,
@@ -699,8 +712,9 @@ public:
         Strings{"https://cache.nixos.org/"},
         "substituters",
         R"(
-          A list of URLs of substituters, separated by whitespace. Substituters
-          are tried based on their Priority value, which each substituter can set
+          A list of [URLs of Nix stores](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format)
+          to be used as substituters, separated by whitespace.
+          Substituters are tried based on their Priority value, which each substituter can set
           independently. Lower value means higher priority.
           The default is `https://cache.nixos.org`, with a Priority of 40.
 
@@ -718,7 +732,8 @@ public:
     Setting<StringSet> trustedSubstituters{
         this, {}, "trusted-substituters",
         R"(
-          A list of URLs of substituters, separated by whitespace. These are
+          A list of [URLs of Nix stores](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format),
+          separated by whitespace. These are
           not used by default, but can be enabled by users of the Nix daemon
           by specifying `--option substituters urls` on the command
           line. Unprivileged users are only allowed to pass a subset of the
@@ -847,8 +862,22 @@ public:
           > `.netrc`.
         )"};
 
-    /* Path to the SSL CA file used */
-    Path caFile;
+    Setting<Path> caFile{
+        this, getDefaultSSLCertFile(), "ssl-cert-file",
+        R"(
+          The path of a file containing CA certificates used to
+          authenticate `https://` downloads. Nix by default will use
+          the first of the following files that exists:
+
+          1. `/etc/ssl/certs/ca-certificates.crt`
+          2. `/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt`
+
+          The path can be overridden by the following environment
+          variables, in order of precedence:
+
+          1. `NIX_SSL_CERT_FILE`
+          2. `SSL_CERT_FILE`
+        )"};
 
 #if __linux__
     Setting<bool> filterSyscalls{
@@ -953,13 +982,6 @@ public:
           are loaded as plugins (non-recursively).
         )"};
 
-    Setting<std::set<ExperimentalFeature>> experimentalFeatures{this, {}, "experimental-features",
-        "Experimental Nix features to enable."};
-
-    bool isExperimentalFeatureEnabled(const ExperimentalFeature &);
-
-    void requireExperimentalFeature(const ExperimentalFeature &);
-
     Setting<size_t> narBufferSize{this, 32 * 1024 * 1024, "nar-buffer-size",
         "Maximum size of NARs before spilling them to disk."};
 
@@ -994,7 +1016,7 @@ public:
         this, false, "use-xdg-base-directories",
         R"(
           If set to `true`, Nix will conform to the [XDG Base Directory Specification] for files in `$HOME`.
-          The environment variables used to implement this are documented in the [Environment Variables section](@docroot@/installation/env-variables.md).
+          The environment variables used to implement this are documented in the [Environment Variables section](@docroot@/command-ref/env-common.md).
 
           [XDG Base Directory Specification]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
 
@@ -1016,8 +1038,10 @@ public:
 // FIXME: don't use a global variable.
 extern Settings settings;
 
-/* This should be called after settings are initialized, but before
-   anything else */
+/**
+ * This should be called after settings are initialized, but before
+ * anything else
+ */
 void initPlugins();
 
 void loadConfFile();
@@ -1027,12 +1051,16 @@ std::vector<Path> getUserConfigFiles();
 
 extern const std::string nixVersion;
 
-/* NB: This is not sufficient. You need to call initNix() */
+/**
+ * NB: This is not sufficient. You need to call initNix()
+ */
 void initLibStore();
 
-/* It's important to initialize before doing _anything_, which is why we
-   call upon the programmer to handle this correctly. However, we only add
-   this in a key locations, so as not to litter the code. */
+/**
+ * It's important to initialize before doing _anything_, which is why we
+ * call upon the programmer to handle this correctly. However, we only add
+ * this in a key locations, so as not to litter the code.
+ */
 void assertLibStoreInitialized();
 
 }

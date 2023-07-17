@@ -18,6 +18,7 @@ Worker::Worker(Store & store, Store & evalStore)
 {
     /* Debugging: prevent recursive workers. */
     nrLocalBuilds = 0;
+    nrSubstitutions = 0;
     lastWokenUp = steady_time_point::min();
     permanentFailure = false;
     timedOut = false;
@@ -92,6 +93,7 @@ std::shared_ptr<PathSubstitutionGoal> Worker::makePathSubstitutionGoal(const Sto
     return goal;
 }
 
+
 std::shared_ptr<DrvOutputSubstitutionGoal> Worker::makeDrvOutputSubstitutionGoal(const DrvOutput& id, RepairFlag repair, std::optional<ContentAddress> ca)
 {
     std::weak_ptr<DrvOutputSubstitutionGoal> & goal_weak = drvOutputSubstitutionGoals[id];
@@ -103,6 +105,20 @@ std::shared_ptr<DrvOutputSubstitutionGoal> Worker::makeDrvOutputSubstitutionGoal
     }
     return goal;
 }
+
+
+GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
+{
+    return std::visit(overloaded {
+        [&](const DerivedPath::Built & bfd) -> GoalPtr {
+            return makeDerivationGoal(bfd.drvPath, bfd.outputs, buildMode);
+        },
+        [&](const DerivedPath::Opaque & bo) -> GoalPtr {
+            return makePathSubstitutionGoal(bo.path, buildMode == bmRepair ? Repair : NoRepair);
+        },
+    }, req.raw());
+}
+
 
 template<typename K, typename G>
 static void removeGoal(std::shared_ptr<G> goal, std::map<K, std::weak_ptr<G>> & goalMap)
@@ -161,6 +177,12 @@ unsigned Worker::getNrLocalBuilds()
 }
 
 
+unsigned Worker::getNrSubstitutions()
+{
+    return nrSubstitutions;
+}
+
+
 void Worker::childStarted(GoalPtr goal, const std::set<int> & fds,
     bool inBuildSlot, bool respectTimeouts)
 {
@@ -172,7 +194,10 @@ void Worker::childStarted(GoalPtr goal, const std::set<int> & fds,
     child.inBuildSlot = inBuildSlot;
     child.respectTimeouts = respectTimeouts;
     children.emplace_back(child);
-    if (inBuildSlot) nrLocalBuilds++;
+    if (inBuildSlot) {
+        if (goal->jobCategory() == JobCategory::Substitution) nrSubstitutions++;
+        else nrLocalBuilds++;
+    }
 }
 
 
@@ -183,8 +208,13 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
     if (i == children.end()) return;
 
     if (i->inBuildSlot) {
-        assert(nrLocalBuilds > 0);
-        nrLocalBuilds--;
+        if (goal->jobCategory() == JobCategory::Substitution) {
+            assert(nrSubstitutions > 0);
+            nrSubstitutions--;
+        } else {
+            assert(nrLocalBuilds > 0);
+            nrLocalBuilds--;
+        }
     }
 
     children.erase(i);
@@ -205,7 +235,9 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
 void Worker::waitForBuildSlot(GoalPtr goal)
 {
     debug("wait for build slot");
-    if (getNrLocalBuilds() < settings.maxBuildJobs)
+    bool isSubstitutionGoal = goal->jobCategory() == JobCategory::Substitution;
+    if ((!isSubstitutionGoal && getNrLocalBuilds() < settings.maxBuildJobs) ||
+        (isSubstitutionGoal && getNrSubstitutions() < settings.maxSubstitutionJobs))
         wakeUp(goal); /* we can do it right away */
     else
         addToWeakGoals(wantingToBuild, goal);

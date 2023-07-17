@@ -46,7 +46,15 @@ std::pair<Value *, PosIdx> InstallableAttrPath::toValue(EvalState & state)
 
 DerivedPathsWithInfo InstallableAttrPath::toDerivedPaths()
 {
-    auto v = toValue(*state).first;
+    auto [v, pos] = toValue(*state);
+
+    if (std::optional derivedPathWithInfo = trySinglePathToDerivedPaths(
+        *v,
+        pos,
+        fmt("while evaluating the attribute '%s'", attrPath)))
+    {
+        return { *derivedPathWithInfo };
+    }
 
     Bindings & autoArgs = *cmd.getAutoArgs(*state);
 
@@ -87,6 +95,10 @@ DerivedPathsWithInfo InstallableAttrPath::toDerivedPaths()
                 .drvPath = drvPath,
                 .outputs = outputs,
             },
+            .info = make_ref<ExtraPathInfoValue>(ExtraPathInfoValue::Value {
+                /* FIXME: reconsider backwards compatibility above
+                   so we can fill in this info. */
+            }),
         });
 
     return res;

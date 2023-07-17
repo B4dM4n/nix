@@ -1,4 +1,5 @@
 nix_tests = \
+  test-infra.sh \
   init.sh \
   flakes/flakes.sh \
   flakes/run.sh \
@@ -12,10 +13,13 @@ nix_tests = \
   flakes/unlocked-override.sh \
   flakes/absolute-paths.sh \
   flakes/build-paths.sh \
+  flakes/flake-in-submodule.sh \
   ca/gc.sh \
   gc.sh \
   remote-store.sh \
+  legacy-ssh-store.sh \
   lang.sh \
+  experimental-features.sh \
   fetchMercurial.sh \
   gc-auto.sh \
   user-envs.sh \
@@ -66,6 +70,11 @@ nix_tests = \
   check-reqs.sh \
   build-remote-content-addressed-fixed.sh \
   build-remote-content-addressed-floating.sh \
+  build-remote-trustless-should-pass-0.sh \
+  build-remote-trustless-should-pass-1.sh \
+  build-remote-trustless-should-pass-2.sh \
+  build-remote-trustless-should-pass-3.sh \
+  build-remote-trustless-should-fail-0.sh \
   nar-access.sh \
   pure-eval.sh \
   eval.sh \
@@ -98,8 +107,12 @@ nix_tests = \
   eval-store.sh \
   why-depends.sh \
   ca/why-depends.sh \
+  derivation-json.sh \
+  ca/derivation-json.sh \
   import-derivation.sh \
   ca/import-derivation.sh \
+  dyn-drv/text-hashed-output.sh \
+  dyn-drv/recursive-mod-json.sh \
   nix_path.sh \
   case-hack.sh \
   placeholders.sh \
@@ -113,7 +126,6 @@ nix_tests = \
   db-migration.sh \
   bash-profile.sh \
   pass-as-file.sh \
-  describe-stores.sh \
   nix-profile.sh \
   suggestions.sh \
   store-ping.sh \
@@ -128,11 +140,19 @@ ifeq ($(HAVE_LIBCPUID), 1)
 	nix_tests += compute-levels.sh
 endif
 
-install-tests += $(foreach x, $(nix_tests), tests/$(x))
+install-tests += $(foreach x, $(nix_tests), $(d)/$(x))
 
-clean-files += $(d)/tests/common/vars-and-functions.sh $(d)/config.nix $(d)/ca/config.nix
+clean-files += \
+  $(d)/common/vars-and-functions.sh \
+  $(d)/config.nix \
+  $(d)/ca/config.nix \
+  $(d)/dyn-drv/config.nix
 
-test-deps += tests/common/vars-and-functions.sh tests/config.nix tests/ca/config.nix tests/plugins/libplugintest.$(SO_EXT)
+test-deps += \
+  tests/common/vars-and-functions.sh \
+  tests/config.nix \
+  tests/ca/config.nix \
+  tests/dyn-drv/config.nix
 
 ifeq ($(BUILD_SHARED_LIBS), 1)
   test-deps += tests/plugins/libplugintest.$(SO_EXT)

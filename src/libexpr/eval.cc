@@ -4,10 +4,13 @@
 #include "util.hh"
 #include "store-api.hh"
 #include "derivations.hh"
+#include "downstream-placeholder.hh"
 #include "globals.hh"
 #include "eval-inline.hh"
 #include "filetransfer.hh"
 #include "function-trace.hh"
+#include "profiles.hh"
+#include "print.hh"
 
 #include <algorithm>
 #include <chrono>
@@ -92,7 +95,6 @@ RootValue allocRootValue(Value * v)
 #endif
 }
 
-
 void Value::print(const SymbolTable & symbols, std::ostream & str,
     std::set<const void *> * seen) const
 {
@@ -103,21 +105,13 @@ void Value::print(const SymbolTable & symbols, std::ostream & str,
         str << integer;
         break;
     case tBool:
-        str << (boolean ? "true" : "false");
+        printLiteralBool(str, boolean);
         break;
     case tString:
-        str << "\"";
-        for (const char * i = string.s; *i; i++)
-            if (*i == '\"' || *i == '\\') str << "\\" << *i;
-            else if (*i == '\n') str << "\\n";
-            else if (*i == '\r') str << "\\r";
-            else if (*i == '\t') str << "\\t";
-            else if (*i == '$' && *(i+1) == '{') str << "\\" << *i;
-            else str << *i;
-        str << "\"";
+        printLiteralString(str, string.s);
         break;
     case tPath:
-        str << path; // !!! escaping?
+        str << path().to_string(); // !!! escaping?
         break;
     case tNull:
         str << "null";
@@ -172,7 +166,17 @@ void Value::print(const SymbolTable & symbols, std::ostream & str,
     case tFloat:
         str << fpoint;
         break;
+    case tBlackhole:
+        // Although we know for sure that it's going to be an infinite recursion
+        // when this value is accessed _in the current context_, it's likely
+        // that the user will misinterpret a simpler «infinite recursion» output
+        // as a definitive statement about the value, while in fact it may be
+        // a valid value after `builtins.trace` and perhaps some other steps
+        // have completed.
+        str << "«potential infinite recursion»";
+        break;
     default:
+        printError("Nix evaluator internal error: Value::print(): invalid value type %1%", internalType);
         abort();
     }
 }
@@ -228,6 +232,9 @@ std::string_view showType(ValueType type)
 
 std::string showType(const Value & v)
 {
+    // Allow selecting a subset of enum values
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wswitch-enum"
     switch (v.internalType) {
         case tString: return v.string.context ? "a string with context" : "a string";
         case tPrimOp:
@@ -241,16 +248,21 @@ std::string showType(const Value & v)
     default:
         return std::string(showType(v.type()));
     }
+    #pragma GCC diagnostic pop
 }
 
 PosIdx Value::determinePos(const PosIdx pos) const
 {
+    // Allow selecting a subset of enum values
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wswitch-enum"
     switch (internalType) {
         case tAttrs: return attrs->pos;
         case tLambda: return lambda.fun->pos;
         case tApp: return app.left->determinePos(pos);
         default: return pos;
     }
+    #pragma GCC diagnostic pop
 }
 
 bool Value::isTrivial() const
@@ -325,6 +337,22 @@ static Symbol getName(const AttrName & name, EvalState & state, Env & env)
     }
 }
 
+#if HAVE_BOEHMGC
+/* Disable GC while this object lives. Used by CoroutineContext.
+ *
+ * Boehm keeps a count of GC_disable() and GC_enable() calls,
+ * and only enables GC when the count matches.
+ */
+class BoehmDisableGC {
+public:
+    BoehmDisableGC() {
+        GC_disable();
+    };
+    ~BoehmDisableGC() {
+        GC_enable();
+    };
+};
+#endif
 
 static bool gcInitialised = false;
 
@@ -349,6 +377,15 @@ void initGC()
 
     StackAllocator::defaultAllocator = &boehmGCStackAllocator;
 
+
+#if NIX_BOEHM_PATCH_VERSION != 1
+    printTalkative("Unpatched BoehmGC, disabling GC inside coroutines");
+    /* Used to disable GC when entering coroutines on macOS */
+    create_coro_gc_hook = []() -> std::shared_ptr<void> {
+        return std::make_shared<BoehmDisableGC>();
+    };
+#endif
+
     /* Set the initial heap size to something fairly big (25% of
        physical RAM, up to a maximum of 384 MiB) so that in most cases
        we don't need to garbage collect at all.  (Collection has a
@@ -368,7 +405,7 @@ void initGC()
             size = (pageSize * pages) / 4; // 25% of RAM
         if (size > maxSize) size = maxSize;
 #endif
-        debug(format("setting initial heap size to %1% bytes") % size);
+        debug("setting initial heap size to %1% bytes", size);
         GC_expand_hp(size);
     }
 
@@ -498,6 +535,7 @@ EvalState::EvalState(
     , sOutputSpecified(symbols.create("outputSpecified"))
     , repair(NoRepair)
     , emptyBindings(0)
+    , derivationInternal(rootPath(CanonPath("/builtin/derivation.nix")))
     , store(store)
     , buildStore(buildStore ? buildStore : store)
     , debugRepl(nullptr)
@@ -572,15 +610,14 @@ void EvalState::allowAndSetStorePathString(const StorePath & storePath, Value & 
 {
     allowPath(storePath);
 
-    auto path = store->printStorePath(storePath);
-    v.mkString(path, PathSet({path}));
+    mkStorePathString(storePath, v);
 }
 
-Path EvalState::checkSourcePath(const Path & path_)
+SourcePath EvalState::checkSourcePath(const SourcePath & path_)
 {
     if (!allowedPaths) return path_;
 
-    auto i = resolvedPaths.find(path_);
+    auto i = resolvedPaths.find(path_.path.abs());
     if (i != resolvedPaths.end())
         return i->second;
 
@@ -590,9 +627,9 @@ Path EvalState::checkSourcePath(const Path & path_)
      * attacker can't append ../../... to a path that would be in allowedPaths
      * and thus leak symlink targets.
      */
-    Path abspath = canonPath(path_);
+    Path abspath = canonPath(path_.path.abs());
 
-    if (hasPrefix(abspath, corepkgsPrefix)) return abspath;
+    if (hasPrefix(abspath, corepkgsPrefix)) return CanonPath(abspath);
 
     for (auto & i : *allowedPaths) {
         if (isDirOrInDir(abspath, i)) {
@@ -609,12 +646,12 @@ Path EvalState::checkSourcePath(const Path & path_)
     }
 
     /* Resolve symlinks. */
-    debug(format("checking access to '%s'") % abspath);
-    Path path = canonPath(abspath, true);
+    debug("checking access to '%s'", abspath);
+    SourcePath path = CanonPath(canonPath(abspath, true));
 
     for (auto & i : *allowedPaths) {
-        if (isDirOrInDir(path, i)) {
-            resolvedPaths[path_] = path;
+        if (isDirOrInDir(path.path.abs(), i)) {
+            resolvedPaths.insert_or_assign(path_.path.abs(), path);
             return path;
         }
     }
@@ -642,12 +679,12 @@ void EvalState::checkURI(const std::string & uri)
     /* If the URI is a path, then check it against allowedPaths as
        well. */
     if (hasPrefix(uri, "/")) {
-        checkSourcePath(uri);
+        checkSourcePath(CanonPath(uri));
         return;
     }
 
     if (hasPrefix(uri, "file://")) {
-        checkSourcePath(std::string(uri, 7));
+        checkSourcePath(CanonPath(std::string(uri, 7)));
         return;
     }
 
@@ -655,7 +692,7 @@ void EvalState::checkURI(const std::string & uri)
 }
 
 
-Path EvalState::toRealPath(const Path & path, const PathSet & context)
+Path EvalState::toRealPath(const Path & path, const NixStringContext & context)
 {
     // FIXME: check whether 'path' is in 'context'.
     return
@@ -907,34 +944,34 @@ void Value::mkString(std::string_view s)
 }
 
 
-static void copyContextToValue(Value & v, const PathSet & context)
+static void copyContextToValue(Value & v, const NixStringContext & context)
 {
     if (!context.empty()) {
         size_t n = 0;
         v.string.context = (const char * *)
             allocBytes((context.size() + 1) * sizeof(char *));
         for (auto & i : context)
-            v.string.context[n++] = dupString(i.c_str());
+            v.string.context[n++] = dupString(i.to_string().c_str());
         v.string.context[n] = 0;
     }
 }
 
-void Value::mkString(std::string_view s, const PathSet & context)
+void Value::mkString(std::string_view s, const NixStringContext & context)
 {
     mkString(s);
     copyContextToValue(*this, context);
 }
 
-void Value::mkStringMove(const char * s, const PathSet & context)
+void Value::mkStringMove(const char * s, const NixStringContext & context)
 {
     mkString(s);
     copyContextToValue(*this, context);
 }
 
 
-void Value::mkPath(std::string_view s)
+void Value::mkPath(const SourcePath & path)
 {
-    mkPath(makeImmutableString(s));
+    mkPath(makeImmutableString(path.path.abs()));
 }
 
 
@@ -990,14 +1027,45 @@ void EvalState::mkThunk_(Value & v, Expr * expr)
 void EvalState::mkPos(Value & v, PosIdx p)
 {
     auto pos = positions[p];
-    if (auto path = std::get_if<Path>(&pos.origin)) {
+    if (auto path = std::get_if<SourcePath>(&pos.origin)) {
         auto attrs = buildBindings(3);
-        attrs.alloc(sFile).mkString(*path);
+        attrs.alloc(sFile).mkString(path->path.abs());
         attrs.alloc(sLine).mkInt(pos.line);
         attrs.alloc(sColumn).mkInt(pos.column);
         v.mkAttrs(attrs);
     } else
         v.mkNull();
+}
+
+
+void EvalState::mkStorePathString(const StorePath & p, Value & v)
+{
+    v.mkString(
+        store->printStorePath(p),
+        NixStringContext {
+            NixStringContextElem::Opaque { .path = p },
+        });
+}
+
+
+void EvalState::mkOutputString(
+    Value & value,
+    const StorePath & drvPath,
+    const std::string outputName,
+    std::optional<StorePath> optOutputPath)
+{
+    value.mkString(
+        optOutputPath
+            ? store->printStorePath(*std::move(optOutputPath))
+            /* Downstream we would substitute this for an actual path once
+               we build the floating CA derivation */
+            : DownstreamPlaceholder::unknownCaOutput(drvPath, outputName).render(),
+        NixStringContext {
+            NixStringContextElem::Built {
+                .drvPath = drvPath,
+                .output = outputName,
+            }
+        });
 }
 
 
@@ -1048,7 +1116,7 @@ Value * ExprPath::maybeThunk(EvalState & state, Env & env)
 }
 
 
-void EvalState::evalFile(const Path & path_, Value & v, bool mustBeTrivial)
+void EvalState::evalFile(const SourcePath & path_, Value & v, bool mustBeTrivial)
 {
     auto path = checkSourcePath(path_);
 
@@ -1058,7 +1126,7 @@ void EvalState::evalFile(const Path & path_, Value & v, bool mustBeTrivial)
         return;
     }
 
-    Path resolvedPath = resolveExprPath(path);
+    auto resolvedPath = resolveExprPath(path);
     if ((i = fileEvalCache.find(resolvedPath)) != fileEvalCache.end()) {
         v = i->second;
         return;
@@ -1086,8 +1154,8 @@ void EvalState::resetFileCache()
 
 
 void EvalState::cacheFile(
-    const Path & path,
-    const Path & resolvedPath,
+    const SourcePath & path,
+    const SourcePath & resolvedPath,
     Expr * e,
     Value & v,
     bool mustBeTrivial)
@@ -1101,7 +1169,7 @@ void EvalState::cacheFile(
                 *e,
                 this->baseEnv,
                 e->getPos() ? static_cast<std::shared_ptr<AbstractPos>>(positions[e->getPos()]) : nullptr,
-                "while evaluating the file '%1%':", resolvedPath)
+                "while evaluating the file '%1%':", resolvedPath.to_string())
             : nullptr;
 
         // Enforce that 'flake.nix' is a direct attrset, not a
@@ -1111,7 +1179,7 @@ void EvalState::cacheFile(
             error("file '%s' must be an attribute set", path).debugThrow<EvalError>();
         eval(e, v);
     } catch (Error & e) {
-        addErrorTrace(e, "while evaluating the file '%1%':", resolvedPath);
+        addErrorTrace(e, "while evaluating the file '%1%':", resolvedPath.to_string());
         throw;
     }
 
@@ -1372,8 +1440,8 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
     } catch (Error & e) {
         if (pos2) {
             auto pos2r = state.positions[pos2];
-            auto origin = std::get_if<Path>(&pos2r.origin);
-            if (!(origin && *origin == state.derivationNixPath))
+            auto origin = std::get_if<SourcePath>(&pos2r.origin);
+            if (!(origin && *origin == state.derivationInternal))
                 state.addErrorTrace(e, pos2, "while evaluating the attribute '%1%'",
                     showAttrPath(state, env, attrPath));
         }
@@ -1863,7 +1931,7 @@ void EvalState::concatLists(Value & v, size_t nrLists, Value * * lists, const Po
 
 void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
 {
-    PathSet context;
+    NixStringContext context;
     std::vector<BackedStringView> s;
     size_t sSize = 0;
     NixInt n = 0;
@@ -1946,7 +2014,7 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
     else if (firstType == nPath) {
         if (!context.empty())
             state.error("a string that refers to a store path cannot be appended to a path").atPos(pos).withFrame(env, *this).debugThrow<EvalError>();
-        v.mkPath(canonPath(str()));
+        v.mkPath(CanonPath(canonPath(str())));
     } else
         v.mkStringMove(c_str(), context);
 }
@@ -2072,26 +2140,15 @@ std::string_view EvalState::forceString(Value & v, const PosIdx pos, std::string
 }
 
 
-void copyContext(const Value & v, PathSet & context)
+void copyContext(const Value & v, NixStringContext & context)
 {
     if (v.string.context)
         for (const char * * p = v.string.context; *p; ++p)
-            context.insert(*p);
+            context.insert(NixStringContextElem::parse(*p));
 }
 
 
-NixStringContext Value::getContext(const Store & store)
-{
-    NixStringContext res;
-    assert(internalType == tString);
-    if (string.context)
-        for (const char * * p = string.context; *p; ++p)
-            res.push_back(NixStringContextElem::parse(store, *p));
-    return res;
-}
-
-
-std::string_view EvalState::forceString(Value & v, PathSet & context, const PosIdx pos, std::string_view errorCtx)
+std::string_view EvalState::forceString(Value & v, NixStringContext & context, const PosIdx pos, std::string_view errorCtx)
 {
     auto s = forceString(v, pos, errorCtx);
     copyContext(v, context);
@@ -2121,7 +2178,7 @@ bool EvalState::isDerivation(Value & v)
 
 
 std::optional<std::string> EvalState::tryAttrsToString(const PosIdx pos, Value & v,
-    PathSet & context, bool coerceMore, bool copyToStore)
+    NixStringContext & context, bool coerceMore, bool copyToStore)
 {
     auto i = v.attrs->find(sToString);
     if (i != v.attrs->end()) {
@@ -2135,8 +2192,14 @@ std::optional<std::string> EvalState::tryAttrsToString(const PosIdx pos, Value &
     return {};
 }
 
-BackedStringView EvalState::coerceToString(const PosIdx pos, Value &v, PathSet &context,
-    std::string_view errorCtx, bool coerceMore, bool copyToStore, bool canonicalizePath)
+BackedStringView EvalState::coerceToString(
+    const PosIdx pos,
+    Value & v,
+    NixStringContext & context,
+    std::string_view errorCtx,
+    bool coerceMore,
+    bool copyToStore,
+    bool canonicalizePath)
 {
     forceValue(v, pos);
 
@@ -2146,12 +2209,14 @@ BackedStringView EvalState::coerceToString(const PosIdx pos, Value &v, PathSet &
     }
 
     if (v.type() == nPath) {
-        BackedStringView path(PathView(v.path));
-        if (canonicalizePath)
-            path = canonPath(*path);
-        if (copyToStore)
-            path = store->printStorePath(copyPathToStore(context, std::move(path).toOwned()));
-        return path;
+        return
+            !canonicalizePath && !copyToStore
+            ? // FIXME: hack to preserve path literals that end in a
+              // slash, as in /foo/${x}.
+              v._path
+            : copyToStore
+            ? store->printStorePath(copyPathToStore(context, v.path()))
+            : std::string(v.path().path.abs());
     }
 
     if (v.type() == nAttrs) {
@@ -2212,45 +2277,119 @@ BackedStringView EvalState::coerceToString(const PosIdx pos, Value &v, PathSet &
 }
 
 
-StorePath EvalState::copyPathToStore(PathSet & context, const Path & path)
+StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePath & path)
 {
-    if (nix::isDerivation(path))
+    if (nix::isDerivation(path.path.abs()))
         error("file names are not allowed to end in '%1%'", drvExtension).debugThrow<EvalError>();
 
-    auto dstPath = [&]() -> StorePath
-    {
-        auto i = srcToStore.find(path);
-        if (i != srcToStore.end()) return i->second;
+    auto i = srcToStore.find(path);
 
-        auto dstPath = settings.readOnlyMode
-            ? store->computeStorePathForPath(std::string(baseNameOf(path)), checkSourcePath(path)).first
-            : store->addToStore(std::string(baseNameOf(path)), checkSourcePath(path), FileIngestionMethod::Recursive, htSHA256, defaultPathFilter, repair);
-        allowPath(dstPath);
-        srcToStore.insert_or_assign(path, dstPath);
-        printMsg(lvlChatty, "copied source '%1%' -> '%2%'", path, store->printStorePath(dstPath));
-        return dstPath;
-    }();
+    auto dstPath = i != srcToStore.end()
+        ? i->second
+        : [&]() {
+            auto dstPath = path.fetchToStore(store, path.baseName(), nullptr, repair);
+            allowPath(dstPath);
+            srcToStore.insert_or_assign(path, dstPath);
+            printMsg(lvlChatty, "copied source '%1%' -> '%2%'", path, store->printStorePath(dstPath));
+            return dstPath;
+        }();
 
-    context.insert(store->printStorePath(dstPath));
+    context.insert(NixStringContextElem::Opaque {
+        .path = dstPath
+    });
     return dstPath;
 }
 
 
-Path EvalState::coerceToPath(const PosIdx pos, Value & v, PathSet & context, std::string_view errorCtx)
+SourcePath EvalState::coerceToPath(const PosIdx pos, Value & v, NixStringContext & context, std::string_view errorCtx)
 {
     auto path = coerceToString(pos, v, context, errorCtx, false, false, true).toOwned();
     if (path == "" || path[0] != '/')
         error("string '%1%' doesn't represent an absolute path", path).withTrace(pos, errorCtx).debugThrow<EvalError>();
-    return path;
+    return CanonPath(path);
 }
 
 
-StorePath EvalState::coerceToStorePath(const PosIdx pos, Value & v, PathSet & context, std::string_view errorCtx)
+StorePath EvalState::coerceToStorePath(const PosIdx pos, Value & v, NixStringContext & context, std::string_view errorCtx)
 {
     auto path = coerceToString(pos, v, context, errorCtx, false, false, true).toOwned();
     if (auto storePath = store->maybeParseStorePath(path))
         return *storePath;
     error("path '%1%' is not in the Nix store", path).withTrace(pos, errorCtx).debugThrow<EvalError>();
+}
+
+
+std::pair<DerivedPath, std::string_view> EvalState::coerceToDerivedPathUnchecked(const PosIdx pos, Value & v, std::string_view errorCtx)
+{
+    NixStringContext context;
+    auto s = forceString(v, context, pos, errorCtx);
+    auto csize = context.size();
+    if (csize != 1)
+        error(
+            "string '%s' has %d entries in its context. It should only have exactly one entry",
+            s, csize)
+            .withTrace(pos, errorCtx).debugThrow<EvalError>();
+    auto derivedPath = std::visit(overloaded {
+        [&](NixStringContextElem::Opaque && o) -> DerivedPath {
+            return DerivedPath::Opaque {
+                .path = std::move(o.path),
+            };
+        },
+        [&](NixStringContextElem::DrvDeep &&) -> DerivedPath {
+            error(
+                "string '%s' has a context which refers to a complete source and binary closure. This is not supported at this time",
+                s).withTrace(pos, errorCtx).debugThrow<EvalError>();
+        },
+        [&](NixStringContextElem::Built && b) -> DerivedPath {
+            return DerivedPath::Built {
+                .drvPath = std::move(b.drvPath),
+                .outputs = OutputsSpec::Names { std::move(b.output) },
+            };
+        },
+    }, ((NixStringContextElem &&) *context.begin()).raw());
+    return {
+        std::move(derivedPath),
+        std::move(s),
+    };
+}
+
+
+DerivedPath EvalState::coerceToDerivedPath(const PosIdx pos, Value & v, std::string_view errorCtx)
+{
+    auto [derivedPath, s_] = coerceToDerivedPathUnchecked(pos, v, errorCtx);
+    auto s = s_;
+    std::visit(overloaded {
+        [&](const DerivedPath::Opaque & o) {
+            auto sExpected = store->printStorePath(o.path);
+            if (s != sExpected)
+                error(
+                    "path string '%s' has context with the different path '%s'",
+                    s, sExpected)
+                    .withTrace(pos, errorCtx).debugThrow<EvalError>();
+        },
+        [&](const DerivedPath::Built & b) {
+            // TODO need derived path with single output to make this
+            // total. Will add as part of RFC 92 work and then this is
+            // cleaned up.
+            auto output = *std::get<OutputsSpec::Names>(b.outputs).begin();
+
+            auto drv = store->readDerivation(b.drvPath);
+            auto i = drv.outputs.find(output);
+            if (i == drv.outputs.end())
+                throw Error("derivation '%s' does not have output '%s'", store->printStorePath(b.drvPath), output);
+            auto optOutputPath = i->second.path(*store, drv.name, output);
+            // This is testing for the case of CA derivations
+            auto sExpected = optOutputPath
+                ? store->printStorePath(*optOutputPath)
+                : DownstreamPlaceholder::unknownCaOutput(b.drvPath, output).render();
+            if (s != sExpected)
+                error(
+                    "string '%s' has context with the output '%s' from derivation '%s', but the string is not the right placeholder for this derivation output. It should be '%s'",
+                    s, output, store->printStorePath(b.drvPath), sExpected)
+                    .withTrace(pos, errorCtx).debugThrow<EvalError>();
+        }
+    }, derivedPath.raw());
+    return derivedPath;
 }
 
 
@@ -2284,7 +2423,7 @@ bool EvalState::eqValues(Value & v1, Value & v2, const PosIdx pos, std::string_v
             return strcmp(v1.string.s, v2.string.s) == 0;
 
         case nPath:
-            return strcmp(v1.path, v2.path) == 0;
+            return strcmp(v1._path, v2._path) == 0;
 
         case nNull:
             return true;
@@ -2326,6 +2465,7 @@ bool EvalState::eqValues(Value & v1, Value & v2, const PosIdx pos, std::string_v
         case nFloat:
             return v1.fpoint == v2.fpoint;
 
+        case nThunk: // Must not be left by forceValue
         default:
             error("cannot compare %1% with %2%", showType(v1), showType(v2)).withTrace(pos, errorCtx).debugThrow<EvalError>();
     }
@@ -2410,8 +2550,8 @@ void EvalState::printStats()
                     else
                         obj["name"] = nullptr;
                     if (auto pos = positions[fun->pos]) {
-                        if (auto path = std::get_if<Path>(&pos.origin))
-                            obj["file"] = *path;
+                        if (auto path = std::get_if<SourcePath>(&pos.origin))
+                            obj["file"] = path->to_string();
                         obj["line"] = pos.line;
                         obj["column"] = pos.column;
                     }
@@ -2425,8 +2565,8 @@ void EvalState::printStats()
                 for (auto & i : attrSelects) {
                     json obj = json::object();
                     if (auto pos = positions[i.first]) {
-                        if (auto path = std::get_if<Path>(&pos.origin))
-                            obj["file"] = *path;
+                        if (auto path = std::get_if<SourcePath>(&pos.origin))
+                            obj["file"] = path->to_string();
                         obj["line"] = pos.line;
                         obj["column"] = pos.column;
                     }
@@ -2451,7 +2591,7 @@ void EvalState::printStats()
 }
 
 
-std::string ExternalValueBase::coerceToString(const Pos & pos, PathSet & context, bool copyMore, bool copyToStore) const
+std::string ExternalValueBase::coerceToString(const Pos & pos, NixStringContext & context, bool copyMore, bool copyToStore) const
 {
     throw TypeError({
         .msg = hintfmt("cannot coerce %1% to a string", showType())
@@ -2480,7 +2620,7 @@ Strings EvalSettings::getDefaultNixPath()
 {
     Strings res;
     auto add = [&](const Path & p, const std::string & s = std::string()) {
-        if (pathExists(p)) {
+        if (pathAccessible(p)) {
             if (s.empty()) {
                 res.push_back(p);
             } else {
@@ -2491,8 +2631,8 @@ Strings EvalSettings::getDefaultNixPath()
 
     if (!evalSettings.restrictEval && !evalSettings.pureEval) {
         add(settings.useXDGBaseDirectories ? getStateDir() + "/nix/defexpr/channels" : getHome() + "/.nix-defexpr/channels");
-        add(settings.nixStateDir + "/profiles/per-user/root/channels/nixpkgs", "nixpkgs");
-        add(settings.nixStateDir + "/profiles/per-user/root/channels");
+        add(rootChannelsDir() + "/nixpkgs", "nixpkgs");
+        add(rootChannelsDir());
     }
 
     return res;
