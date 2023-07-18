@@ -32,6 +32,7 @@ namespace nix {
 struct Sink;
 struct Source;
 
+void initLibUtil();
 
 /**
  * The system for which Nix is compiled.
@@ -118,6 +119,14 @@ struct stat lstat(const Path & path);
  * @return true iff the given path exists.
  */
 bool pathExists(const Path & path);
+
+/**
+ * A version of pathExists that returns false on a permission error.
+ * Useful for inferring default paths across directories that might not
+ * be readable.
+ * @return true iff the given path can be accessed and exists
+ */
+bool pathAccessible(const Path & path);
 
 /**
  * Read the contents (target) of a symbolic link.  The result is not
@@ -414,7 +423,7 @@ pid_t startProcess(std::function<void()> fun, const ProcessOptions & options = P
  */
 std::string runProgram(Path program, bool searchPath = false,
     const Strings & args = Strings(),
-    const std::optional<std::string> & input = {});
+    const std::optional<std::string> & input = {}, bool isInteractive = false);
 
 struct RunOptions
 {
@@ -429,6 +438,7 @@ struct RunOptions
     Source * standardIn = nullptr;
     Sink * standardOut = nullptr;
     bool mergeStderrToStdout = false;
+    bool isInteractive = false;
 };
 
 std::pair<int, std::string> runProgram(RunOptions && options);
@@ -445,6 +455,8 @@ void setStackSize(size_t stackSize);
 /**
  * Restore the original inherited Unix process context (such as signal
  * masks, stack size).
+
+ * See startSignalHandlerThread(), saveSignalMask().
  */
 void restoreProcessContext(bool restoreMounts = true);
 
@@ -814,8 +826,25 @@ class Callback;
 /**
  * Start a thread that handles various signals. Also block those signals
  * on the current thread (and thus any threads created by it).
+ * Saves the signal mask before changing the mask to block those signals.
+ * See saveSignalMask().
  */
 void startSignalHandlerThread();
+
+/**
+ * Saves the signal mask, which is the signal mask that nix will restore
+ * before creating child processes.
+ * See setChildSignalMask() to set an arbitrary signal mask instead of the
+ * current mask.
+ */
+void saveSignalMask();
+
+/**
+ * Sets the signal mask. Like saveSignalMask() but for a signal set that doesn't
+ * necessarily match the current thread's mask.
+ * See saveSignalMask() to set the saved mask to the current mask.
+ */
+void setChildSignalMask(sigset_t *sigs);
 
 struct InterruptCallback
 {

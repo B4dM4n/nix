@@ -28,6 +28,8 @@ enum struct ExperimentalFeature
     AutoAllocateUids,
     Cgroups,
     DiscardReferences,
+    DaemonTrustOverride,
+    DynamicDerivations,
 };
 
 /**

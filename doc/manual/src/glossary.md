@@ -101,11 +101,8 @@
     derivation.
 
   - [output-addressed store object]{#gloss-output-addressed-store-object}\
-    A store object whose store path hashes its content.  This
-    includes derivations, the outputs of
-    [content-addressed derivations](#gloss-content-addressed-derivation),
-    and the outputs of
-    [fixed-output derivations](#gloss-fixed-output-derivation).
+    A [store object] whose [store path] is determined by its contents.
+    This includes derivations, the outputs of [content-addressed derivations](#gloss-content-addressed-derivation), and the outputs of [fixed-output derivations](#gloss-fixed-output-derivation).
 
   - [substitute]{#gloss-substitute}\
     A substitute is a command invocation stored in the [Nix database] that
@@ -127,7 +124,7 @@
     builder can rely on external inputs such as the network or the
     system time) but the Nix model assumes it.
 
-  - Nix database{#gloss-nix-database}\
+  - [Nix database]{#gloss-nix-database}\
     An SQlite database to track [reference]s between [store object]s.
     This is an implementation detail of the [local store].
 
@@ -163,7 +160,7 @@
     build-time dependencies, while the closure of its output path is
     equivalent to its runtime dependencies. For correct deployment it
     is necessary to deploy whole closures, since otherwise at runtime
-    files could be missing. The command `nix-store -qR` prints out
+    files could be missing. The command `nix-store --query --requisites ` prints out
     closures of store paths.
 
     As an example, if the [store object] at path `P` contains a [reference]
@@ -225,3 +222,9 @@
     [string]: ./language/values.md#type-string
     [path]: ./language/values.md#type-path
     [attribute name]: ./language/values.md#attribute-set
+
+  - [experimental feature]{#gloss-experimental-feature}\
+    Not yet stabilized functionality guarded by named experimental feature flags.
+    These flags are enabled or disabled with the [`experimental-features`](./command-ref/conf-file.html#conf-experimental-features) setting.
+
+    See the contribution guide on the [purpose and lifecycle of experimental feaures](@docroot@/contributing/experimental-features.md).

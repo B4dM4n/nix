@@ -12,7 +12,7 @@ struct ExperimentalFeatureDetails
     std::string_view description;
 };
 
-constexpr std::array<ExperimentalFeatureDetails, 11> xpFeatureDetails = {{
+constexpr std::array<ExperimentalFeatureDetails, 13> xpFeatureDetails = {{
     {
         .tag = Xp::CaDerivations,
         .name = "ca-derivations",
@@ -50,6 +50,8 @@ constexpr std::array<ExperimentalFeatureDetails, 11> xpFeatureDetails = {{
             or other impure derivations can rely on impure derivations. Finally,
             an impure derivation cannot also be
             [content-addressed](#xp-feature-ca-derivations).
+
+            This is a more explicit alternative to using [`builtins.currentTime`](@docroot@/language/builtin-constants.md#builtins-currentTime).
         )",
     },
     {
@@ -187,6 +189,29 @@ constexpr std::array<ExperimentalFeatureDetails, 11> xpFeatureDetails = {{
             Allow the use of the [`unsafeDiscardReferences`](@docroot@/language/advanced-attributes.html#adv-attr-unsafeDiscardReferences) attribute in derivations
             that use [structured attributes](@docroot@/language/advanced-attributes.html#adv-attr-structuredAttrs). This disables scanning of outputs for
             runtime dependencies.
+        )",
+    },
+    {
+        .tag = Xp::DaemonTrustOverride,
+        .name = "daemon-trust-override",
+        .description = R"(
+            Allow forcing trusting or not trusting clients with
+            `nix-daemon`. This is useful for testing, but possibly also
+            useful for various experiments with `nix-daemon --stdio`
+            networking.
+        )",
+    },
+    {
+        .tag = Xp::DynamicDerivations,
+        .name = "dynamic-derivations",
+        .description = R"(
+            Allow the use of a few things related to dynamic derivations:
+
+              - "text hashing" derivation outputs, so we can build .drv
+                files.
+
+              - dependencies in derivations on the outputs of
+                derivations that are themselves derivations outputs.
         )",
     },
 }};

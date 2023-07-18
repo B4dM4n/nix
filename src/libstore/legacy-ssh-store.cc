@@ -146,7 +146,7 @@ struct LegacySSHStore : public virtual LegacySSHStoreConfig, public virtual Stor
             auto deriver = readString(conn->from);
             if (deriver != "")
                 info->deriver = parseStorePath(deriver);
-            info->references = worker_proto::read(*this, conn->from, Phantom<StorePathSet> {});
+            info->references = WorkerProto<StorePathSet>::read(*this, conn->from);
             readLongLong(conn->from); // download size
             info->narSize = readLongLong(conn->from);
 
@@ -156,7 +156,7 @@ struct LegacySSHStore : public virtual LegacySSHStoreConfig, public virtual Stor
                     throw Error("NAR hash is now mandatory");
                 info->narHash = Hash::parseAnyPrefixed(s);
             }
-            info->ca = parseContentAddressOpt(readString(conn->from));
+            info->ca = ContentAddress::parseOpt(readString(conn->from));
             info->sigs = readStrings<StringSet>(conn->from);
 
             auto s = readString(conn->from);
@@ -180,7 +180,7 @@ struct LegacySSHStore : public virtual LegacySSHStoreConfig, public virtual Stor
                 << printStorePath(info.path)
                 << (info.deriver ? printStorePath(*info.deriver) : "")
                 << info.narHash.to_string(Base16, false);
-            worker_proto::write(*this, conn->to, info.references);
+            workerProtoWrite(*this, conn->to, info.references);
             conn->to
                 << info.registrationTime
                 << info.narSize
@@ -209,7 +209,7 @@ struct LegacySSHStore : public virtual LegacySSHStoreConfig, public virtual Stor
             conn->to
                 << exportMagic
                 << printStorePath(info.path);
-            worker_proto::write(*this, conn->to, info.references);
+            workerProtoWrite(*this, conn->to, info.references);
             conn->to
                 << (info.deriver ? printStorePath(*info.deriver) : "")
                 << 0
@@ -287,19 +287,18 @@ public:
 
         conn->to.flush();
 
-        BuildResult status {
-            .path = DerivedPath::Built {
-                .drvPath = drvPath,
-                .outputs = OutputsSpec::All { },
-            },
-        };
+        BuildResult status;
         status.status = (BuildResult::Status) readInt(conn->from);
         conn->from >> status.errorMsg;
 
         if (GET_PROTOCOL_MINOR(conn->remoteVersion) >= 3)
             conn->from >> status.timesBuilt >> status.isNonDeterministic >> status.startTime >> status.stopTime;
         if (GET_PROTOCOL_MINOR(conn->remoteVersion) >= 6) {
-            status.builtOutputs = worker_proto::read(*this, conn->from, Phantom<DrvOutputs> {});
+            auto builtOutputs = WorkerProto<DrvOutputs>::read(*this, conn->from);
+            for (auto && [output, realisation] : builtOutputs)
+                status.builtOutputs.insert_or_assign(
+                    std::move(output.outputName),
+                    std::move(realisation));
         }
         return status;
     }
@@ -330,7 +329,7 @@ public:
 
         conn->to.flush();
 
-        BuildResult result { .path = DerivedPath::Opaque { StorePath::dummy } };
+        BuildResult result;
         result.status = (BuildResult::Status) readInt(conn->from);
 
         if (!result.success()) {
@@ -341,6 +340,20 @@ public:
 
     void ensurePath(const StorePath & path) override
     { unsupported("ensurePath"); }
+
+    virtual ref<FSAccessor> getFSAccessor() override
+    { unsupported("getFSAccessor"); }
+
+    /**
+     * The default instance would schedule the work on the client side, but
+     * for consistency with `buildPaths` and `buildDerivation` it should happen
+     * on the remote side.
+     *
+     * We make this fail for now so we can add implement this properly later
+     * without it being a breaking change.
+     */
+    void repairPath(const StorePath & path) override
+    { unsupported("repairPath"); }
 
     void computeFSClosure(const StorePathSet & paths,
         StorePathSet & out, bool flipDirection = false,
@@ -356,10 +369,10 @@ public:
         conn->to
             << cmdQueryClosure
             << includeOutputs;
-        worker_proto::write(*this, conn->to, paths);
+        workerProtoWrite(*this, conn->to, paths);
         conn->to.flush();
 
-        for (auto & i : worker_proto::read(*this, conn->from, Phantom<StorePathSet> {}))
+        for (auto & i : WorkerProto<StorePathSet>::read(*this, conn->from))
             out.insert(i);
     }
 
@@ -372,10 +385,10 @@ public:
             << cmdQueryValidPaths
             << false // lock
             << maybeSubstitute;
-        worker_proto::write(*this, conn->to, paths);
+        workerProtoWrite(*this, conn->to, paths);
         conn->to.flush();
 
-        return worker_proto::read(*this, conn->from, Phantom<StorePathSet> {});
+        return WorkerProto<StorePathSet>::read(*this, conn->from);
     }
 
     void connect() override

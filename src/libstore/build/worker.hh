@@ -88,10 +88,15 @@ private:
     std::list<Child> children;
 
     /**
-     * Number of build slots occupied.  This includes local builds and
-     * substitutions but not remote builds via the build hook.
+     * Number of build slots occupied.  This includes local builds but does not
+     * include substitutions or remote builds via the build hook.
      */
     unsigned int nrLocalBuilds;
+
+    /**
+     * Number of substitution slots occupied.
+     */
+    unsigned int nrSubstitutions;
 
     /**
      * Maps used to prevent multiple instantiations of a goal for the
@@ -181,7 +186,7 @@ public:
      */
 
     /**
-     * derivation goal
+     * @ref DerivationGoal "derivation goal"
      */
 private:
     std::shared_ptr<DerivationGoal> makeDerivationGoalCommon(
@@ -196,10 +201,18 @@ public:
         const OutputsSpec & wantedOutputs, BuildMode buildMode = bmNormal);
 
     /**
-     * substitution goal
+     * @ref SubstitutionGoal "substitution goal"
      */
     std::shared_ptr<PathSubstitutionGoal> makePathSubstitutionGoal(const StorePath & storePath, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
     std::shared_ptr<DrvOutputSubstitutionGoal> makeDrvOutputSubstitutionGoal(const DrvOutput & id, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
+
+    /**
+     * Make a goal corresponding to the `DerivedPath`.
+     *
+     * It will be a `DerivationGoal` for a `DerivedPath::Built` or
+     * a `SubstitutionGoal` for a `DerivedPath::Opaque`.
+     */
+    GoalPtr makeGoal(const DerivedPath & req, BuildMode buildMode = bmNormal);
 
     /**
      * Remove a dead goal.
@@ -212,11 +225,15 @@ public:
     void wakeUp(GoalPtr goal);
 
     /**
-     * Return the number of local build and substitution processes
-     * currently running (but not remote builds via the build
-     * hook).
+     * Return the number of local build processes currently running (but not
+     * remote builds via the build hook).
      */
     unsigned int getNrLocalBuilds();
+
+    /**
+     * Return the number of substitution processes currently running.
+     */
+    unsigned int getNrSubstitutions();
 
     /**
      * Registers a running child process.  `inBuildSlot` means that

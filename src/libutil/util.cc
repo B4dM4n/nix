@@ -47,6 +47,9 @@ extern char * * environ __attribute__((weak));
 
 namespace nix {
 
+void initLibUtil() {
+}
+
 std::optional<std::string> getEnv(const std::string & key)
 {
     char * value = getenv(key.c_str());
@@ -261,6 +264,17 @@ bool pathExists(const Path & path)
     if (errno != ENOENT && errno != ENOTDIR)
         throw SysError("getting status of %1%", path);
     return false;
+}
+
+bool pathAccessible(const Path & path)
+{
+    try {
+        return pathExists(path);
+    } catch (SysError & e) {
+        // swallow EPERM
+        if (e.errNo == EPERM) return false;
+        throw;
+    }
 }
 
 
@@ -1138,9 +1152,9 @@ std::vector<char *> stringsToCharPtrs(const Strings & ss)
 }
 
 std::string runProgram(Path program, bool searchPath, const Strings & args,
-    const std::optional<std::string> & input)
+    const std::optional<std::string> & input, bool isInteractive)
 {
-    auto res = runProgram(RunOptions {.program = program, .searchPath = searchPath, .args = args, .input = input});
+    auto res = runProgram(RunOptions {.program = program, .searchPath = searchPath, .args = args, .input = input, .isInteractive = isInteractive});
 
     if (!statusOk(res.first))
         throw ExecError(res.first, "program '%1%' %2%", program, statusToString(res.first));
@@ -1189,6 +1203,16 @@ void runProgram2(const RunOptions & options)
     // be shared (technically this is undefined, but in practice that's the
     // case), so we can't use it if we alter the environment
     processOptions.allowVfork = !options.environment;
+
+    std::optional<Finally<std::function<void()>>> resumeLoggerDefer;
+    if (options.isInteractive) {
+        logger->pause();
+        resumeLoggerDefer.emplace(
+            []() {
+                logger->resume();
+            }
+        );
+    }
 
     /* Fork. */
     Pid pid = startProcess([&]() {
@@ -1744,13 +1768,39 @@ void triggerInterrupt()
 }
 
 static sigset_t savedSignalMask;
+static bool savedSignalMaskIsSet = false;
+
+void setChildSignalMask(sigset_t * sigs)
+{
+    assert(sigs); // C style function, but think of sigs as a reference
+
+#if _POSIX_C_SOURCE >= 1 || _XOPEN_SOURCE || _POSIX_SOURCE
+    sigemptyset(&savedSignalMask);
+    // There's no "assign" or "copy" function, so we rely on (math) idempotence
+    // of the or operator: a or a = a.
+    sigorset(&savedSignalMask, sigs, sigs);
+#else
+    // Without sigorset, our best bet is to assume that sigset_t is a type that
+    // can be assigned directly, such as is the case for a sigset_t defined as
+    // an integer type.
+    savedSignalMask = *sigs;
+#endif
+
+    savedSignalMaskIsSet = true;
+}
+
+void saveSignalMask() {
+    if (sigprocmask(SIG_BLOCK, nullptr, &savedSignalMask))
+        throw SysError("querying signal mask");
+
+    savedSignalMaskIsSet = true;
+}
 
 void startSignalHandlerThread()
 {
     updateWindowSize();
 
-    if (sigprocmask(SIG_BLOCK, nullptr, &savedSignalMask))
-        throw SysError("querying signal mask");
+    saveSignalMask();
 
     sigset_t set;
     sigemptyset(&set);
@@ -1767,6 +1817,20 @@ void startSignalHandlerThread()
 
 static void restoreSignals()
 {
+    // If startSignalHandlerThread wasn't called, that means we're not running
+    // in a proper libmain process, but a process that presumably manages its
+    // own signal handlers. Such a process should call either
+    //  - initNix(), to be a proper libmain process
+    //  - startSignalHandlerThread(), to resemble libmain regarding signal
+    //    handling only
+    //  - saveSignalMask(), for processes that define their own signal handling
+    //    thread
+    // TODO: Warn about this? Have a default signal mask? The latter depends on
+    //       whether we should generally inherit signal masks from the caller.
+    //       I don't know what the larger unix ecosystem expects from us here.
+    if (!savedSignalMaskIsSet)
+        return;
+
     if (sigprocmask(SIG_SETMASK, &savedSignalMask, nullptr))
         throw SysError("restoring signals");
 }
