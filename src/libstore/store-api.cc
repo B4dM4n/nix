@@ -445,10 +445,10 @@ StringSet StoreConfig::getDefaultSystemFeatures()
 {
     auto res = settings.systemFeatures.get();
 
-    if (settings.isExperimentalFeatureEnabled(Xp::CaDerivations))
+    if (experimentalFeatureSettings.isEnabled(Xp::CaDerivations))
         res.insert("ca-derivations");
 
-    if (settings.isExperimentalFeatureEnabled(Xp::RecursiveNix))
+    if (experimentalFeatureSettings.isEnabled(Xp::RecursiveNix))
         res.insert("recursive-nix");
 
     return res;
@@ -506,6 +506,54 @@ StorePathSet Store::queryDerivationOutputs(const StorePath & path)
     }
     return outputPaths;
 }
+
+
+void Store::querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+{
+    if (!settings.useSubstitutes) return;
+    for (auto & sub : getDefaultSubstituters()) {
+        for (auto & path : paths) {
+            if (infos.count(path.first))
+                // Choose first succeeding substituter.
+                continue;
+
+            auto subPath(path.first);
+
+            // Recompute store path so that we can use a different store root.
+            if (path.second) {
+                subPath = makeFixedOutputPathFromCA(path.first.name(), *path.second);
+                if (sub->storeDir == storeDir)
+                    assert(subPath == path.first);
+                if (subPath != path.first)
+                    debug("replaced path '%s' with '%s' for substituter '%s'", printStorePath(path.first), sub->printStorePath(subPath), sub->getUri());
+            } else if (sub->storeDir != storeDir) continue;
+
+            debug("checking substituter '%s' for path '%s'", sub->getUri(), sub->printStorePath(subPath));
+            try {
+                auto info = sub->queryPathInfo(subPath);
+
+                if (sub->storeDir != storeDir && !(info->isContentAddressed(*sub) && info->references.empty()))
+                    continue;
+
+                auto narInfo = std::dynamic_pointer_cast<const NarInfo>(
+                    std::shared_ptr<const ValidPathInfo>(info));
+                infos.insert_or_assign(path.first, SubstitutablePathInfo{
+                    info->deriver,
+                    info->references,
+                    narInfo ? narInfo->fileSize : 0,
+                    info->narSize});
+            } catch (InvalidPath &) {
+            } catch (SubstituterDisabled &) {
+            } catch (Error & e) {
+                if (settings.tryFallback)
+                    logError(e.info());
+                else
+                    throw;
+            }
+        }
+    }
+}
+
 
 bool Store::isValidPath(const StorePath & storePath)
 {
@@ -790,13 +838,13 @@ std::string Store::makeValidityRegistration(const StorePathSet & paths,
 
         if (showHash) {
             s += info->narHash.to_string(Base16, false) + "\n";
-            s += (format("%1%\n") % info->narSize).str();
+            s += fmt("%1%\n", info->narSize);
         }
 
         auto deriver = showDerivers && info->deriver ? printStorePath(*info->deriver) : "";
         s += deriver + "\n";
 
-        s += (format("%1%\n") % info->references.size()).str();
+        s += fmt("%1%\n", info->references.size());
 
         for (auto & j : info->references)
             s += printStorePath(j) + "\n";
@@ -855,6 +903,7 @@ json Store::pathInfoToJSON(const StorePathSet & storePaths,
             auto info = queryPathInfo(storePath);
 
             jsonPath["path"] = printStorePath(info->path);
+            jsonPath["valid"] = true;
             jsonPath["narHash"] = info->narHash.to_string(hashBase, true);
             jsonPath["narSize"] = info->narSize;
 
@@ -1016,7 +1065,7 @@ std::map<StorePath, StorePath> copyPaths(
     for (auto & path : paths) {
         storePaths.insert(path.path());
         if (auto realisation = std::get_if<Realisation>(&path.raw)) {
-            settings.requireExperimentalFeature(Xp::CaDerivations);
+            experimentalFeatureSettings.require(Xp::CaDerivations);
             toplevelRealisations.insert(*realisation);
         }
     }
@@ -1100,6 +1149,9 @@ std::map<StorePath, StorePath> copyPaths(
         return storePathForDst;
     };
 
+    // total is accessed by each copy, which are each handled in separate threads
+    std::atomic<uint64_t> total = 0;
+
     for (auto & missingPath : sortedMissing) {
         auto info = srcStore.queryPathInfo(missingPath);
 
@@ -1120,7 +1172,13 @@ std::map<StorePath, StorePath> copyPaths(
                 {storePathS, srcUri, dstUri});
             PushActivity pact(act.id);
 
-            srcStore.narFromPath(missingPath, sink);
+            LambdaSink progressSink([&](std::string_view data) {
+                total += data.size();
+                act.progress(total, info->narSize);
+            });
+            TeeSink tee { sink, progressSink };
+
+            srcStore.narFromPath(missingPath, tee);
         });
         pathsToCopy.push_back(std::pair{infoForDst, std::move(source)});
     }
@@ -1241,7 +1299,7 @@ std::optional<StorePath> Store::getBuildDerivationPath(const StorePath & path)
         }
     }
 
-    if (!settings.isExperimentalFeatureEnabled(Xp::CaDerivations) || !isValidPath(path))
+    if (!experimentalFeatureSettings.isEnabled(Xp::CaDerivations) || !isValidPath(path))
         return path;
 
     auto drv = readDerivation(path);

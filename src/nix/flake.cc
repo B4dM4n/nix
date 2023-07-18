@@ -952,7 +952,7 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun
                 {"path", store->printStorePath(flake.flake.sourceInfo->storePath)},
                 {"inputs", traverse(*flake.lockFile.root)},
             };
-            std::cout << jsonRoot.dump() << std::endl;
+            logger->cout("%s", jsonRoot);
         } else {
             traverse(*flake.lockFile.root);
         }
@@ -1335,8 +1335,7 @@ struct CmdFlake : NixMultiCommand
     {
         if (!command)
             throw UsageError("'nix flake' requires a sub-command.");
-        settings.requireExperimentalFeature(Xp::Flakes);
-        command->second->prepare();
+        experimentalFeatureSettings.require(Xp::Flakes);
         command->second->run();
     }
 };
