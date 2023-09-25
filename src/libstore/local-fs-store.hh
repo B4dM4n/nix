@@ -15,22 +15,22 @@ struct LocalFSStoreConfig : virtual StoreConfig
     // it to omit the call to the Setting constructor. Clang works fine
     // either way.
 
-    const PathSetting rootDir{(StoreConfig*) this, true, "",
+    const OptionalPathSetting rootDir{(StoreConfig*) this, std::nullopt,
         "root",
         "Directory prefixed to all other paths."};
 
-    const PathSetting stateDir{(StoreConfig*) this, false,
-        rootDir != "" ? rootDir + "/nix/var/nix" : settings.nixStateDir,
+    const PathSetting stateDir{(StoreConfig*) this,
+        rootDir.get() ? *rootDir.get() + "/nix/var/nix" : settings.nixStateDir,
         "state",
         "Directory where Nix will store state."};
 
-    const PathSetting logDir{(StoreConfig*) this, false,
-        rootDir != "" ? rootDir + "/nix/var/log/nix" : settings.nixLogDir,
+    const PathSetting logDir{(StoreConfig*) this,
+        rootDir.get() ? *rootDir.get() + "/nix/var/log/nix" : settings.nixLogDir,
         "log",
         "directory where Nix will store log files."};
 
-    const PathSetting realStoreDir{(StoreConfig*) this, false,
-        rootDir != "" ? rootDir + "/nix/store" : storeDir, "real",
+    const PathSetting realStoreDir{(StoreConfig*) this,
+        rootDir.get() ? *rootDir.get() + "/nix/store" : storeDir, "real",
         "Physical path of the Nix store."};
 };
 
@@ -40,6 +40,7 @@ class LocalFSStore : public virtual LocalFSStoreConfig,
     public virtual LogStore
 {
 public:
+    inline static std::string operationName = "Local Filesystem Store";
 
     const static std::string drvsLogDir;
 
@@ -49,9 +50,20 @@ public:
     ref<FSAccessor> getFSAccessor() override;
 
     /**
-     * Register a permanent GC root.
+     * Creates symlink from the `gcRoot` to the `storePath` and
+     * registers the `gcRoot` as a permanent GC root. The `gcRoot`
+     * symlink lives outside the store and is created and owned by the
+     * user.
+     *
+     * @param gcRoot The location of the symlink.
+     *
+     * @param storePath The store object being rooted. The symlink will
+     * point to `toRealPath(store.printStorePath(storePath))`.
+     *
+     * How the permanent GC root corresponding to this symlink is
+     * managed is implementation-specific.
      */
-    Path addPermRoot(const StorePath & storePath, const Path & gcRoot);
+    virtual Path addPermRoot(const StorePath & storePath, const Path & gcRoot) = 0;
 
     virtual Path getRealStoreDir() { return realStoreDir; }
 

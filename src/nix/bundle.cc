@@ -80,7 +80,7 @@ struct CmdBundle : InstallableValueCommand
         auto [bundlerFlakeRef, bundlerName, extendedOutputsSpec] = parseFlakeRefWithFragmentAndExtendedOutputsSpec(bundler, absPath("."));
         const flake::LockFlags lockFlags{ .writeLockFile = false };
         InstallableFlake bundler{this,
-            evalState, std::move(bundlerFlakeRef), bundlerName, extendedOutputsSpec,
+            evalState, std::move(bundlerFlakeRef), bundlerName, std::move(extendedOutputsSpec),
             {"bundlers." + settings.thisSystem.get() + ".default",
              "defaultBundler." + settings.thisSystem.get()
             },
@@ -98,7 +98,7 @@ struct CmdBundle : InstallableValueCommand
         if (!attr1)
             throw Error("the bundler '%s' does not produce a derivation", bundler.what());
 
-        PathSet context2;
+        NixStringContext context2;
         auto drvPath = evalState->coerceToStorePath(attr1->pos, *attr1->value, context2, "");
 
         auto attr2 = vRes->attrs->get(evalState->sOutPath);
@@ -109,7 +109,7 @@ struct CmdBundle : InstallableValueCommand
 
         store->buildPaths({
             DerivedPath::Built {
-                .drvPath = drvPath,
+                .drvPath = makeConstantStorePathRef(drvPath),
                 .outputs = OutputsSpec::All { },
             },
         });

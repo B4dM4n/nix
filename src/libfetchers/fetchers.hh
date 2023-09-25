@@ -44,9 +44,9 @@ struct Input
     std::optional<Path> parent;
 
 public:
-    static Input fromURL(const std::string & url);
+    static Input fromURL(const std::string & url, bool requireTree = true);
 
-    static Input fromURL(const ParsedURL & url);
+    static Input fromURL(const ParsedURL & url, bool requireTree = true);
 
     static Input fromAttrs(Attrs && attrs);
 
@@ -129,7 +129,7 @@ struct InputScheme
     virtual ~InputScheme()
     { }
 
-    virtual std::optional<Input> inputFromURL(const ParsedURL & url) const = 0;
+    virtual std::optional<Input> inputFromURL(const ParsedURL & url, bool requireTree) const = 0;
 
     virtual std::optional<Input> inputFromAttrs(const Attrs & attrs) const = 0;
 
@@ -158,6 +158,7 @@ struct DownloadFileResult
     StorePath storePath;
     std::string etag;
     std::string effectiveUrl;
+    std::optional<std::string> immutableUrl;
 };
 
 DownloadFileResult downloadFile(
@@ -167,7 +168,14 @@ DownloadFileResult downloadFile(
     bool locked,
     const Headers & headers = {});
 
-std::pair<Tree, time_t> downloadTarball(
+struct DownloadTarballResult
+{
+    Tree tree;
+    time_t lastModified;
+    std::optional<std::string> immutableUrl;
+};
+
+DownloadTarballResult downloadTarball(
     ref<Store> store,
     const std::string & url,
     const std::string & name,

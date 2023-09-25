@@ -4,6 +4,7 @@
 #include "types.hh"
 #include "lock.hh"
 #include "store-api.hh"
+#include "derived-path-map.hh"
 #include "goal.hh"
 #include "realisation.hh"
 
@@ -13,6 +14,7 @@
 namespace nix {
 
 /* Forward definition. */
+struct CreateDerivationAndRealiseGoal;
 struct DerivationGoal;
 struct PathSubstitutionGoal;
 class DrvOutputSubstitutionGoal;
@@ -31,9 +33,24 @@ class DrvOutputSubstitutionGoal;
  */
 GoalPtr upcast_goal(std::shared_ptr<PathSubstitutionGoal> subGoal);
 GoalPtr upcast_goal(std::shared_ptr<DrvOutputSubstitutionGoal> subGoal);
+GoalPtr upcast_goal(std::shared_ptr<DerivationGoal> subGoal);
 
 typedef std::chrono::time_point<std::chrono::steady_clock> steady_time_point;
 
+/**
+ * The current implementation of impure derivations has
+ * `DerivationGoal`s accumulate realisations from their waitees.
+ * Unfortunately, `DerivationGoal`s don't directly depend on other
+ * goals, but instead depend on `CreateDerivationAndRealiseGoal`s.
+ *
+ * We try not to share any of the details of any goal type with any
+ * other, for sake of modularity and quicker rebuilds. This means we
+ * cannot "just" downcast and fish out the field. So as an escape hatch,
+ * we have made the function, written in `worker.cc` where all the goal
+ * types are visible, and use it instead.
+ */
+
+std::optional<std::pair<std::reference_wrapper<const DerivationGoal>, std::reference_wrapper<const SingleDerivedPath>>> tryGetConcreteDrvGoal(GoalPtr waitee);
 
 /**
  * A mapping used to remember for each child process to what goal it
@@ -88,15 +105,23 @@ private:
     std::list<Child> children;
 
     /**
-     * Number of build slots occupied.  This includes local builds and
-     * substitutions but not remote builds via the build hook.
+     * Number of build slots occupied.  This includes local builds but does not
+     * include substitutions or remote builds via the build hook.
      */
     unsigned int nrLocalBuilds;
+
+    /**
+     * Number of substitution slots occupied.
+     */
+    unsigned int nrSubstitutions;
 
     /**
      * Maps used to prevent multiple instantiations of a goal for the
      * same derivation / path.
      */
+
+    DerivedPathMap<std::weak_ptr<CreateDerivationAndRealiseGoal>> outerDerivationGoals;
+
     std::map<StorePath, std::weak_ptr<DerivationGoal>> derivationGoals;
     std::map<StorePath, std::weak_ptr<PathSubstitutionGoal>> substitutionGoals;
     std::map<DrvOutput, std::weak_ptr<DrvOutputSubstitutionGoal>> drvOutputSubstitutionGoals;
@@ -181,9 +206,12 @@ public:
      */
 
     /**
-     * derivation goal
+     * @ref DerivationGoal "derivation goal"
      */
 private:
+    std::shared_ptr<CreateDerivationAndRealiseGoal> makeCreateDerivationAndRealiseGoal(
+        ref<SingleDerivedPath> drvPath,
+        const OutputsSpec & wantedOutputs, BuildMode buildMode = bmNormal);
     std::shared_ptr<DerivationGoal> makeDerivationGoalCommon(
         const StorePath & drvPath, const OutputsSpec & wantedOutputs,
         std::function<std::shared_ptr<DerivationGoal>()> mkDrvGoal);
@@ -196,10 +224,18 @@ public:
         const OutputsSpec & wantedOutputs, BuildMode buildMode = bmNormal);
 
     /**
-     * substitution goal
+     * @ref SubstitutionGoal "substitution goal"
      */
     std::shared_ptr<PathSubstitutionGoal> makePathSubstitutionGoal(const StorePath & storePath, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
     std::shared_ptr<DrvOutputSubstitutionGoal> makeDrvOutputSubstitutionGoal(const DrvOutput & id, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
+
+    /**
+     * Make a goal corresponding to the `DerivedPath`.
+     *
+     * It will be a `DerivationGoal` for a `DerivedPath::Built` or
+     * a `SubstitutionGoal` for a `DerivedPath::Opaque`.
+     */
+    GoalPtr makeGoal(const DerivedPath & req, BuildMode buildMode = bmNormal);
 
     /**
      * Remove a dead goal.
@@ -212,11 +248,15 @@ public:
     void wakeUp(GoalPtr goal);
 
     /**
-     * Return the number of local build and substitution processes
-     * currently running (but not remote builds via the build
-     * hook).
+     * Return the number of local build processes currently running (but not
+     * remote builds via the build hook).
      */
     unsigned int getNrLocalBuilds();
+
+    /**
+     * Return the number of substitution processes currently running.
+     */
+    unsigned int getNrSubstitutions();
 
     /**
      * Registers a running child process.  `inBuildSlot` means that
@@ -263,7 +303,28 @@ public:
      */
     void waitForInput();
 
-    unsigned int exitStatus();
+    /***
+     * The exit status in case of failure.
+     *
+     * In the case of a build failure, returned value follows this
+     * bitmask:
+     *
+     * ```
+     * 0b1100100
+     *      ^^^^
+     *      |||`- timeout
+     *      ||`-- output hash mismatch
+     *      |`--- build failure
+     *      `---- not deterministic
+     * ```
+     *
+     * In other words, the failure code is at least 100 (0b1100100), but
+     * might also be greater.
+     *
+     * Otherwise (no build failure, but some other sort of failure by
+     * assumption), this returned value is 1.
+     */
+    unsigned int failingExitStatus();
 
     /**
      * Check whether the given valid path exists and has the right

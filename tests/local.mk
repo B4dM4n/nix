@@ -14,11 +14,12 @@ nix_tests = \
   flakes/absolute-paths.sh \
   flakes/build-paths.sh \
   flakes/flake-in-submodule.sh \
-  ca/gc.sh \
   gc.sh \
+  nix-collect-garbage-d.sh \
   remote-store.sh \
   legacy-ssh-store.sh \
   lang.sh \
+  lang-test-infra.sh \
   experimental-features.sh \
   fetchMercurial.sh \
   gc-auto.sh \
@@ -26,8 +27,6 @@ nix_tests = \
   user-envs-migration.sh \
   binary-cache.sh \
   multiple-outputs.sh \
-  ca/build.sh \
-  ca/new-build-cmd.sh \
   nix-build.sh \
   gc-concurrent.sh \
   repair.sh \
@@ -45,24 +44,17 @@ nix_tests = \
   referrers.sh \
   optimise-store.sh \
   substitute-with-invalid-ca.sh \
-  ca/concurrent-builds.sh \
   signing.sh \
-  ca/build-with-garbage-path.sh \
   hash.sh \
   gc-non-blocking.sh \
   check.sh \
-  ca/substitute.sh \
   nix-shell.sh \
-  ca/signatures.sh \
-  ca/nix-shell.sh \
-  ca/nix-copy.sh \
   check-refs.sh \
   build-remote-input-addressed.sh \
   secure-drv-outputs.sh \
   restricted.sh \
   fetchGitSubmodules.sh \
   flakes/search-root.sh \
-  ca/duplicate-realisation-in-closure.sh \
   readfile-context.sh \
   nix-channel.sh \
   recursive.sh \
@@ -70,13 +62,15 @@ nix_tests = \
   check-reqs.sh \
   build-remote-content-addressed-fixed.sh \
   build-remote-content-addressed-floating.sh \
+  build-remote-trustless-should-pass-0.sh \
+  build-remote-trustless-should-pass-1.sh \
+  build-remote-trustless-should-pass-2.sh \
+  build-remote-trustless-should-pass-3.sh \
+  build-remote-trustless-should-fail-0.sh \
   nar-access.sh \
   pure-eval.sh \
   eval.sh \
-  ca/post-hook.sh \
   repl.sh \
-  ca/repl.sh \
-  ca/recursive.sh \
   binary-cache-build-remote.sh \
   search.sh \
   logging.sh \
@@ -88,6 +82,7 @@ nix_tests = \
   misc.sh \
   dump-db.sh \
   linux-sandbox.sh \
+  supplementary-groups.sh \
   build-dry.sh \
   structured-attrs.sh \
   shell.sh \
@@ -95,17 +90,15 @@ nix_tests = \
   zstd.sh \
   compression-levels.sh \
   nix-copy-ssh.sh \
+  nix-copy-ssh-ng.sh \
   post-hook.sh \
   function-trace.sh \
   flakes/config.sh \
   fmt.sh \
   eval-store.sh \
   why-depends.sh \
-  ca/why-depends.sh \
   derivation-json.sh \
-  ca/derivation-json.sh \
   import-derivation.sh \
-  ca/import-derivation.sh \
   nix_path.sh \
   case-hack.sh \
   placeholders.sh \
@@ -114,8 +107,7 @@ nix_tests = \
   build.sh \
   build-delete.sh \
   output-normalization.sh \
-  ca/nix-run.sh \
-  selfref-gc.sh ca/selfref-gc.sh \
+  selfref-gc.sh \
   db-migration.sh \
   bash-profile.sh \
   pass-as-file.sh \
@@ -127,17 +119,25 @@ nix_tests = \
   flakes/show.sh \
   impure-derivations.sh \
   path-from-hash-part.sh \
-  toString-path.sh
+  test-libstoreconsumer.sh \
+  toString-path.sh \
+  read-only-store.sh \
+  nested-sandboxing.sh
 
 ifeq ($(HAVE_LIBCPUID), 1)
 	nix_tests += compute-levels.sh
 endif
 
-install-tests += $(foreach x, $(nix_tests), tests/$(x))
+install-tests += $(foreach x, $(nix_tests), $(d)/$(x))
 
-clean-files += $(d)/common/vars-and-functions.sh $(d)/config.nix $(d)/ca/config.nix
+clean-files += \
+  $(d)/common/vars-and-functions.sh \
+  $(d)/config.nix
 
-test-deps += tests/common/vars-and-functions.sh tests/config.nix tests/ca/config.nix
+test-deps += \
+  tests/common/vars-and-functions.sh \
+  tests/config.nix \
+  tests/test-libstoreconsumer/test-libstoreconsumer
 
 ifeq ($(BUILD_SHARED_LIBS), 1)
   test-deps += tests/plugins/libplugintest.$(SO_EXT)

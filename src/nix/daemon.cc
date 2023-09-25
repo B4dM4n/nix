@@ -4,6 +4,7 @@
 #include "shared.hh"
 #include "local-store.hh"
 #include "remote-store.hh"
+#include "remote-store-connection.hh"
 #include "util.hh"
 #include "serialise.hh"
 #include "archive.hh"
@@ -24,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/select.h>
 #include <errno.h>
 #include <pwd.h>
 #include <grp.h>
@@ -54,19 +56,16 @@ struct AuthorizationSettings : Config {
     Setting<Strings> trustedUsers{
         this, {"root"}, "trusted-users",
         R"(
-          A list of names of users (separated by whitespace) that have
-          additional rights when connecting to the Nix daemon, such as the
-          ability to specify additional binary caches, or to import unsigned
-          NARs. You can also specify groups by prefixing them with `@`; for
-          instance, `@wheel` means all users in the `wheel` group. The default
-          is `root`.
+          A list of user names, separated by whitespace.
+          These users will have additional rights when connecting to the Nix daemon, such as the ability to specify additional [substituters](#conf-substituters), or to import unsigned [NARs](@docroot@/glossary.md#gloss-nar).
+
+          You can also specify groups by prefixing names with `@`.
+          For instance, `@wheel` means all users in the `wheel` group.
 
           > **Warning**
           >
-          > Adding a user to `trusted-users` is essentially equivalent to
-          > giving that user root access to the system. For example, the user
-          > can set `sandbox-paths` and thereby obtain read access to
-          > directories that are otherwise inacessible to them.
+          > Adding a user to `trusted-users` is essentially equivalent to giving that user root access to the system.
+          > For example, the user can access or replace store path contents that are critical for system security.
         )"};
 
     /**
@@ -75,12 +74,16 @@ struct AuthorizationSettings : Config {
     Setting<Strings> allowedUsers{
         this, {"*"}, "allowed-users",
         R"(
-          A list of names of users (separated by whitespace) that are allowed
-          to connect to the Nix daemon. As with the `trusted-users` option,
-          you can specify groups by prefixing them with `@`. Also, you can
-          allow all users by specifying `*`. The default is `*`.
+          A list user names, separated by whitespace.
+          These users are allowed to connect to the Nix daemon.
 
-          Note that trusted users are always allowed to connect.
+          You can specify groups by prefixing names with `@`.
+          For instance, `@wheel` means all users in the `wheel` group.
+          Also, you can allow all users by specifying `*`.
+
+          > **Note**
+          >
+          > Trusted users (set in [`trusted-users`](#conf-trusted-users)) can always connect to the Nix daemon.
         )"};
 };
 
@@ -273,8 +276,12 @@ static std::pair<TrustedFlag, std::string> authPeer(const PeerInfo & peer)
 /**
  * Run a server. The loop opens a socket and accepts new connections from that
  * socket.
+ *
+ * @param forceTrustClientOpt If present, force trusting or not trusted
+ * the client. Otherwise, decide based on the authentication settings
+ * and user credentials (from the unix domain socket).
  */
-static void daemonLoop()
+static void daemonLoop(std::optional<TrustedFlag> forceTrustClientOpt)
 {
     if (chdir("/") == -1)
         throw SysError("cannot change current directory");
@@ -317,9 +324,18 @@ static void daemonLoop()
 
             closeOnExec(remote.get());
 
-            PeerInfo peer = getPeerInfo(remote.get());
-            auto [_trusted, user] = authPeer(peer);
-            auto trusted = _trusted;
+            PeerInfo peer { .pidKnown = false };
+            TrustedFlag trusted;
+            std::string user;
+
+            if (forceTrustClientOpt)
+                trusted = *forceTrustClientOpt;
+            else {
+                peer = getPeerInfo(remote.get());
+                auto [_trusted, _user] = authPeer(peer);
+                trusted = _trusted;
+                user = _user;
+            };
 
             printInfo((std::string) "accepted connection from pid %1%, user %2%" + (trusted ? " (trusted)" : ""),
                 peer.pidKnown ? std::to_string(peer.pid) : "<unknown>",
@@ -410,38 +426,47 @@ static void forwardStdioConnection(RemoteStore & store) {
  * Unlike `forwardStdioConnection()` we do process commands ourselves in
  * this case, not delegating to another daemon.
  *
- * @note `Trusted` is unconditionally passed because in this mode we
- * blindly trust the standard streams. Limiting access to those is
- * explicitly not `nix-daemon`'s responsibility.
+ * @param trustClient Whether to trust the client. Forwarded directly to
+ * `processConnection()`.
  */
-static void processStdioConnection(ref<Store> store)
+static void processStdioConnection(ref<Store> store, TrustedFlag trustClient)
 {
     FdSource from(STDIN_FILENO);
     FdSink to(STDOUT_FILENO);
-    processConnection(store, from, to, Trusted, NotRecursive);
+    processConnection(store, from, to, trustClient, NotRecursive);
 }
 
 /**
  * Entry point shared between the new CLI `nix daemon` and old CLI
  * `nix-daemon`.
+ *
+ * @param forceTrustClientOpt See `daemonLoop()` and the parameter with
+ * the same name over there for details.
  */
-static void runDaemon(bool stdio)
+static void runDaemon(bool stdio, std::optional<TrustedFlag> forceTrustClientOpt)
 {
     if (stdio) {
         auto store = openUncachedStore();
 
-        if (auto remoteStore = store.dynamic_pointer_cast<RemoteStore>())
+        // If --force-untrusted is passed, we cannot forward the connection and
+        // must process it ourselves (before delegating to the next store) to
+        // force untrusting the client.
+        if (auto remoteStore = store.dynamic_pointer_cast<RemoteStore>(); remoteStore && (!forceTrustClientOpt || *forceTrustClientOpt != NotTrusted))
             forwardStdioConnection(*remoteStore);
         else
-            processStdioConnection(store);
+            // `Trusted` is passed in the auto (no override case) because we
+            // cannot see who is on the other side of a plain pipe. Limiting
+            // access to those is explicitly not `nix-daemon`'s responsibility.
+            processStdioConnection(store, forceTrustClientOpt.value_or(Trusted));
     } else
-        daemonLoop();
+        daemonLoop(forceTrustClientOpt);
 }
 
 static int main_nix_daemon(int argc, char * * argv)
 {
     {
         auto stdio = false;
+        std::optional<TrustedFlag> isTrustedOpt = std::nullopt;
 
         parseCmdLine(argc, argv, [&](Strings::iterator & arg, const Strings::iterator & end) {
             if (*arg == "--daemon")
@@ -452,11 +477,20 @@ static int main_nix_daemon(int argc, char * * argv)
                 printVersion("nix-daemon");
             else if (*arg == "--stdio")
                 stdio = true;
-            else return false;
+            else if (*arg == "--force-trusted") {
+                experimentalFeatureSettings.require(Xp::DaemonTrustOverride);
+                isTrustedOpt = Trusted;
+            } else if (*arg == "--force-untrusted") {
+                experimentalFeatureSettings.require(Xp::DaemonTrustOverride);
+                isTrustedOpt = NotTrusted;
+            } else if (*arg == "--default-trust") {
+                experimentalFeatureSettings.require(Xp::DaemonTrustOverride);
+                isTrustedOpt = std::nullopt;
+            } else return false;
             return true;
         });
 
-        runDaemon(stdio);
+        runDaemon(stdio, isTrustedOpt);
 
         return 0;
     }
@@ -466,6 +500,45 @@ static RegisterLegacyCommand r_nix_daemon("nix-daemon", main_nix_daemon);
 
 struct CmdDaemon : StoreCommand
 {
+    bool stdio = false;
+    std::optional<TrustedFlag> isTrustedOpt = std::nullopt;
+
+    CmdDaemon()
+    {
+        addFlag({
+            .longName = "stdio",
+            .description = "Attach to standard I/O, instead of trying to bind to a UNIX socket.",
+            .handler = {&stdio, true},
+        });
+
+        addFlag({
+            .longName = "force-trusted",
+            .description = "Force the daemon to trust connecting clients.",
+            .handler = {[&]() {
+                isTrustedOpt = Trusted;
+            }},
+            .experimentalFeature = Xp::DaemonTrustOverride,
+        });
+
+        addFlag({
+            .longName = "force-untrusted",
+            .description = "Force the daemon to not trust connecting clients. The connection will be processed by the receiving daemon before forwarding commands.",
+            .handler = {[&]() {
+                isTrustedOpt = NotTrusted;
+            }},
+            .experimentalFeature = Xp::DaemonTrustOverride,
+        });
+
+        addFlag({
+            .longName = "default-trust",
+            .description = "Use Nix's default trust.",
+            .handler = {[&]() {
+                isTrustedOpt = std::nullopt;
+            }},
+            .experimentalFeature = Xp::DaemonTrustOverride,
+        });
+    }
+
     std::string description() override
     {
         return "daemon to perform store operations on behalf of non-root clients";
@@ -482,7 +555,7 @@ struct CmdDaemon : StoreCommand
 
     void run(ref<Store> store) override
     {
-        runDaemon(false);
+        runDaemon(stdio, isTrustedOpt);
     }
 };
 

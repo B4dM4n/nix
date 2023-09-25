@@ -215,8 +215,11 @@ protected:
 
     virtual void set(const std::string & value, bool append = false) = 0;
 
-    virtual bool isAppendable()
-    { return false; }
+    /**
+     * Whether the type is appendable; i.e. whether the `append`
+     * parameter to `set()` is allowed to be `true`.
+     */
+    virtual bool isAppendable() = 0;
 
     virtual std::string to_string() const = 0;
 
@@ -240,6 +243,23 @@ protected:
     T value;
     const T defaultValue;
     const bool documentDefault;
+
+    /**
+     * Parse the string into a `T`.
+     *
+     * Used by `set()`.
+     */
+    virtual T parse(const std::string & str) const;
+
+    /**
+     * Append or overwrite `value` with `newValue`.
+     *
+     * Some types to do not support appending in which case `append`
+     * should never be passed. The default handles this case.
+     *
+     * @param append Whether to append or overwrite.
+     */
+    virtual void appendOrSet(T && newValue, bool append);
 
 public:
 
@@ -268,9 +288,25 @@ public:
     template<typename U>
     void setDefault(const U & v) { if (!overridden) value = v; }
 
-    void set(const std::string & str, bool append = false) override;
+    /**
+     * Require any experimental feature the setting depends on
+     *
+     * Uses `parse()` to get the value from `str`, and `appendOrSet()`
+     * to set it.
+     */
+    void set(const std::string & str, bool append = false) override final;
 
-    bool isAppendable() override;
+    /**
+     * C++ trick; This is template-specialized to compile-time indicate whether
+     * the type is appendable.
+     */
+    struct trait;
+
+    /**
+     * Always defined based on the C++ magic
+     * with `trait` above.
+     */
+    bool isAppendable() override final;
 
     virtual void override(const T & v)
     {
@@ -317,30 +353,53 @@ public:
 /**
  * A special setting for Paths. These are automatically canonicalised
  * (e.g. "/foo//bar/" becomes "/foo/bar").
+ *
+ * It is mandatory to specify a path; i.e. the empty string is not
+ * permitted.
  */
 class PathSetting : public BaseSetting<Path>
 {
-    bool allowEmpty;
-
 public:
 
     PathSetting(Config * options,
-        bool allowEmpty,
         const Path & def,
         const std::string & name,
         const std::string & description,
         const std::set<std::string> & aliases = {})
         : BaseSetting<Path>(def, true, name, description, aliases)
-        , allowEmpty(allowEmpty)
     {
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
+    Path parse(const std::string & str) const override;
 
     Path operator +(const char * p) const { return value + p; }
 
     void operator =(const Path & v) { this->assign(v); }
+};
+
+/**
+ * Like `PathSetting`, but the absence of a path is also allowed.
+ *
+ * `std::optional` is used instead of the empty string for clarity.
+ */
+class OptionalPathSetting : public BaseSetting<std::optional<Path>>
+{
+public:
+
+    OptionalPathSetting(Config * options,
+        const std::optional<Path> & def,
+        const std::string & name,
+        const std::string & description,
+        const std::set<std::string> & aliases = {})
+        : BaseSetting<std::optional<Path>>(def, true, name, description, aliases)
+    {
+        options->addSetting(this);
+    }
+
+    std::optional<Path> parse(const std::string & str) const override;
+
+    void operator =(const std::optional<Path> & v) { this->assign(v); }
 };
 
 struct GlobalConfig : public AbstractConfig

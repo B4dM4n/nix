@@ -12,6 +12,7 @@
 #include "shared.hh"
 #include "util.hh"
 #include "worker-protocol.hh"
+#include "worker-protocol-impl.hh"
 #include "graphml.hh"
 #include "legacy.hh"
 #include "path-with-outputs.hh"
@@ -204,10 +205,10 @@ static void opAddFixed(Strings opFlags, Strings opArgs)
 /* Hack to support caching in `nix-prefetch-url'. */
 static void opPrintFixedPath(Strings opFlags, Strings opArgs)
 {
-    auto recursive = FileIngestionMethod::Flat;
+    auto method = FileIngestionMethod::Flat;
 
     for (auto i : opFlags)
-        if (i == "--recursive") recursive = FileIngestionMethod::Recursive;
+        if (i == "--recursive") method = FileIngestionMethod::Recursive;
         else throw UsageError("unknown flag '%1%'", i);
 
     if (opArgs.size() != 3)
@@ -218,7 +219,11 @@ static void opPrintFixedPath(Strings opFlags, Strings opArgs)
     std::string hash = *i++;
     std::string name = *i++;
 
-    cout << fmt("%s\n", store->printStorePath(store->makeFixedOutputPath(recursive, Hash::parseAny(hash, hashAlgo), name)));
+    cout << fmt("%s\n", store->printStorePath(store->makeFixedOutputPath(name, FixedOutputInfo {
+        .method = method,
+        .hash = Hash::parseAny(hash, hashAlgo),
+        .references = {},
+    })));
 }
 
 
@@ -278,7 +283,7 @@ static void opQuery(Strings opFlags, Strings opArgs)
 {
     enum QueryType
         { qOutputs, qRequisites, qReferences, qReferrers
-        , qReferrersClosure, qDeriver, qBinding, qHash, qSize
+        , qReferrersClosure, qDeriver, qValidDerivers, qBinding, qHash, qSize
         , qTree, qGraph, qGraphML, qResolve, qRoots };
     std::optional<QueryType> query;
     bool useOutput = false;
@@ -294,6 +299,7 @@ static void opQuery(Strings opFlags, Strings opArgs)
         else if (i == "--referrers" || i == "--referers") query = qReferrers;
         else if (i == "--referrers-closure" || i == "--referers-closure") query = qReferrersClosure;
         else if (i == "--deriver" || i == "-d") query = qDeriver;
+        else if (i == "--valid-derivers") query = qValidDerivers;
         else if (i == "--binding" || i == "-b") {
             if (opArgs.size() == 0)
                 throw UsageError("expected binding name");
@@ -366,6 +372,21 @@ static void opQuery(Strings opFlags, Strings opArgs)
                 cout << fmt("%s\n", info->deriver ? store->printStorePath(*info->deriver) : "unknown-deriver");
             }
             break;
+
+        case qValidDerivers: {
+            StorePathSet result;
+            for (auto & i : opArgs) {
+                auto derivers = store->queryValidDerivers(store->followLinksToStorePath(i));
+                for (const auto &i: derivers) {
+                    result.insert(i);
+                }
+            }
+            auto sorted = store->topoSortPaths(result);
+            for (StorePaths::reverse_iterator i = sorted.rbegin();
+                 i != sorted.rend(); ++i)
+                cout << fmt("%s\n", store->printStorePath(*i));
+            break;
+        }
 
         case qBinding:
             for (auto & i : opArgs) {
@@ -800,6 +821,9 @@ static void opServe(Strings opFlags, Strings opArgs)
     out.flush();
     unsigned int clientVersion = readInt(in);
 
+    WorkerProto::ReadConn rconn { .from = in };
+    WorkerProto::WriteConn wconn { .to = out };
+
     auto getBuildSettings = [&]() {
         // FIXME: changing options here doesn't work if we're
         // building through the daemon.
@@ -831,19 +855,19 @@ static void opServe(Strings opFlags, Strings opArgs)
     };
 
     while (true) {
-        ServeCommand cmd;
+        ServeProto::Command cmd;
         try {
-            cmd = (ServeCommand) readInt(in);
+            cmd = (ServeProto::Command) readInt(in);
         } catch (EndOfFile & e) {
             break;
         }
 
         switch (cmd) {
 
-            case cmdQueryValidPaths: {
+            case ServeProto::Command::QueryValidPaths: {
                 bool lock = readInt(in);
                 bool substitute = readInt(in);
-                auto paths = worker_proto::read(*store, in, Phantom<StorePathSet> {});
+                auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
                 if (lock && writeAllowed)
                     for (auto & path : paths)
                         store->addTempRoot(path);
@@ -852,19 +876,19 @@ static void opServe(Strings opFlags, Strings opArgs)
                     store->substitutePaths(paths);
                 }
 
-                worker_proto::write(*store, out, store->queryValidPaths(paths));
+                WorkerProto::write(*store, wconn, store->queryValidPaths(paths));
                 break;
             }
 
-            case cmdQueryPathInfos: {
-                auto paths = worker_proto::read(*store, in, Phantom<StorePathSet> {});
+            case ServeProto::Command::QueryPathInfos: {
+                auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
                 // !!! Maybe we want a queryPathInfos?
                 for (auto & i : paths) {
                     try {
                         auto info = store->queryPathInfo(i);
                         out << store->printStorePath(info->path)
                             << (info->deriver ? store->printStorePath(*info->deriver) : "");
-                        worker_proto::write(*store, out, info->references);
+                        WorkerProto::write(*store, wconn, info->references);
                         // !!! Maybe we want compression?
                         out << info->narSize // downloadSize
                             << info->narSize;
@@ -879,24 +903,24 @@ static void opServe(Strings opFlags, Strings opArgs)
                 break;
             }
 
-            case cmdDumpStorePath:
+            case ServeProto::Command::DumpStorePath:
                 store->narFromPath(store->parseStorePath(readString(in)), out);
                 break;
 
-            case cmdImportPaths: {
+            case ServeProto::Command::ImportPaths: {
                 if (!writeAllowed) throw Error("importing paths is not allowed");
                 store->importPaths(in, NoCheckSigs); // FIXME: should we skip sig checking?
                 out << 1; // indicate success
                 break;
             }
 
-            case cmdExportPaths: {
+            case ServeProto::Command::ExportPaths: {
                 readInt(in); // obsolete
-                store->exportPaths(worker_proto::read(*store, in, Phantom<StorePathSet> {}), out);
+                store->exportPaths(WorkerProto::Serialise<StorePathSet>::read(*store, rconn), out);
                 break;
             }
 
-            case cmdBuildPaths: {
+            case ServeProto::Command::BuildPaths: {
 
                 if (!writeAllowed) throw Error("building paths is not allowed");
 
@@ -917,7 +941,7 @@ static void opServe(Strings opFlags, Strings opArgs)
                 break;
             }
 
-            case cmdBuildDerivation: { /* Used by hydra-queue-runner. */
+            case ServeProto::Command::BuildDerivation: { /* Used by hydra-queue-runner. */
 
                 if (!writeAllowed) throw Error("building paths is not allowed");
 
@@ -935,22 +959,25 @@ static void opServe(Strings opFlags, Strings opArgs)
                 if (GET_PROTOCOL_MINOR(clientVersion) >= 3)
                     out << status.timesBuilt << status.isNonDeterministic << status.startTime << status.stopTime;
                 if (GET_PROTOCOL_MINOR(clientVersion) >= 6) {
-                    worker_proto::write(*store, out, status.builtOutputs);
+                    DrvOutputs builtOutputs;
+                    for (auto & [output, realisation] : status.builtOutputs)
+                        builtOutputs.insert_or_assign(realisation.id, realisation);
+                    WorkerProto::write(*store, wconn, builtOutputs);
                 }
 
                 break;
             }
 
-            case cmdQueryClosure: {
+            case ServeProto::Command::QueryClosure: {
                 bool includeOutputs = readInt(in);
                 StorePathSet closure;
-                store->computeFSClosure(worker_proto::read(*store, in, Phantom<StorePathSet> {}),
+                store->computeFSClosure(WorkerProto::Serialise<StorePathSet>::read(*store, rconn),
                     closure, false, includeOutputs);
-                worker_proto::write(*store, out, closure);
+                WorkerProto::write(*store, wconn, closure);
                 break;
             }
 
-            case cmdAddToStoreNar: {
+            case ServeProto::Command::AddToStoreNar: {
                 if (!writeAllowed) throw Error("importing paths is not allowed");
 
                 auto path = readString(in);
@@ -961,10 +988,10 @@ static void opServe(Strings opFlags, Strings opArgs)
                 };
                 if (deriver != "")
                     info.deriver = store->parseStorePath(deriver);
-                info.references = worker_proto::read(*store, in, Phantom<StorePathSet> {});
+                info.references = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
                 in >> info.registrationTime >> info.narSize >> info.ultimate;
                 info.sigs = readStrings<StringSet>(in);
-                info.ca = parseContentAddressOpt(readString(in));
+                info.ca = ContentAddress::parseOpt(readString(in));
 
                 if (info.narSize == 0)
                     throw Error("narInfo is too old and missing the narSize field");

@@ -17,7 +17,6 @@ class Pid;
 struct FdSink;
 struct FdSource;
 template<typename T> class Pool;
-struct ConnectionHandle;
 
 struct RemoteStoreConfig : virtual StoreConfig
 {
@@ -63,7 +62,7 @@ public:
 
     StorePathSet queryDerivationOutputs(const StorePath & path) override;
 
-    std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(const StorePath & path) override;
+    std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(const StorePath & path, Store * evalStore = nullptr) override;
     std::optional<StorePath> queryPathFromHashPart(const std::string & hashPart) override;
 
     StorePathSet querySubstitutablePaths(const StorePathSet & paths) override;
@@ -78,6 +77,7 @@ public:
         Source & dump,
         std::string_view name,
         ContentAddressMethod caMethod,
+        HashType hashType,
         const StorePathSet & references,
         RepairFlag repair);
 
@@ -114,7 +114,7 @@ public:
 
     void buildPaths(const std::vector<DerivedPath> & paths, BuildMode buildMode, std::shared_ptr<Store> evalStore) override;
 
-    std::vector<BuildResult> buildPathsWithResults(
+    std::vector<KeyedBuildResult> buildPathsWithResults(
         const std::vector<DerivedPath> & paths,
         BuildMode buildMode,
         std::shared_ptr<Store> evalStore) override;
@@ -126,8 +126,6 @@ public:
 
     void addTempRoot(const StorePath & path) override;
 
-    void addIndirectRoot(const Path & path) override;
-
     Roots findRoots(bool censor) override;
 
     void collectGarbage(const GCOptions & options, GCResults & results) override;
@@ -135,6 +133,17 @@ public:
     void optimiseStore() override;
 
     bool verifyStore(bool checkContents, RepairFlag repair) override;
+
+    /**
+     * The default instance would schedule the work on the client side, but
+     * for consistency with `buildPaths` and `buildDerivation` it should happen
+     * on the remote side.
+     *
+     * We make this fail for now so we can add implement this properly later
+     * without it being a breaking change.
+     */
+    void repairPath(const StorePath & path) override
+    { unsupported("repairPath"); }
 
     void addSignatures(const StorePath & storePath, const StringSet & sigs) override;
 
@@ -154,21 +163,7 @@ public:
 
     void flushBadConnections();
 
-    struct Connection
-    {
-        FdSink to;
-        FdSource from;
-        unsigned int daemonVersion;
-        std::optional<TrustedFlag> remoteTrustsUs;
-        std::optional<std::string> daemonNixVersion;
-        std::chrono::time_point<std::chrono::steady_clock> startTime;
-
-        virtual ~Connection();
-
-        virtual void closeWrite() = 0;
-
-        std::exception_ptr processStderr(Sink * sink = 0, Source * source = 0, bool flush = true);
-    };
+    struct Connection;
 
     ref<Connection> openConnectionWrapper();
 
@@ -183,6 +178,8 @@ protected:
     virtual void setOptions(Connection & conn);
 
     void setOptions() override;
+
+    struct ConnectionHandle;
 
     ConnectionHandle getConnection();
 
@@ -200,6 +197,5 @@ private:
         const std::vector<DerivedPath> & paths,
         std::shared_ptr<Store> evalStore);
 };
-
 
 }

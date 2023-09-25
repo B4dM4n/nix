@@ -9,7 +9,7 @@
 
 using namespace nix;
 
-nlohmann::json builtPathsToJSON(const std::vector<BuiltPathWithResult> & buildables, ref<Store> store)
+nlohmann::json builtPathsToJSON(const std::vector<BuiltPathWithResult> & buildables, Store & store)
 {
     auto res = nlohmann::json::array();
     for (auto & b : buildables) {
@@ -49,14 +49,14 @@ struct CmdInstantiate : virtual InstallablesCommand, virtual MixJSON
                         throw Error("'%1%' is not a derivation", store2->printStorePath(bo.path));
                     },
                     [&](BuiltPath::Built bfd) {
-                        if (!json) logger->cout(store2->printStorePath(bfd.drvPath));
+                        if (!json) logger->cout(store2->printStorePath(bfd.drvPath->outPath()));
                     },
                 }, buildable.path.raw());
             }
         else
             throw Error("can only run on local stores");
 
-        if (json) logger->cout("%s", builtPathsToJSON(buildables, store).dump());
+        if (json) logger->cout("%s", builtPathsToJSON(buildables, *store).dump());
     }
 };
 
