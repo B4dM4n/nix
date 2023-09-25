@@ -1,4 +1,5 @@
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "hash.hh"
 #include "types.hh"
 #include "util.hh"
@@ -420,44 +421,6 @@ void initGC()
 }
 
 
-/* Very hacky way to parse $NIX_PATH, which is colon-separated, but
-   can contain URLs (e.g. "nixpkgs=https://bla...:foo=https://"). */
-static Strings parseNixPath(const std::string & s)
-{
-    Strings res;
-
-    auto p = s.begin();
-
-    while (p != s.end()) {
-        auto start = p;
-        auto start2 = p;
-
-        while (p != s.end() && *p != ':') {
-            if (*p == '=') start2 = p + 1;
-            ++p;
-        }
-
-        if (p == s.end()) {
-            if (p != start) res.push_back(std::string(start, p));
-            break;
-        }
-
-        if (*p == ':') {
-            auto prefix = std::string(start2, s.end());
-            if (EvalSettings::isPseudoUrl(prefix) || hasPrefix(prefix, "flake:")) {
-                ++p;
-                while (p != s.end() && *p != ':') ++p;
-            }
-            res.push_back(std::string(start, p));
-            if (p == s.end()) break;
-        }
-
-        ++p;
-    }
-
-    return res;
-}
-
 ErrorBuilder & ErrorBuilder::atPos(PosIdx pos)
 {
     info.errPos = state.positions[pos];
@@ -564,9 +527,9 @@ EvalState::EvalState(
     /* Initialise the Nix expression search path. */
     if (!evalSettings.pureEval) {
         for (auto & i : _searchPath.elements)
-            addToSearchPath(SearchPath::Elem {i});
+            searchPath.elements.emplace_back(SearchPath::Elem {i});
         for (auto & i : evalSettings.nixPath.get())
-            addToSearchPath(SearchPath::Elem::parse(i));
+            searchPath.elements.emplace_back(SearchPath::Elem::parse(i));
     }
 
     if (evalSettings.restrictEval || evalSettings.pureEval) {
@@ -1064,23 +1027,67 @@ void EvalState::mkStorePathString(const StorePath & p, Value & v)
 }
 
 
+std::string EvalState::mkOutputStringRaw(
+    const SingleDerivedPath::Built & b,
+    std::optional<StorePath> optStaticOutputPath,
+    const ExperimentalFeatureSettings & xpSettings)
+{
+    /* In practice, this is testing for the case of CA derivations, or
+       dynamic derivations. */
+    return optStaticOutputPath
+        ? store->printStorePath(*std::move(optStaticOutputPath))
+        /* Downstream we would substitute this for an actual path once
+           we build the floating CA derivation */
+        : DownstreamPlaceholder::fromSingleDerivedPathBuilt(b, xpSettings).render();
+}
+
+
 void EvalState::mkOutputString(
     Value & value,
-    const StorePath & drvPath,
-    const std::string outputName,
-    std::optional<StorePath> optOutputPath)
+    const SingleDerivedPath::Built & b,
+    std::optional<StorePath> optStaticOutputPath,
+    const ExperimentalFeatureSettings & xpSettings)
 {
     value.mkString(
-        optOutputPath
-            ? store->printStorePath(*std::move(optOutputPath))
-            /* Downstream we would substitute this for an actual path once
-               we build the floating CA derivation */
-            : DownstreamPlaceholder::unknownCaOutput(drvPath, outputName).render(),
+        mkOutputStringRaw(b, optStaticOutputPath, xpSettings),
+        NixStringContext { b });
+}
+
+
+std::string EvalState::mkSingleDerivedPathStringRaw(
+    const SingleDerivedPath & p)
+{
+    return std::visit(overloaded {
+        [&](const SingleDerivedPath::Opaque & o) {
+            return store->printStorePath(o.path);
+        },
+        [&](const SingleDerivedPath::Built & b) {
+            auto optStaticOutputPath = std::visit(overloaded {
+                [&](const SingleDerivedPath::Opaque & o) {
+                    auto drv = store->readDerivation(o.path);
+                    auto i = drv.outputs.find(b.output);
+                    if (i == drv.outputs.end())
+                        throw Error("derivation '%s' does not have output '%s'", b.drvPath->to_string(*store), b.output);
+                    return i->second.path(*store, drv.name, b.output);
+                },
+                [&](const SingleDerivedPath::Built & o) -> std::optional<StorePath> {
+                    return std::nullopt;
+                },
+            }, b.drvPath->raw());
+            return mkOutputStringRaw(b, optStaticOutputPath);
+        }
+    }, p.raw());
+}
+
+
+void EvalState::mkSingleDerivedPathString(
+    const SingleDerivedPath & p,
+    Value & v)
+{
+    v.mkString(
+        mkSingleDerivedPathStringRaw(p),
         NixStringContext {
-            NixStringContextElem::Built {
-                .drvPath = drvPath,
-                .output = outputName,
-            }
+            std::visit([](auto && v) -> NixStringContextElem { return v; }, p),
         });
 }
 
@@ -2335,7 +2342,7 @@ StorePath EvalState::coerceToStorePath(const PosIdx pos, Value & v, NixStringCon
 }
 
 
-std::pair<DerivedPath, std::string_view> EvalState::coerceToDerivedPathUnchecked(const PosIdx pos, Value & v, std::string_view errorCtx)
+std::pair<SingleDerivedPath, std::string_view> EvalState::coerceToSingleDerivedPathUnchecked(const PosIdx pos, Value & v, std::string_view errorCtx)
 {
     NixStringContext context;
     auto s = forceString(v, context, pos, errorCtx);
@@ -2346,23 +2353,18 @@ std::pair<DerivedPath, std::string_view> EvalState::coerceToDerivedPathUnchecked
             s, csize)
             .withTrace(pos, errorCtx).debugThrow<EvalError>();
     auto derivedPath = std::visit(overloaded {
-        [&](NixStringContextElem::Opaque && o) -> DerivedPath {
-            return DerivedPath::Opaque {
-                .path = std::move(o.path),
-            };
+        [&](NixStringContextElem::Opaque && o) -> SingleDerivedPath {
+            return std::move(o);
         },
-        [&](NixStringContextElem::DrvDeep &&) -> DerivedPath {
+        [&](NixStringContextElem::DrvDeep &&) -> SingleDerivedPath {
             error(
                 "string '%s' has a context which refers to a complete source and binary closure. This is not supported at this time",
                 s).withTrace(pos, errorCtx).debugThrow<EvalError>();
         },
-        [&](NixStringContextElem::Built && b) -> DerivedPath {
-            return DerivedPath::Built {
-                .drvPath = std::move(b.drvPath),
-                .outputs = OutputsSpec::Names { std::move(b.output) },
-            };
+        [&](NixStringContextElem::Built && b) -> SingleDerivedPath {
+            return std::move(b);
         },
-    }, ((NixStringContextElem &&) *context.begin()).raw());
+    }, ((NixStringContextElem &&) *context.begin()).raw);
     return {
         std::move(derivedPath),
         std::move(s),
@@ -2370,41 +2372,29 @@ std::pair<DerivedPath, std::string_view> EvalState::coerceToDerivedPathUnchecked
 }
 
 
-DerivedPath EvalState::coerceToDerivedPath(const PosIdx pos, Value & v, std::string_view errorCtx)
+SingleDerivedPath EvalState::coerceToSingleDerivedPath(const PosIdx pos, Value & v, std::string_view errorCtx)
 {
-    auto [derivedPath, s_] = coerceToDerivedPathUnchecked(pos, v, errorCtx);
+    auto [derivedPath, s_] = coerceToSingleDerivedPathUnchecked(pos, v, errorCtx);
     auto s = s_;
-    std::visit(overloaded {
-        [&](const DerivedPath::Opaque & o) {
-            auto sExpected = store->printStorePath(o.path);
-            if (s != sExpected)
+    auto sExpected = mkSingleDerivedPathStringRaw(derivedPath);
+    if (s != sExpected) {
+        /* `std::visit` is used here just to provide a more precise
+           error message. */
+        std::visit(overloaded {
+            [&](const SingleDerivedPath::Opaque & o) {
                 error(
                     "path string '%s' has context with the different path '%s'",
                     s, sExpected)
                     .withTrace(pos, errorCtx).debugThrow<EvalError>();
-        },
-        [&](const DerivedPath::Built & b) {
-            // TODO need derived path with single output to make this
-            // total. Will add as part of RFC 92 work and then this is
-            // cleaned up.
-            auto output = *std::get<OutputsSpec::Names>(b.outputs).begin();
-
-            auto drv = store->readDerivation(b.drvPath);
-            auto i = drv.outputs.find(output);
-            if (i == drv.outputs.end())
-                throw Error("derivation '%s' does not have output '%s'", store->printStorePath(b.drvPath), output);
-            auto optOutputPath = i->second.path(*store, drv.name, output);
-            // This is testing for the case of CA derivations
-            auto sExpected = optOutputPath
-                ? store->printStorePath(*optOutputPath)
-                : DownstreamPlaceholder::unknownCaOutput(b.drvPath, output).render();
-            if (s != sExpected)
+            },
+            [&](const SingleDerivedPath::Built & b) {
                 error(
                     "string '%s' has context with the output '%s' from derivation '%s', but the string is not the right placeholder for this derivation output. It should be '%s'",
-                    s, output, store->printStorePath(b.drvPath), sExpected)
+                    s, b.output, b.drvPath->to_string(*store), sExpected)
                     .withTrace(pos, errorCtx).debugThrow<EvalError>();
-        }
-    }, derivedPath.raw());
+            }
+        }, derivedPath.raw());
+    }
     return derivedPath;
 }
 
@@ -2624,56 +2614,6 @@ bool ExternalValueBase::operator==(const ExternalValueBase & b) const
 std::ostream & operator << (std::ostream & str, const ExternalValueBase & v) {
     return v.print(str);
 }
-
-
-EvalSettings::EvalSettings()
-{
-    auto var = getEnv("NIX_PATH");
-    if (var) nixPath = parseNixPath(*var);
-}
-
-Strings EvalSettings::getDefaultNixPath()
-{
-    Strings res;
-    auto add = [&](const Path & p, const std::string & s = std::string()) {
-        if (pathAccessible(p)) {
-            if (s.empty()) {
-                res.push_back(p);
-            } else {
-                res.push_back(s + "=" + p);
-            }
-        }
-    };
-
-    if (!evalSettings.restrictEval && !evalSettings.pureEval) {
-        add(settings.useXDGBaseDirectories ? getStateDir() + "/nix/defexpr/channels" : getHome() + "/.nix-defexpr/channels");
-        add(rootChannelsDir() + "/nixpkgs", "nixpkgs");
-        add(rootChannelsDir());
-    }
-
-    return res;
-}
-
-bool EvalSettings::isPseudoUrl(std::string_view s)
-{
-    if (s.compare(0, 8, "channel:") == 0) return true;
-    size_t pos = s.find("://");
-    if (pos == std::string::npos) return false;
-    std::string scheme(s, 0, pos);
-    return scheme == "http" || scheme == "https" || scheme == "file" || scheme == "channel" || scheme == "git" || scheme == "s3" || scheme == "ssh";
-}
-
-std::string EvalSettings::resolvePseudoUrl(std::string_view url)
-{
-    if (hasPrefix(url, "channel:"))
-        return "https://nixos.org/channels/" + std::string(url.substr(8)) + "/nixexprs.tar.xz";
-    else
-        return std::string(url);
-}
-
-EvalSettings evalSettings;
-
-static GlobalConfig::Register rEvalSettings(&evalSettings);
 
 
 }

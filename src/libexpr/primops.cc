@@ -3,6 +3,7 @@
 #include "downstream-placeholder.hh"
 #include "eval-inline.hh"
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "globals.hh"
 #include "json-to-value.hh"
 #include "names.hh"
@@ -55,7 +56,7 @@ StringMap EvalState::realiseContext(const NixStringContext & context)
                     .drvPath = b.drvPath,
                     .outputs = OutputsSpec::Names { b.output },
                 });
-                ensureValid(b.drvPath);
+                ensureValid(b.drvPath->getBaseStorePath());
             },
             [&](const NixStringContextElem::Opaque & o) {
                 auto ctxS = store->printStorePath(o.path);
@@ -68,7 +69,7 @@ StringMap EvalState::realiseContext(const NixStringContext & context)
                 res.insert_or_assign(ctxS, ctxS);
                 ensureValid(d.drvPath);
             },
-        }, c.raw());
+        }, c.raw);
     }
 
     if (drvs.empty()) return {};
@@ -76,29 +77,32 @@ StringMap EvalState::realiseContext(const NixStringContext & context)
     if (!evalSettings.enableImportFromDerivation)
         debugThrowLastTrace(Error(
             "cannot build '%1%' during evaluation because the option 'allow-import-from-derivation' is disabled",
-            store->printStorePath(drvs.begin()->drvPath)));
+            drvs.begin()->to_string(*store)));
 
     /* Build/substitute the context. */
     std::vector<DerivedPath> buildReqs;
     for (auto & d : drvs) buildReqs.emplace_back(DerivedPath { d });
     store->buildPaths(buildReqs);
 
-    /* Get all the output paths corresponding to the placeholders we had */
     for (auto & drv : drvs) {
         auto outputs = resolveDerivedPath(*store, drv);
         for (auto & [outputName, outputPath] : outputs) {
-            res.insert_or_assign(
-                DownstreamPlaceholder::unknownCaOutput(drv.drvPath, outputName).render(),
-                store->printStorePath(outputPath)
-            );
-        }
-    }
-
-    /* Add the output of this derivations to the allowed
-       paths. */
-    if (allowedPaths) {
-        for (auto & [_placeholder, outputPath] : res) {
-            allowPath(store->toRealPath(outputPath));
+            /* Add the output of this derivations to the allowed
+               paths. */
+            if (allowedPaths) {
+                allowPath(outputPath);
+            }
+            /* Get all the output paths corresponding to the placeholders we had */
+            if (experimentalFeatureSettings.isEnabled(Xp::CaDerivations)) {
+                res.insert_or_assign(
+                    DownstreamPlaceholder::fromSingleDerivedPathBuilt(
+                        SingleDerivedPath::Built {
+                            .drvPath = drv.drvPath,
+                            .output = outputName,
+                        }).render(),
+                    store->printStorePath(outputPath)
+                );
+            }
         }
     }
 
@@ -152,8 +156,10 @@ static void mkOutputString(
 {
     state.mkOutputString(
         attrs.alloc(o.first),
-        drvPath,
-        o.first,
+        SingleDerivedPath::Built {
+            .drvPath = makeConstantStorePathRef(drvPath),
+            .output = o.first,
+        },
         o.second.path(*state.store, Derivation::nameFromPath(drvPath), o.first));
 }
 
@@ -1246,17 +1252,18 @@ drvName, Bindings * attrs, Value & v)
                 state.store->computeFSClosure(d.drvPath, refs);
                 for (auto & j : refs) {
                     drv.inputSrcs.insert(j);
-                    if (j.isDerivation())
-                        drv.inputDrvs[j] = state.store->readDerivation(j).outputNames();
+                    if (j.isDerivation()) {
+                        drv.inputDrvs.map[j].value = state.store->readDerivation(j).outputNames();
+                    }
                 }
             },
             [&](const NixStringContextElem::Built & b) {
-                drv.inputDrvs[b.drvPath].insert(b.output);
+                drv.inputDrvs.ensureSlot(*b.drvPath).value.insert(b.output);
             },
             [&](const NixStringContextElem::Opaque & o) {
                 drv.inputSrcs.insert(o.path);
             },
-        }, c.raw());
+        }, c.raw);
     }
 
     /* Do we have all required attributes? */
@@ -1325,13 +1332,13 @@ drvName, Bindings * attrs, Value & v)
             if (isImpure)
                 drv.outputs.insert_or_assign(i,
                     DerivationOutput::Impure {
-                        .method = method.raw,
+                        .method = method,
                         .hashType = ht,
                     });
             else
                 drv.outputs.insert_or_assign(i,
                     DerivationOutput::CAFloating {
-                        .method = method.raw,
+                        .method = method,
                         .hashType = ht,
                     });
         }
@@ -1364,7 +1371,7 @@ drvName, Bindings * attrs, Value & v)
                 drv.env[i] = state.store->printStorePath(outPath);
                 drv.outputs.insert_or_assign(
                     i,
-                    DerivationOutputInputAddressed {
+                    DerivationOutput::InputAddressed {
                         .path = std::move(outPath),
                     });
             }
@@ -1372,7 +1379,7 @@ drvName, Bindings * attrs, Value & v)
             ;
         case DrvHash::Kind::Deferred:
             for (auto & i : outputs) {
-                drv.outputs.insert_or_assign(i, DerivationOutputDeferred {});
+                drv.outputs.insert_or_assign(i, DerivationOutput::Deferred {});
             }
         }
     }
@@ -1511,15 +1518,25 @@ static RegisterPrimOp primop_storePath({
 
 static void prim_pathExists(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
+    auto & arg = *args[0];
+
     /* We don’t check the path right now, because we don’t want to
        throw if the path isn’t allowed, but just return false (and we
        can’t just catch the exception here because we still want to
-       throw if something in the evaluation of `*args[0]` tries to
+       throw if something in the evaluation of `arg` tries to
        access an unauthorized path). */
-    auto path = realisePath(state, pos, *args[0], { .checkForPureEval = false });
+    auto path = realisePath(state, pos, arg, { .checkForPureEval = false });
+
+    /* SourcePath doesn't know about trailing slash. */
+    auto mustBeDir = arg.type() == nString && arg.str().ends_with("/");
 
     try {
-        v.mkBool(state.checkSourcePath(path).pathExists());
+        auto checked = state.checkSourcePath(path);
+        auto exists = checked.pathExists();
+        if (exists && mustBeDir) {
+            exists = checked.lstat().type == InputAccessor::tDirectory;
+        }
+        v.mkBool(exists);
     } catch (SysError & e) {
         /* Don't give away info from errors while canonicalising
            ‘path’ in restricted mode. */
@@ -1829,6 +1846,45 @@ static RegisterPrimOp primop_readDir({
     .fun = prim_readDir,
 });
 
+/* Extend single element string context with another output. */
+static void prim_outputOf(EvalState & state, const PosIdx pos, Value * * args, Value & v)
+{
+    SingleDerivedPath drvPath = state.coerceToSingleDerivedPath(pos, *args[0], "while evaluating the first argument to builtins.outputOf");
+
+    OutputNameView outputName = state.forceStringNoCtx(*args[1], pos, "while evaluating the second argument to builtins.outputOf");
+
+    state.mkSingleDerivedPathString(
+        SingleDerivedPath::Built {
+            .drvPath = make_ref<SingleDerivedPath>(drvPath),
+            .output = std::string { outputName },
+        },
+        v);
+}
+
+static RegisterPrimOp primop_outputOf({
+    .name = "__outputOf",
+    .args = {"derivation-reference", "output-name"},
+    .doc = R"(
+      Return the output path of a derivation, literally or using a placeholder if needed.
+
+      If the derivation has a statically-known output path (i.e. the derivation output is input-addressed, or fixed content-addresed), the output path will just be returned.
+      But if the derivation is content-addressed or if the derivation is itself not-statically produced (i.e. is the output of another derivation), a placeholder will be returned instead.
+
+      *`derivation reference`* must be a string that may contain a regular store path to a derivation, or may be a placeholder reference. If the derivation is produced by a derivation, you must explicitly select `drv.outPath`.
+      This primop can be chained arbitrarily deeply.
+      For instance,
+      ```nix
+      builtins.outputOf
+        (builtins.outputOf myDrv "out)
+        "out"
+      ```
+      will return a placeholder for the output of the output of `myDrv`.
+
+      This primop corresponds to the `^` sigil for derivable paths, e.g. as part of installable syntax on the command line.
+    )",
+    .fun = prim_outputOf,
+    .experimentalFeature = Xp::DynamicDerivations,
+});
 
 /*************************************************************
  * Creating files
@@ -2006,7 +2062,7 @@ static void prim_toFile(EvalState & state, const PosIdx pos, Value * * args, Val
     StorePathSet refs;
 
     for (auto c : context) {
-        if (auto p = std::get_if<NixStringContextElem::Opaque>(&c))
+        if (auto p = std::get_if<NixStringContextElem::Opaque>(&c.raw))
             refs.insert(p->path);
         else
             state.debugThrowLastTrace(EvalError({

@@ -22,6 +22,7 @@
 
 #include "nixexpr.hh"
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "globals.hh"
 
 namespace nix {
@@ -732,12 +733,6 @@ Expr * EvalState::parseStdin()
     buffer.append("\0\0", 2);
     auto s = make_ref<std::string>(std::move(buffer));
     return parse(s->data(), s->size(), Pos::Stdin{.source = s}, rootPath(CanonPath::fromCwd()), staticBaseEnv);
-}
-
-
-void EvalState::addToSearchPath(SearchPath::Elem && elem)
-{
-    searchPath.elements.emplace_back(std::move(elem));
 }
 
 

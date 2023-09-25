@@ -98,7 +98,7 @@ let
                 (option ? labels)
                 (concatStringsSep " " (map (s: "*${s}*") option.labels));
             in trim ''
-              - `--${name}` ${shortName} ${labels}
+              - <span id="opt-${name}">[`--${name}`](#opt-${name})</span> ${shortName} ${labels}
 
                 ${option.description}
             '';
@@ -137,11 +137,28 @@ let
 
   storeDocs =
     let
-      showStore = name: { settings, doc }:
-        ''
+      showStore = name: { settings, doc, experimentalFeature }:
+        let
+          experimentalFeatureNote = optionalString (experimentalFeature != null) ''
+            > **Warning**
+            > This store is part of an
+            > [experimental feature](@docroot@/contributing/experimental-features.md).
+
+            To use this store, you need to make sure the corresponding experimental feature,
+            [`${experimentalFeature}`](@docroot@/contributing/experimental-features.md#xp-feature-${experimentalFeature}),
+            is enabled.
+            For example, include the following in [`nix.conf`](#):
+
+            ```
+            extra-experimental-features = ${experimentalFeature}
+            ```
+          '';
+        in ''
           ## ${name}
 
           ${doc}
+
+          ${experimentalFeatureNote}
 
           **Settings**:
 
