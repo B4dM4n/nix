@@ -63,7 +63,7 @@ The following types of installable are supported by most commands:
 - [Nix file](#nix-file), optionally qualified by an attribute path
 - [Nix expression](#nix-expression), optionally qualified by an attribute path
 
-For most commands, if no installable is specified, `.` as assumed.
+For most commands, if no installable is specified, `.` is assumed.
 That is, Nix will operate on the default flake output attribute of the flake in the current directory.
 
 ### Flake output attribute
@@ -102,6 +102,7 @@ way:
   available in the flake. If this is undesirable, specify `path:<directory>` explicitly;
 
   For example, if `/foo/bar` is a git repository with the following structure:
+
   ```
   .
   └── baz

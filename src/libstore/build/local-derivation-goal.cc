@@ -1,16 +1,15 @@
 #include "local-derivation-goal.hh"
-#include "gc-store.hh"
+#include "indirect-root-store.hh"
 #include "hook-instance.hh"
 #include "worker.hh"
 #include "builtins.hh"
 #include "builtins/buildenv.hh"
-#include "references.hh"
+#include "path-references.hh"
 #include "finally.hh"
 #include "util.hh"
 #include "archive.hh"
 #include "compression.hh"
 #include "daemon.hh"
-#include "worker-protocol.hh"
 #include "topo-sort.hh"
 #include "callback.hh"
 #include "json-utils.hh"
@@ -65,8 +64,9 @@ void handleDiffHook(
     const Path & tryA, const Path & tryB,
     const Path & drvPath, const Path & tmpDir)
 {
-    auto diffHook = settings.diffHook;
-    if (diffHook != "" && settings.runDiffHook) {
+    auto & diffHookOpt = settings.diffHook.get();
+    if (diffHookOpt && settings.runDiffHook) {
+        auto & diffHook = *diffHookOpt;
         try {
             auto diffRes = runProgram(RunOptions {
                 .program = diffHook,
@@ -401,8 +401,9 @@ static void linkOrCopy(const Path & from, const Path & to)
            bind-mount in this case?
 
            It can also fail with EPERM in BeegFS v7 and earlier versions
+           or fail with EXDEV in OpenAFS
            which don't allow hard-links to other directories */
-        if (errno != EMLINK && errno != EPERM)
+        if (errno != EMLINK && errno != EPERM && errno != EXDEV)
             throw SysError("linking '%s' to '%s'", to, from);
         copyPath(from, to);
     }
@@ -598,6 +599,10 @@ void LocalDerivationGoal::startBuilder()
                 dirsInChroot[i] = {i, optional};
             else
                 dirsInChroot[i.substr(0, p)] = {i.substr(p + 1), optional};
+        }
+        if (hasPrefix(worker.store.storeDir, tmpDirInSandbox))
+        {
+            throw Error("`sandbox-build-dir` must not contain the storeDir");
         }
         dirsInChroot[tmpDirInSandbox] = tmpDir;
 
@@ -913,15 +918,13 @@ void LocalDerivationGoal::startBuilder()
             openSlave();
 
             /* Drop additional groups here because we can't do it
-               after we've created the new user namespace.  FIXME:
-               this means that if we're not root in the parent
-               namespace, we can't drop additional groups; they will
-               be mapped to nogroup in the child namespace. There does
-               not seem to be a workaround for this. (But who can tell
-               from reading user_namespaces(7)?)
-               See also https://lwn.net/Articles/621612/. */
-            if (getuid() == 0 && setgroups(0, 0) == -1)
-                throw SysError("setgroups failed");
+               after we've created the new user namespace. */
+            if (setgroups(0, 0) == -1) {
+                if (errno != EPERM)
+                    throw SysError("setgroups failed");
+                if (settings.requireDropSupplementaryGroups)
+                    throw Error("setgroups failed. Set the require-drop-supplementary-groups option to false to skip this step.");
+            }
 
             ProcessOptions options;
             options.cloneFlags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_PARENT | SIGCHLD;
@@ -1203,7 +1206,7 @@ struct RestrictedStoreConfig : virtual LocalFSStoreConfig
 /* A wrapper around LocalStore that only allows building/querying of
    paths that are in the input closures of the build or were added via
    recursive Nix calls. */
-struct RestrictedStore : public virtual RestrictedStoreConfig, public virtual LocalFSStore, public virtual GcStore
+struct RestrictedStore : public virtual RestrictedStoreConfig, public virtual IndirectRootStore, public virtual GcStore
 {
     ref<LocalStore> next;
 
@@ -1254,11 +1257,13 @@ struct RestrictedStore : public virtual RestrictedStoreConfig, public virtual Lo
     void queryReferrers(const StorePath & path, StorePathSet & referrers) override
     { }
 
-    std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(const StorePath & path) override
+    std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(
+        const StorePath & path,
+        Store * evalStore = nullptr) override
     {
         if (!goal.isAllowed(path))
             throw InvalidPath("cannot query output map for unknown path '%s' in recursive Nix", printStorePath(path));
-        return next->queryPartialDerivationOutputMap(path);
+        return next->queryPartialDerivationOutputMap(path, evalStore);
     }
 
     std::optional<StorePath> queryPathFromHashPart(const std::string & hashPart) override
@@ -1434,7 +1439,8 @@ void LocalDerivationGoal::startDaemon()
     Store::Params params;
     params["path-info-cache-size"] = "0";
     params["store"] = worker.store.storeDir;
-    params["root"] = getLocalStore().rootDir;
+    if (auto & optRoot = getLocalStore().rootDir.get())
+        params["root"] = *optRoot;
     params["state"] = "/no-such-path";
     params["log"] = "/no-such-path";
     auto store = make_ref<RestrictedStore>(params,
@@ -1463,7 +1469,7 @@ void LocalDerivationGoal::startDaemon()
                 (struct sockaddr *) &remoteAddr, &remoteAddrLen);
             if (!remote) {
                 if (errno == EINTR || errno == EAGAIN) continue;
-                if (errno == EINVAL) break;
+                if (errno == EINVAL || errno == ECONNABORTED) break;
                 throw SysError("accepting connection");
             }
 
@@ -1493,8 +1499,22 @@ void LocalDerivationGoal::startDaemon()
 
 void LocalDerivationGoal::stopDaemon()
 {
-    if (daemonSocket && shutdown(daemonSocket.get(), SHUT_RDWR) == -1)
-        throw SysError("shutting down daemon socket");
+    if (daemonSocket && shutdown(daemonSocket.get(), SHUT_RDWR) == -1) {
+        // According to the POSIX standard, the 'shutdown' function should
+        // return an ENOTCONN error when attempting to shut down a socket that
+        // hasn't been connected yet. This situation occurs when the 'accept'
+        // function is called on a socket without any accepted connections,
+        // leaving the socket unconnected. While Linux doesn't seem to produce
+        // an error for sockets that have only been accepted, more
+        // POSIX-compliant operating systems like OpenBSD, macOS, and others do
+        // return the ENOTCONN error. Therefore, we handle this error here to
+        // avoid raising an exception for compliant behaviour.
+        if (errno == ENOTCONN) {
+            daemonSocket.close();
+        } else {
+            throw SysError("shutting down daemon socket");
+        }
+    }
 
     if (daemonThread.joinable())
         daemonThread.join();
@@ -1505,7 +1525,8 @@ void LocalDerivationGoal::stopDaemon()
         thread.join();
     daemonWorkerThreads.clear();
 
-    daemonSocket = -1;
+    // release the socket.
+    daemonSocket.close();
 }
 
 
@@ -2385,18 +2406,21 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
             continue;
         auto references = *referencesOpt;
 
-        auto rewriteOutput = [&]() {
+        auto rewriteOutput = [&](const StringMap & rewrites) {
             /* Apply hash rewriting if necessary. */
-            if (!outputRewrites.empty()) {
+            if (!rewrites.empty()) {
                 debug("rewriting hashes in '%1%'; cross fingers", actualPath);
 
-                /* FIXME: this is in-memory. */
-                StringSink sink;
-                dumpPath(actualPath, sink);
+                /* FIXME: Is this actually streaming? */
+                auto source = sinkToSource([&](Sink & nextSink) {
+                    RewritingSink rsink(rewrites, nextSink);
+                    dumpPath(actualPath, rsink);
+                    rsink.flush();
+                });
+                Path tmpPath = actualPath + ".tmp";
+                restorePath(tmpPath, *source);
                 deletePath(actualPath);
-                sink.s = rewriteStrings(sink.s, outputRewrites);
-                StringSource source(sink.s);
-                restorePath(actualPath, source);
+                movePath(tmpPath, actualPath);
 
                 /* FIXME: set proper permissions in restorePath() so
                    we don't have to do another traversal. */
@@ -2445,7 +2469,7 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                         "since recursive hashing is not enabled (one of outputHashMode={flat,text} is true)",
                         actualPath);
             }
-            rewriteOutput();
+            rewriteOutput(outputRewrites);
             /* FIXME optimize and deduplicate with addToStore */
             std::string oldHashPart { scratchPath->hashPart() };
             HashModuloSink caSink { outputHash.hashType, oldHashPart };
@@ -2483,16 +2507,14 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                 Hash::dummy,
             };
             if (*scratchPath != newInfo0.path) {
-                // Also rewrite the output path
-                auto source = sinkToSource([&](Sink & nextSink) {
-                    RewritingSink rsink2(oldHashPart, std::string(newInfo0.path.hashPart()), nextSink);
-                    dumpPath(actualPath, rsink2);
-                    rsink2.flush();
-                });
-                Path tmpPath = actualPath + ".tmp";
-                restorePath(tmpPath, *source);
-                deletePath(actualPath);
-                movePath(tmpPath, actualPath);
+                // If the path has some self-references, we need to rewrite
+                // them.
+                // (note that this doesn't invalidate the ca hash we calculated
+                // above because it's computed *modulo the self-references*, so
+                // it already takes this rewrite into account).
+                rewriteOutput(
+                    StringMap{{oldHashPart,
+                               std::string(newInfo0.path.hashPart())}});
             }
 
             HashResult narHashAndSize = hashPath(htSHA256, actualPath);
@@ -2514,7 +2536,7 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                     outputRewrites.insert_or_assign(
                         std::string { scratchPath->hashPart() },
                         std::string { requiredFinalPath.hashPart() });
-                rewriteOutput();
+                rewriteOutput(outputRewrites);
                 auto narHashAndSize = hashPath(htSHA256, actualPath);
                 ValidPathInfo newInfo0 { requiredFinalPath, narHashAndSize.first };
                 newInfo0.narSize = narHashAndSize.second;
@@ -2526,16 +2548,16 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
             },
 
             [&](const DerivationOutput::CAFixed & dof) {
-                auto wanted = dof.ca.getHash();
+                auto & wanted = dof.ca.hash;
 
                 auto newInfo0 = newInfoFromCA(DerivationOutput::CAFloating {
-                    .method = dof.ca.getMethod(),
+                    .method = dof.ca.method,
                     .hashType = wanted.type,
                 });
 
                 /* Check wanted hash */
                 assert(newInfo0.ca);
-                auto got = newInfo0.ca->getHash();
+                auto & got = newInfo0.ca->hash;
                 if (wanted != got) {
                     /* Throw an error after registering the path as
                        valid. */

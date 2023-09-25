@@ -190,7 +190,11 @@ LocalStore::LocalStore(const Params & params)
 
     /* Create missing state directories if they don't already exist. */
     createDirs(realStoreDir);
-    makeStoreWritable();
+    if (readOnly) {
+        experimentalFeatureSettings.require(Xp::ReadOnlyLocalStore);
+    } else {
+        makeStoreWritable();
+    }
     createDirs(linksDir);
     Path profilesDir = stateDir + "/profiles";
     createDirs(profilesDir);
@@ -204,8 +208,10 @@ LocalStore::LocalStore(const Params & params)
 
     for (auto & perUserDir : {profilesDir + "/per-user", gcRootsDir + "/per-user"}) {
         createDirs(perUserDir);
-        if (chmod(perUserDir.c_str(), 0755) == -1)
-            throw SysError("could not set permissions on '%s' to 755", perUserDir);
+        if (!readOnly) {
+            if (chmod(perUserDir.c_str(), 0755) == -1)
+                throw SysError("could not set permissions on '%s' to 755", perUserDir);
+        }
     }
 
     /* Optionally, create directories and set permissions for a
@@ -269,10 +275,12 @@ LocalStore::LocalStore(const Params & params)
 
     /* Acquire the big fat lock in shared mode to make sure that no
        schema upgrade is in progress. */
-    Path globalLockPath = dbDir + "/big-lock";
-    globalLock = openLockFile(globalLockPath.c_str(), true);
+    if (!readOnly) {
+        Path globalLockPath = dbDir + "/big-lock";
+        globalLock = openLockFile(globalLockPath.c_str(), true);
+    }
 
-    if (!lockFile(globalLock.get(), ltRead, false)) {
+    if (!readOnly && !lockFile(globalLock.get(), ltRead, false)) {
         printInfo("waiting for the big Nix store lock...");
         lockFile(globalLock.get(), ltRead, true);
     }
@@ -280,6 +288,14 @@ LocalStore::LocalStore(const Params & params)
     /* Check the current database schema and if necessary do an
        upgrade.  */
     int curSchema = getSchema();
+    if (readOnly && curSchema < nixSchemaVersion) {
+        debug("current schema version: %d", curSchema);
+        debug("supported schema version: %d", nixSchemaVersion);
+        throw Error(curSchema == 0 ?
+            "database does not exist, and cannot be created in read-only mode" :
+            "database schema needs migrating, but this cannot be done in read-only mode");
+    }
+
     if (curSchema > nixSchemaVersion)
         throw Error("current Nix store schema is version %1%, but I only support %2%",
              curSchema, nixSchemaVersion);
@@ -344,7 +360,11 @@ LocalStore::LocalStore(const Params & params)
     else openDB(*state, false);
 
     if (experimentalFeatureSettings.isEnabled(Xp::CaDerivations)) {
-        migrateCASchema(state->db, dbDir + "/ca-schema", globalLock);
+        if (!readOnly) {
+            migrateCASchema(state->db, dbDir + "/ca-schema", globalLock);
+        } else {
+            throw Error("need to migrate to content-addressed schema, but this cannot be done in read-only mode");
+        }
     }
 
     /* Prepare SQL statements. */
@@ -475,13 +495,20 @@ int LocalStore::getSchema()
 
 void LocalStore::openDB(State & state, bool create)
 {
-    if (access(dbDir.c_str(), R_OK | W_OK))
+    if (create && readOnly) {
+        throw Error("cannot create database while in read-only mode");
+    }
+
+    if (access(dbDir.c_str(), R_OK | (readOnly ? 0 : W_OK)))
         throw SysError("Nix database directory '%1%' is not writable", dbDir);
 
     /* Open the Nix database. */
     std::string dbPath = dbDir + "/db.sqlite";
     auto & db(state.db);
-    state.db = SQLite(dbPath, create);
+    auto openMode = readOnly ? SQLiteOpenMode::Immutable
+                  : create ? SQLiteOpenMode::Normal
+                  : SQLiteOpenMode::NoCreate;
+    state.db = SQLite(dbPath, openMode);
 
 #ifdef __CYGWIN__
     /* The cygwin version of sqlite3 has a patch which calls
@@ -995,10 +1022,9 @@ StorePathSet LocalStore::queryValidDerivers(const StorePath & path)
 
 
 std::map<std::string, std::optional<StorePath>>
-LocalStore::queryPartialDerivationOutputMap(const StorePath & path_)
+LocalStore::queryStaticPartialDerivationOutputMap(const StorePath & path)
 {
-    auto path = path_;
-    auto outputs = retrySQLite<std::map<std::string, std::optional<StorePath>>>([&]() {
+    return retrySQLite<std::map<std::string, std::optional<StorePath>>>([&]() {
         auto state(_state.lock());
         std::map<std::string, std::optional<StorePath>> outputs;
         uint64_t drvId;
@@ -1010,21 +1036,6 @@ LocalStore::queryPartialDerivationOutputMap(const StorePath & path_)
 
         return outputs;
     });
-
-    if (!experimentalFeatureSettings.isEnabled(Xp::CaDerivations))
-        return outputs;
-
-    auto drv = readInvalidDerivation(path);
-    auto drvHashes = staticOutputHashes(*this, drv);
-    for (auto& [outputName, hash] : drvHashes) {
-        auto realisation = queryRealisation(DrvOutput{hash, outputName});
-        if (realisation)
-            outputs.insert_or_assign(outputName, realisation->outPath);
-        else
-            outputs.insert({outputName, std::nullopt});
-    }
-
-    return outputs;
 }
 
 std::optional<StorePath> LocalStore::queryPathFromHashPart(const std::string & hashPart)
@@ -1222,27 +1233,17 @@ void LocalStore::addToStore(const ValidPathInfo & info, Source & source,
                     printStorePath(info.path), info.narSize, hashResult.second);
 
             if (info.ca) {
-                if (auto foHash = std::get_if<FixedOutputHash>(&info.ca->raw)) {
-                    auto actualFoHash = hashCAPath(
-                        foHash->method,
-                        foHash->hash.type,
-                        info.path
-                    );
-                    if (foHash->hash != actualFoHash.hash) {
-                        throw Error("ca hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
-                            printStorePath(info.path),
-                            foHash->hash.to_string(Base32, true),
-                            actualFoHash.hash.to_string(Base32, true));
-                    }
-                }
-                if (auto textHash = std::get_if<TextHash>(&info.ca->raw)) {
-                    auto actualTextHash = hashString(htSHA256, readFile(realPath));
-                    if (textHash->hash != actualTextHash) {
-                        throw Error("ca hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
-                            printStorePath(info.path),
-                            textHash->hash.to_string(Base32, true),
-                            actualTextHash.to_string(Base32, true));
-                    }
+                auto & specified = *info.ca;
+                auto actualHash = hashCAPath(
+                    specified.method,
+                    specified.hash.type,
+                    info.path
+                );
+                if (specified.hash != actualHash.hash) {
+                    throw Error("ca hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
+                        printStorePath(info.path),
+                        specified.hash.to_string(Base32, true),
+                        actualHash.hash.to_string(Base32, true));
                 }
             }
 
@@ -1322,10 +1323,8 @@ StorePath LocalStore::addToStoreFromDump(Source & source0, std::string_view name
     auto [hash, size] = hashSink->finish();
 
     ContentAddressWithReferences desc = FixedOutputInfo {
-        .hash = {
-            .method = method,
-            .hash = hash,
-        },
+        .method = method,
+        .hash = hash,
         .references = {
             .others = references,
             // caller is not capable of creating a self-reference, because this is content-addressed without modulus
@@ -1401,8 +1400,8 @@ StorePath LocalStore::addTextToStore(
 {
     auto hash = hashString(htSHA256, s);
     auto dstPath = makeTextPath(name, TextInfo {
-        { .hash = hash },
-        references,
+        .hash = hash,
+        .references = references,
     });
 
     addTempRoot(dstPath);
@@ -1432,7 +1431,10 @@ StorePath LocalStore::addTextToStore(
             ValidPathInfo info { dstPath, narHash };
             info.narSize = sink.s.size();
             info.references = references;
-            info.ca = TextHash { .hash = hash };
+            info.ca = {
+                .method = TextIngestionMethod {},
+                .hash = hash,
+            };
             registerValidPath(info);
         }
 
@@ -1829,33 +1831,39 @@ void LocalStore::queryRealisationUncached(const DrvOutput & id,
     }
 }
 
-FixedOutputHash LocalStore::hashCAPath(
-    const FileIngestionMethod & method, const HashType & hashType,
+ContentAddress LocalStore::hashCAPath(
+    const ContentAddressMethod & method, const HashType & hashType,
     const StorePath & path)
 {
     return hashCAPath(method, hashType, Store::toRealPath(path), path.hashPart());
 }
 
-FixedOutputHash LocalStore::hashCAPath(
-    const FileIngestionMethod & method,
+ContentAddress LocalStore::hashCAPath(
+    const ContentAddressMethod & method,
     const HashType & hashType,
     const Path & path,
     const std::string_view pathHash
 )
 {
     HashModuloSink caSink ( hashType, std::string(pathHash) );
-    switch (method) {
-    case FileIngestionMethod::Recursive:
-        dumpPath(path, caSink);
-        break;
-    case FileIngestionMethod::Flat:
-        readFile(path, caSink);
-        break;
-    }
-    auto hash = caSink.finish().first;
-    return FixedOutputHash{
+    std::visit(overloaded {
+        [&](const TextIngestionMethod &) {
+            readFile(path, caSink);
+        },
+        [&](const FileIngestionMethod & m2) {
+            switch (m2) {
+            case FileIngestionMethod::Recursive:
+                dumpPath(path, caSink);
+                break;
+            case FileIngestionMethod::Flat:
+                readFile(path, caSink);
+                break;
+            }
+        },
+    }, method.raw);
+    return ContentAddress {
         .method = method,
-        .hash = hash,
+        .hash = caSink.finish().first,
     };
 }
 
