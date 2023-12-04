@@ -3,6 +3,7 @@
 
 #include "realisation.hh"
 #include "derived-path.hh"
+#include "comparator.hh"
 
 #include <string>
 #include <chrono>
@@ -84,15 +85,10 @@ struct BuildResult
     bool isNonDeterministic = false;
 
     /**
-     * The derivation we built or the store path we substituted.
-     */
-    DerivedPath path;
-
-    /**
      * For derivations, a mapping from the names of the wanted outputs
      * to actual paths.
      */
-    DrvOutputs builtOutputs;
+    SingleDrvOutputs builtOutputs;
 
     /**
      * The start/stop times of the build (or one of the rounds, if it
@@ -105,6 +101,8 @@ struct BuildResult
      */
     std::optional<std::chrono::microseconds> cpuUser, cpuSystem;
 
+    DECLARE_CMP(BuildResult);
+
     bool success()
     {
         return status == Built || status == Substituted || status == AlreadyValid || status == ResolvesToAlreadyValid;
@@ -114,6 +112,17 @@ struct BuildResult
     {
         throw Error("%s", errorMsg);
     }
+};
+
+/**
+ * A `BuildResult` together with its "primary key".
+ */
+struct KeyedBuildResult : BuildResult
+{
+    /**
+     * The derivation we built or the store path we substituted.
+     */
+    DerivedPath path;
 };
 
 }

@@ -34,6 +34,23 @@ typedef std::set<WeakGoalPtr, std::owner_less<WeakGoalPtr>> WeakGoals;
  */
 typedef std::map<StorePath, WeakGoalPtr> WeakGoalMap;
 
+/**
+ * Used as a hint to the worker on how to schedule a particular goal. For example,
+ * builds are typically CPU- and memory-bound, while substitutions are I/O bound.
+ * Using this information, the worker might decide to schedule more or fewer goals
+ * of each category in parallel.
+ */
+enum struct JobCategory {
+    /**
+     * A build of a derivation; it will use CPU and disk resources.
+     */
+    Build,
+    /**
+     * A substitution an arbitrary store object; it will use network resources.
+     */
+    Substitution,
+};
+
 struct Goal : public std::enable_shared_from_this<Goal>
 {
     typedef enum {ecBusy, ecSuccess, ecFailed, ecNoSubstituters, ecIncompleteClosure} ExitCode;
@@ -81,10 +98,25 @@ struct Goal : public std::enable_shared_from_this<Goal>
      */
     ExitCode exitCode = ecBusy;
 
+protected:
     /**
      * Build result.
      */
     BuildResult buildResult;
+
+public:
+
+    /**
+     * Project a `BuildResult` with just the information that pertains
+     * to the given request.
+     *
+     * In general, goals may be aliased between multiple requests, and
+     * the stored `BuildResult` has information for the union of all
+     * requests. We don't want to leak what the other request are for
+     * sake of both privacy and determinism, and this "safe accessor"
+     * ensures we don't.
+     */
+    BuildResult getBuildResult(const DerivedPath &) const;
 
     /**
      * Exception containing an error message, if any.
@@ -93,7 +125,6 @@ struct Goal : public std::enable_shared_from_this<Goal>
 
     Goal(Worker & worker, DerivedPath path)
         : worker(worker)
-        , buildResult { .path = std::move(path) }
     { }
 
     virtual ~Goal()
@@ -119,7 +150,7 @@ struct Goal : public std::enable_shared_from_this<Goal>
 
     void trace(std::string_view s);
 
-    std::string getName()
+    std::string getName() const
     {
         return name;
     }
@@ -136,6 +167,12 @@ struct Goal : public std::enable_shared_from_this<Goal>
     void amDone(ExitCode result, std::optional<Error> ex = {});
 
     virtual void cleanup() { }
+
+    /**
+     * @brief Hint for the scheduler, which concurrency limit applies.
+     * @see JobCategory
+     */
+    virtual JobCategory jobCategory() const = 0;
 };
 
 void addToWeakGoals(WeakGoals & goals, GoalPtr p);

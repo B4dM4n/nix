@@ -1,5 +1,8 @@
 #include "util.hh"
 #include "types.hh"
+#include "file-system.hh"
+#include "processes.hh"
+#include "terminal.hh"
 
 #include <limits.h>
 #include <gtest/gtest.h>
@@ -202,7 +205,7 @@ namespace nix {
     }
 
     TEST(pathExists, bogusPathDoesNotExist) {
-        ASSERT_FALSE(pathExists("/home/schnitzel/darmstadt/pommes"));
+        ASSERT_FALSE(pathExists("/schnitzel/darmstadt/pommes"));
     }
 
     /* ----------------------------------------------------------------------------

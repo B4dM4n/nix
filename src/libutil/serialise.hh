@@ -5,6 +5,7 @@
 
 #include "types.hh"
 #include "util.hh"
+#include "file-descriptor.hh"
 
 namespace boost::context { struct stack_context; }
 
@@ -53,7 +54,9 @@ struct BufferedSink : virtual Sink
 
     void flush();
 
-    virtual void write(std::string_view data) = 0;
+protected:
+
+    virtual void writeUnbuffered(std::string_view data) = 0;
 };
 
 
@@ -70,6 +73,7 @@ struct Source
      * an error if it is not going to be available.
      */
     void operator () (char * data, size_t len);
+    void operator () (std::string_view data);
 
     /**
      * Store up to ‘len’ in the buffer pointed to by ‘data’, and
@@ -133,7 +137,7 @@ struct FdSink : BufferedSink
 
     ~FdSink();
 
-    void write(std::string_view data) override;
+    void writeUnbuffered(std::string_view data) override;
 
     bool good() override;
 
@@ -520,7 +524,7 @@ struct FramedSink : nix::BufferedSink
         }
     }
 
-    void write(std::string_view data) override
+    void writeUnbuffered(std::string_view data) override
     {
         /* Don't send more data if the remote has
             encountered an error. */

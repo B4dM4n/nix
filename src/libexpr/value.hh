@@ -2,9 +2,12 @@
 ///@file
 
 #include <cassert>
+#include <climits>
+#include <span>
 
 #include "symbol-table.hh"
 #include "value/context.hh"
+#include "input-accessor.hh"
 
 #if HAVE_BOEHMGC
 #include <gc/gc_allocator.h>
@@ -100,7 +103,7 @@ class ExternalValueBase
      * Coerce the value to a string. Defaults to uncoercable, i.e. throws an
      * error.
      */
-    virtual std::string coerceToString(const Pos & pos, PathSet & context, bool copyMore, bool copyToStore) const;
+    virtual std::string coerceToString(const Pos & pos, NixStringContext & context, bool copyMore, bool copyToStore) const;
 
     /**
      * Compare to another value of the same type. Defaults to uncomparable,
@@ -112,13 +115,13 @@ class ExternalValueBase
      * Print the value as JSON. Defaults to unconvertable, i.e. throws an error
      */
     virtual nlohmann::json printValueAsJSON(EvalState & state, bool strict,
-        PathSet & context, bool copyToStore = true) const;
+        NixStringContext & context, bool copyToStore = true) const;
 
     /**
      * Print the value as XML. Defaults to unevaluated
      */
     virtual void printValueAsXML(EvalState & state, bool strict, bool location,
-        XMLWriter & doc, PathSet & context, PathSet & drvsSeen,
+        XMLWriter & doc, NixStringContext & context, PathSet & drvsSeen,
         const PosIdx pos) const;
 
     virtual ~ExternalValueBase()
@@ -136,11 +139,11 @@ private:
 
     friend std::string showType(const Value & v);
 
-    void print(const SymbolTable & symbols, std::ostream & str, std::set<const void *> * seen) const;
+    void print(const SymbolTable &symbols, std::ostream &str, std::set<const void *> *seen, int depth) const;
 
 public:
 
-    void print(const SymbolTable & symbols, std::ostream & str, bool showRepeated = false) const;
+    void print(const SymbolTable &symbols, std::ostream &str, bool showRepeated = false, int depth = INT_MAX) const;
 
     // Functions needed to distinguish the type
     // These should be removed eventually, by putting the functionality that's
@@ -156,60 +159,72 @@ public:
     inline bool isPrimOp() const { return internalType == tPrimOp; };
     inline bool isPrimOpApp() const { return internalType == tPrimOpApp; };
 
+    /**
+     * Strings in the evaluator carry a so-called `context` which
+     * is a list of strings representing store paths.  This is to
+     * allow users to write things like
+     *
+     *   "--with-freetype2-library=" + freetype + "/lib"
+     *
+     * where `freetype` is a derivation (or a source to be copied
+     * to the store).  If we just concatenated the strings without
+     * keeping track of the referenced store paths, then if the
+     * string is used as a derivation attribute, the derivation
+     * will not have the correct dependencies in its inputDrvs and
+     * inputSrcs.
+
+     * The semantics of the context is as follows: when a string
+     * with context C is used as a derivation attribute, then the
+     * derivations in C will be added to the inputDrvs of the
+     * derivation, and the other store paths in C will be added to
+     * the inputSrcs of the derivations.
+
+     * For canonicity, the store paths should be in sorted order.
+     */
+    struct StringWithContext {
+        const char * c_str;
+        const char * * context; // must be in sorted order
+    };
+
+    struct Path {
+        InputAccessor * accessor;
+        const char * path;
+    };
+
+    struct ClosureThunk {
+        Env * env;
+        Expr * expr;
+    };
+
+    struct FunctionApplicationThunk {
+        Value * left, * right;
+    };
+
+    struct Lambda {
+        Env * env;
+        ExprLambda * fun;
+    };
+
     union
     {
         NixInt integer;
         bool boolean;
 
-        /**
-         * Strings in the evaluator carry a so-called `context` which
-         * is a list of strings representing store paths.  This is to
-         * allow users to write things like
+        StringWithContext string;
 
-         *   "--with-freetype2-library=" + freetype + "/lib"
+        Path _path;
 
-         * where `freetype` is a derivation (or a source to be copied
-         * to the store).  If we just concatenated the strings without
-         * keeping track of the referenced store paths, then if the
-         * string is used as a derivation attribute, the derivation
-         * will not have the correct dependencies in its inputDrvs and
-         * inputSrcs.
-
-         * The semantics of the context is as follows: when a string
-         * with context C is used as a derivation attribute, then the
-         * derivations in C will be added to the inputDrvs of the
-         * derivation, and the other store paths in C will be added to
-         * the inputSrcs of the derivations.
-
-         * For canonicity, the store paths should be in sorted order.
-         */
-        struct {
-            const char * s;
-            const char * * context; // must be in sorted order
-        } string;
-
-        const char * path;
         Bindings * attrs;
         struct {
             size_t size;
             Value * * elems;
         } bigList;
         Value * smallList[2];
-        struct {
-            Env * env;
-            Expr * expr;
-        } thunk;
-        struct {
-            Value * left, * right;
-        } app;
-        struct {
-            Env * env;
-            ExprLambda * fun;
-        } lambda;
+        ClosureThunk thunk;
+        FunctionApplicationThunk app;
+        Lambda lambda;
         PrimOp * primOp;
-        struct {
-            Value * left, * right;
-        } primOpApp;
+        FunctionApplicationThunk primOpApp;
         ExternalValueBase * external;
         NixFloat fpoint;
     };
@@ -217,8 +232,11 @@ public:
     /**
      * Returns the normal type of a Value. This only returns nThunk if
      * the Value hasn't been forceValue'd
+     *
+     * @param invalidIsThunk Instead of aborting an an invalid (probably
+     * 0, so uninitialized) internal type, return `nThunk`.
      */
-    inline ValueType type() const
+    inline ValueType type(bool invalidIsThunk = false) const
     {
         switch (internalType) {
             case tInt: return nInt;
@@ -233,7 +251,10 @@ public:
             case tFloat: return nFloat;
             case tThunk: case tApp: case tBlackhole: return nThunk;
         }
-        abort();
+        if (invalidIsThunk)
+            return nThunk;
+        else
+            abort();
     }
 
     /**
@@ -262,24 +283,30 @@ public:
     inline void mkString(const char * s, const char * * context = 0)
     {
         internalType = tString;
-        string.s = s;
+        string.c_str = s;
         string.context = context;
     }
 
     void mkString(std::string_view s);
 
-    void mkString(std::string_view s, const PathSet & context);
+    void mkString(std::string_view s, const NixStringContext & context);
 
-    void mkStringMove(const char * s, const PathSet & context);
+    void mkStringMove(const char * s, const NixStringContext & context);
 
-    inline void mkPath(const char * s)
+    inline void mkString(const Symbol & s)
+    {
+        mkString(((const std::string &) s).c_str());
+    }
+
+    void mkPath(const SourcePath & path);
+
+    inline void mkPath(InputAccessor * accessor, const char * path)
     {
         clearValue();
         internalType = tPath;
-        path = s;
+        _path.accessor = accessor;
+        _path.path = path;
     }
-
-    void mkPath(std::string_view s);
 
     inline void mkNull()
     {
@@ -336,13 +363,7 @@ public:
         // Value will be overridden anyways
     }
 
-    inline void mkPrimOp(PrimOp * p)
-    {
-        clearValue();
-        internalType = tPrimOp;
-        primOp = p;
-    }
-
+    void mkPrimOp(PrimOp * p);
 
     inline void mkPrimOpApp(Value * l, Value * r)
     {
@@ -375,7 +396,13 @@ public:
         return internalType == tList1 || internalType == tList2 ? smallList : bigList.elems;
     }
 
-    const Value * const * listElems() const
+    std::span<Value * const> listItems() const
+    {
+        assert(isList());
+        return std::span<Value * const>(listElems(), listSize());
+    }
+
+    Value * const * listElems() const
     {
         return internalType == tList1 || internalType == tList2 ? smallList : bigList.elems;
     }
@@ -394,34 +421,30 @@ public:
      */
     bool isTrivial() const;
 
-    NixStringContext getContext(const Store &);
-
-    auto listItems()
+    SourcePath path() const
     {
-        struct ListIterable
-        {
-            typedef Value * const * iterator;
-            iterator _begin, _end;
-            iterator begin() const { return _begin; }
-            iterator end() const { return _end; }
+        assert(internalType == tPath);
+        return SourcePath {
+            .accessor = ref(_path.accessor->shared_from_this()),
+            .path = CanonPath(CanonPath::unchecked_t(), _path.path)
         };
-        assert(isList());
-        auto begin = listElems();
-        return ListIterable { begin, begin + listSize() };
     }
 
-    auto listItems() const
+    std::string_view string_view() const
     {
-        struct ConstListIterable
-        {
-            typedef const Value * const * iterator;
-            iterator _begin, _end;
-            iterator begin() const { return _begin; }
-            iterator end() const { return _end; }
-        };
-        assert(isList());
-        auto begin = listElems();
-        return ConstListIterable { begin, begin + listSize() };
+        assert(internalType == tString);
+        return std::string_view(string.c_str);
+    }
+
+    const char * const c_str() const
+    {
+        assert(internalType == tString);
+        return string.c_str;
+    }
+
+    const char * * context() const
+    {
+        return string.context;
     }
 };
 

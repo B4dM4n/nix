@@ -1,5 +1,8 @@
 #include "ssh.hh"
 #include "finally.hh"
+#include "current-process.hh"
+#include "environment-variables.hh"
+#include "util.hh"
 
 namespace nix {
 
@@ -39,6 +42,14 @@ void SSHMaster::addCommonSSHOpts(Strings & args)
 
     args.push_back("-oPermitLocalCommand=yes");
     args.push_back("-oLocalCommand=echo started");
+}
+
+bool SSHMaster::isMasterRunning() {
+    Strings args = {"-O", "check", host};
+    addCommonSSHOpts(args);
+
+    auto res = runProgram(RunOptions {.program = "ssh", .args = args, .mergeStderrToStdout = true});
+    return res.first == 0;
 }
 
 std::unique_ptr<SSHMaster::Connection> SSHMaster::startCommand(const std::string & command)
@@ -97,14 +108,16 @@ std::unique_ptr<SSHMaster::Connection> SSHMaster::startCommand(const std::string
 
     // Wait for the SSH connection to be established,
     // So that we don't overwrite the password prompt with our progress bar.
-    if (!fakeSSH && !useMaster) {
+    if (!fakeSSH && !useMaster && !isMasterRunning()) {
         std::string reply;
         try {
             reply = readLine(out.readSide.get());
         } catch (EndOfFile & e) { }
 
-        if (reply != "started")
+        if (reply != "started") {
+            printTalkative("SSH stdout first line: %s", reply);
             throw Error("failed to start SSH connection to '%s'", host);
+        }
     }
 
     conn->out = std::move(out.readSide);
@@ -121,7 +134,6 @@ Path SSHMaster::startMaster()
 
     if (state->sshMaster != -1) return state->socketPath;
 
-
     state->socketPath = (Path) *state->tmpDir + "/ssh.sock";
 
     Pipe out;
@@ -132,6 +144,9 @@ Path SSHMaster::startMaster()
 
     logger->pause();
     Finally cleanup = [&]() { logger->resume(); };
+
+    if (isMasterRunning())
+        return state->socketPath;
 
     state->sshMaster = startProcess([&]() {
         restoreProcessContext();
@@ -157,8 +172,10 @@ Path SSHMaster::startMaster()
         reply = readLine(out.readSide.get());
     } catch (EndOfFile & e) { }
 
-    if (reply != "started")
+    if (reply != "started") {
+        printTalkative("SSH master stdout first line: %s", reply);
         throw Error("failed to start SSH master connection to '%s'", host);
+    }
 
     return state->socketPath;
 }

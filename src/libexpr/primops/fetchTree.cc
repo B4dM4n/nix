@@ -1,10 +1,13 @@
 #include "primops.hh"
 #include "eval-inline.hh"
+#include "eval-settings.hh"
 #include "store-api.hh"
 #include "fetchers.hh"
 #include "filetransfer.hh"
 #include "registry.hh"
+#include "tarball.hh"
 #include "url.hh"
+#include "value-to-json.hh"
 
 #include <ctime>
 #include <iomanip>
@@ -14,7 +17,7 @@ namespace nix {
 
 void emitTreeAttrs(
     EvalState & state,
-    const fetchers::Tree & tree,
+    const StorePath & storePath,
     const fetchers::Input & input,
     Value & v,
     bool emptyRevFallback,
@@ -22,17 +25,15 @@ void emitTreeAttrs(
 {
     assert(input.isLocked());
 
-    auto attrs = state.buildBindings(8);
+    auto attrs = state.buildBindings(10);
 
-    auto storePath = state.store->printStorePath(tree.storePath);
-
-    attrs.alloc(state.sOutPath).mkString(storePath, {storePath});
+    state.mkStorePathString(storePath, attrs.alloc(state.sOutPath));
 
     // FIXME: support arbitrary input attributes.
 
     auto narHash = input.getNarHash();
     assert(narHash);
-    attrs.alloc("narHash").mkString(narHash->to_string(SRI, true));
+    attrs.alloc("narHash").mkString(narHash->to_string(HashFormat::SRI, true));
 
     if (input.getType() == "git")
         attrs.alloc("submodules").mkBool(
@@ -57,6 +58,11 @@ void emitTreeAttrs(
 
     }
 
+    if (auto dirtyRev = fetchers::maybeGetStrAttr(input.attrs, "dirtyRev")) {
+        attrs.alloc("dirtyRev").mkString(*dirtyRev);
+        attrs.alloc("dirtyShortRev").mkString(*fetchers::maybeGetStrAttr(input.attrs, "dirtyShortRev"));
+    }
+
     if (auto lastModified = input.getLastModified()) {
         attrs.alloc("lastModified").mkInt(*lastModified);
         attrs.alloc("lastModifiedDate").mkString(
@@ -66,36 +72,10 @@ void emitTreeAttrs(
     v.mkAttrs(attrs);
 }
 
-std::string fixURI(std::string uri, EvalState & state, const std::string & defaultScheme = "file")
-{
-    state.checkURI(uri);
-    if (uri.find("://") == std::string::npos) {
-        const auto p = ParsedURL {
-            .scheme = defaultScheme,
-            .authority = "",
-            .path = uri
-        };
-        return p.to_string();
-    } else {
-        return uri;
-    }
-}
-
-std::string fixURIForGit(std::string uri, EvalState & state)
-{
-    /* Detects scp-style uris (e.g. git@github.com:NixOS/nix) and fixes
-     * them by removing the `:` and assuming a scheme of `ssh://`
-     * */
-    static std::regex scp_uri("([^/]*)@(.*):(.*)");
-    if (uri[0] != '/' && std::regex_match(uri, scp_uri))
-        return fixURI(std::regex_replace(uri, scp_uri, "$1@$2/$3"), state, "ssh");
-    else
-        return fixURI(uri, state);
-}
-
 struct FetchTreeParams {
     bool emptyRevFallback = false;
     bool allowNameArgument = false;
+    bool isFetchGit = false;
 };
 
 static void fetchTree(
@@ -103,11 +83,12 @@ static void fetchTree(
     const PosIdx pos,
     Value * * args,
     Value & v,
-    std::optional<std::string> type,
     const FetchTreeParams & params = FetchTreeParams{}
 ) {
     fetchers::Input input;
-    PathSet context;
+    NixStringContext context;
+    std::optional<std::string> type;
+    if (params.isFetchGit) type = "git";
 
     state.forceValue(*args[0], pos);
 
@@ -137,16 +118,18 @@ static void fetchTree(
             if (attr.value->type() == nPath || attr.value->type() == nString) {
                 auto s = state.coerceToString(attr.pos, *attr.value, context, "", false, false).toOwned();
                 attrs.emplace(state.symbols[attr.name],
-                    state.symbols[attr.name] == "url"
-                    ? type == "git"
-                      ? fixURIForGit(s, state)
-                      : fixURI(s, state)
+                    params.isFetchGit && state.symbols[attr.name] == "url"
+                    ? fixGitURL(s)
                     : s);
             }
             else if (attr.value->type() == nBool)
                 attrs.emplace(state.symbols[attr.name], Explicit<bool>{attr.value->boolean});
             else if (attr.value->type() == nInt)
                 attrs.emplace(state.symbols[attr.name], uint64_t(attr.value->integer));
+            else if (state.symbols[attr.name] == "publicKeys") {
+                experimentalFeatureSettings.require(Xp::VerifiedFetches);
+                attrs.emplace(state.symbols[attr.name], printValueAsJSON(state, true, *attr.value, pos, context).dump());
+            }
             else
                 state.debugThrowLastTrace(TypeError("fetchTree argument '%s' is %s while a string, Boolean or integer is expected",
                     state.symbols[attr.name], showType(*attr.value)));
@@ -165,37 +148,88 @@ static void fetchTree(
                 "while evaluating the first argument passed to the fetcher",
                 false, false).toOwned();
 
-        if (type == "git") {
+        if (params.isFetchGit) {
             fetchers::Attrs attrs;
             attrs.emplace("type", "git");
-            attrs.emplace("url", fixURIForGit(url, state));
+            attrs.emplace("url", fixGitURL(url));
             input = fetchers::Input::fromAttrs(std::move(attrs));
         } else {
-            input = fetchers::Input::fromURL(fixURI(url, state));
+            if (!experimentalFeatureSettings.isEnabled(Xp::Flakes))
+                state.debugThrowLastTrace(EvalError({
+                    .msg = hintfmt("passing a string argument to 'fetchTree' requires the 'flakes' experimental feature"),
+                    .errPos = state.positions[pos]
+                }));
+            input = fetchers::Input::fromURL(url);
         }
     }
 
-    if (!evalSettings.pureEval && !input.isDirect())
+    if (!evalSettings.pureEval && !input.isDirect() && experimentalFeatureSettings.isEnabled(Xp::Flakes))
         input = lookupInRegistries(state.store, input).first;
 
     if (evalSettings.pureEval && !input.isLocked())
         state.debugThrowLastTrace(EvalError("in pure evaluation mode, 'fetchTree' requires a locked input, at %s", state.positions[pos]));
 
-    auto [tree, input2] = input.fetch(state.store);
+    state.checkURI(input.toURLString());
 
-    state.allowPath(tree.storePath);
+    auto [storePath, input2] = input.fetch(state.store);
 
-    emitTreeAttrs(state, tree, input2, v, params.emptyRevFallback, false);
+    state.allowPath(storePath);
+
+    emitTreeAttrs(state, storePath, input2, v, params.emptyRevFallback, false);
 }
 
 static void prim_fetchTree(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
-    experimentalFeatureSettings.require(Xp::Flakes);
-    fetchTree(state, pos, args, v, std::nullopt, FetchTreeParams { .allowNameArgument = false });
+    fetchTree(state, pos, args, v, { });
 }
 
-// FIXME: document
-static RegisterPrimOp primop_fetchTree("fetchTree", 1, prim_fetchTree);
+static RegisterPrimOp primop_fetchTree({
+    .name = "fetchTree",
+    .args = {"input"},
+    .doc = R"(
+      Fetch a source tree or a plain file using one of the supported backends.
+      *input* must be a [flake reference](@docroot@/command-ref/new-cli/nix3-flake.md#flake-references), either in attribute set representation or in the URL-like syntax.
+      The input should be "locked", that is, it should contain a commit hash or content hash unless impure evaluation (`--impure`) is enabled.
+
+      > **Note**
+      >
+      > The URL-like syntax requires the [`flakes` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-flakes) to be enabled.
+
+      Here are some examples of how to use `fetchTree`:
+
+      - Fetch a GitHub repository using the attribute set representation:
+
+          ```nix
+          builtins.fetchTree {
+            type = "github";
+            owner = "NixOS";
+            repo = "nixpkgs";
+            rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
+          }
+          ```
+
+        This evaluates to the following attribute set:
+
+          ```
+          {
+            lastModified = 1686503798;
+            lastModifiedDate = "20230611171638";
+            narHash = "sha256-rA9RqKP9OlBrgGCPvfd5HVAXDOy8k2SmPtB/ijShNXc=";
+            outPath = "/nix/store/l5m6qlvfs9sdw14ja3qbzpglcjlb6j1x-source";
+            rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
+            shortRev = "ae2e6b3";
+          }
+          ```
+
+      - Fetch the same GitHub repository using the URL-like syntax:
+
+          ```
+          builtins.fetchTree "github:NixOS/nixpkgs/ae2e6b3958682513d28f7d633734571fb18285dd"
+          ```
+    )",
+    .fun = prim_fetchTree,
+    .experimentalFeature = Xp::FetchTree,
+});
 
 static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v,
     const std::string & who, bool unpack, std::string name)
@@ -243,10 +277,13 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
 
     // early exit if pinned and already in the store
     if (expectedHash && expectedHash->type == htSHA256) {
-        auto expectedPath =
-            unpack
-            ? state.store->makeFixedOutputPath(FileIngestionMethod::Recursive, *expectedHash, name, {})
-            : state.store->makeFixedOutputPath(FileIngestionMethod::Flat, *expectedHash, name, {});
+        auto expectedPath = state.store->makeFixedOutputPath(
+            name,
+            FixedOutputInfo {
+                .method = unpack ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat,
+                .hash = *expectedHash,
+                .references = {}
+            });
 
         if (state.store->isValidPath(expectedPath)) {
             state.allowAndSetStorePathString(expectedPath, v);
@@ -258,7 +295,7 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
     //       https://github.com/NixOS/nix/issues/4313
     auto storePath =
         unpack
-        ? fetchers::downloadTarball(state.store, *url, name, (bool) expectedHash).first.storePath
+        ? fetchers::downloadTarball(state.store, *url, name, (bool) expectedHash).storePath
         : fetchers::downloadFile(state.store, *url, name, (bool) expectedHash).storePath;
 
     if (expectedHash) {
@@ -267,7 +304,7 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
             : hashFile(htSHA256, state.store->toRealPath(storePath));
         if (hash != *expectedHash)
             state.debugThrowLastTrace(EvalError((unsigned int) 102, "hash mismatch in file downloaded from '%s':\n  specified: %s\n  got:       %s",
-                *url, expectedHash->to_string(Base32, true), hash.to_string(Base32, true)));
+                *url, expectedHash->to_string(HashFormat::Base32, true), hash.to_string(HashFormat::Base32, true)));
     }
 
     state.allowAndSetStorePathString(storePath, v);
@@ -282,9 +319,9 @@ static RegisterPrimOp primop_fetchurl({
     .name = "__fetchurl",
     .args = {"url"},
     .doc = R"(
-      Download the specified URL and return the path of the downloaded
-      file. This function is not available if [restricted evaluation
-      mode](../command-ref/conf-file.md) is enabled.
+      Download the specified URL and return the path of the downloaded file.
+
+      Not available in [restricted evaluation mode](@docroot@/command-ref/conf-file.md#conf-restrict-eval).
     )",
     .fun = prim_fetchurl,
 });
@@ -334,15 +371,19 @@ static RegisterPrimOp primop_fetchTarball({
       stdenv.mkDerivation { … }
       ```
 
-      This function is not available if [restricted evaluation
-      mode](../command-ref/conf-file.md) is enabled.
+      Not available in [restricted evaluation mode](@docroot@/command-ref/conf-file.md#conf-restrict-eval).
     )",
     .fun = prim_fetchTarball,
 });
 
 static void prim_fetchGit(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
-    fetchTree(state, pos, args, v, "git", FetchTreeParams { .emptyRevFallback = true, .allowNameArgument = true });
+    fetchTree(state, pos, args, v,
+        FetchTreeParams {
+            .emptyRevFallback = true,
+            .allowNameArgument = true,
+            .isFetchGit = true
+        });
 }
 
 static RegisterPrimOp primop_fetchGit({
@@ -357,7 +398,7 @@ static RegisterPrimOp primop_fetchGit({
 
         The URL of the repo.
 
-      - `name` (default: *basename of the URL*)
+      - `name` (default: `source`)
 
         The name of the directory the repo should be exported to in the store.
 
@@ -391,6 +432,42 @@ static RegisterPrimOp primop_fetchGit({
         Whether to fetch all references of the repository.
         With this argument being true, it's possible to load a `rev` from *any* `ref`
         (by default only `rev`s from the specified `ref` are supported).
+
+      - `verifyCommit` (default: `true` if `publicKey` or `publicKeys` are provided, otherwise `false`)
+
+        Whether to check `rev` for a signature matching `publicKey` or `publicKeys`.
+        If `verifyCommit` is enabled, then `fetchGit` cannot use a local repository with uncommitted changes.
+        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+
+      - `publicKey`
+
+        The public key against which `rev` is verified if `verifyCommit` is enabled.
+        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+
+      - `keytype` (default: `"ssh-ed25519"`)
+
+        The key type of `publicKey`.
+        Possible values:
+        - `"ssh-dsa"`
+        - `"ssh-ecdsa"`
+        - `"ssh-ecdsa-sk"`
+        - `"ssh-ed25519"`
+        - `"ssh-ed25519-sk"`
+        - `"ssh-rsa"`
+        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+
+      - `publicKeys`
+
+        The public keys against which `rev` is verified if `verifyCommit` is enabled.
+        Must be given as a list of attribute sets with the following form:
+        ```nix
+        {
+          key = "<public key>";
+          type = "<key type>"; # optional, default: "ssh-ed25519"
+        }
+        ```
+        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+
 
       Here are some examples of how to use `fetchGit`.
 
@@ -466,14 +543,24 @@ static RegisterPrimOp primop_fetchGit({
           }
           ```
 
-          > **Note**
-          >
-          > Nix will refetch the branch in accordance with
-          > the option `tarball-ttl`.
+        - To verify the commit signature:
 
-          > **Note**
-          >
-          > This behavior is disabled in *Pure evaluation mode*.
+          ```nix
+          builtins.fetchGit {
+            url = "ssh://git@github.com/nixos/nix.git";
+            verifyCommit = true;
+            publicKeys = [
+                {
+                  type = "ssh-ed25519";
+                  key = "AAAAC3NzaC1lZDI1NTE5AAAAIArPKULJOid8eS6XETwUjO48/HKBWl7FTCK0Z//fplDi";
+                }
+            ];
+          }
+          ```
+
+          Nix will refetch the branch according to the [`tarball-ttl`](@docroot@/command-ref/conf-file.md#conf-tarball-ttl) setting.
+
+          This behavior is disabled in [pure evaluation mode](@docroot@/command-ref/conf-file.md#conf-pure-eval).
 
         - To fetch the content of a checked-out work directory:
 

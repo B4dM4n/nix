@@ -98,7 +98,7 @@ EvalCommand::EvalCommand()
 EvalCommand::~EvalCommand()
 {
     if (evalState)
-        evalState->printStats();
+        evalState->maybePrintStats();
 }
 
 ref<Store> EvalCommand::getEvalStore()
@@ -120,6 +120,8 @@ ref<EvalState> EvalCommand::getEvalState()
                 searchPath, getEvalStore(), getStore())
             #endif
             ;
+
+        evalState->repair = repair;
 
         if (startReplOnEvalErrors) {
             evalState->debugRepl = &AbstractNixRepl::runSimple;
@@ -173,7 +175,7 @@ void BuiltPathsCommand::run(ref<Store> store, Installables && installables)
             throw UsageError("'--all' does not expect arguments");
         // XXX: Only uses opaque paths, ignores all the realisations
         for (auto & p : store->queryAllValidPaths())
-            paths.push_back(BuiltPath::Opaque{p});
+            paths.emplace_back(BuiltPath::Opaque{p});
     } else {
         paths = Installable::toBuiltPaths(getEvalStore(), store, realiseMode, operateOn, installables);
         if (recursive) {
@@ -186,7 +188,7 @@ void BuiltPathsCommand::run(ref<Store> store, Installables && installables)
             }
             store->computeFSClosure(pathsRoots, pathsClosure);
             for (auto & path : pathsClosure)
-                paths.push_back(BuiltPath::Opaque{path});
+                paths.emplace_back(BuiltPath::Opaque{path});
         }
     }
 
@@ -237,9 +239,7 @@ void MixProfile::updateProfile(const StorePath & storePath)
     if (!store) throw Error("'--profile' is not supported for this Nix store");
     auto profile2 = absPath(*profile);
     switchLink(profile2,
-        createGeneration(
-            ref<LocalFSStore>(store),
-            profile2, storePath));
+        createGeneration(*store, profile2, storePath));
 }
 
 void MixProfile::updateProfile(const BuiltPaths & buildables)

@@ -50,6 +50,9 @@ struct InitialOutput {
     std::optional<InitialOutputStatus> known;
 };
 
+/**
+ * A goal for building some or all of the outputs of a derivation.
+ */
 struct DerivationGoal : public Goal
 {
     /**
@@ -66,8 +69,7 @@ struct DerivationGoal : public Goal
     std::shared_ptr<DerivationGoal> resolvedDrvGoal;
 
     /**
-     * The specific outputs that we need to build.  Empty means all of
-     * them.
+     * The specific outputs that we need to build.
      */
     OutputsSpec wantedOutputs;
 
@@ -79,21 +81,57 @@ struct DerivationGoal : public Goal
     std::map<std::pair<StorePath, std::string>, StorePath> inputDrvOutputs;
 
     /**
+     * See `needRestart`; just for that field.
+     */
+    enum struct NeedRestartForMoreOutputs {
+        /**
+         * The goal state machine is progressing based on the current value of
+         * `wantedOutputs. No actions are needed.
+         */
+        OutputsUnmodifedDontNeed,
+        /**
+         * `wantedOutputs` has been extended, but the state machine is
+         * proceeding according to its old value, so we need to restart.
+         */
+        OutputsAddedDoNeed,
+        /**
+         * The goal state machine has progressed to the point of doing a build,
+         * in which case all outputs will be produced, so extensions to
+         * `wantedOutputs` no longer require a restart.
+         */
+        BuildInProgressWillNotNeed,
+    };
+
+    /**
      * Whether additional wanted outputs have been added.
      */
-    bool needRestart = false;
+    NeedRestartForMoreOutputs needRestart = NeedRestartForMoreOutputs::OutputsUnmodifedDontNeed;
+
+    /**
+     * See `retrySubstitution`; just for that field.
+     */
+    enum RetrySubstitution {
+        /**
+         * No issues have yet arose, no need to restart.
+         */
+        NoNeed,
+        /**
+         * Something failed and there is an incomplete closure. Let's retry
+         * substituting.
+         */
+        YesNeed,
+        /**
+         * We are current or have already retried substitution, and whether or
+         * not something goes wrong we will not retry again.
+         */
+        AlreadyRetried,
+    };
 
     /**
      * Whether to retry substituting the outputs after building the
      * inputs. This is done in case of an incomplete closure.
      */
-    bool retrySubstitution = false;
-
-    /**
-     * Whether we've retried substitution, in which case we won't try
-     * again.
-     */
-    bool retriedSubstitution = false;
+    RetrySubstitution retrySubstitution = RetrySubstitution::NoNeed;
 
     /**
      * The derivation stored at drvPath.
@@ -148,7 +186,7 @@ struct DerivationGoal : public Goal
     /**
      * The sort of derivation we are building.
      */
-    DerivationType derivationType;
+    std::optional<DerivationType> derivationType;
 
     typedef void (DerivationGoal::*GoalState)();
     GoalState state;
@@ -217,7 +255,7 @@ struct DerivationGoal : public Goal
      * Check that the derivation outputs all exist and register them
      * as valid.
      */
-    virtual DrvOutputs registerOutputs();
+    virtual SingleDrvOutputs registerOutputs();
 
     /**
      * Open a log file and a pipe to it.
@@ -270,17 +308,15 @@ struct DerivationGoal : public Goal
      * Update 'initialOutputs' to determine the current status of the
      * outputs of the derivation. Also returns a Boolean denoting
      * whether all outputs are valid and non-corrupt, and a
-     * 'DrvOutputs' structure containing the valid and wanted
-     * outputs.
+     * 'SingleDrvOutputs' structure containing the valid outputs.
      */
-    std::pair<bool, DrvOutputs> checkPathValidity();
+    std::pair<bool, SingleDrvOutputs> checkPathValidity();
 
     /**
      * Aborts if any output is not valid or corrupt, and otherwise
-     * returns a 'DrvOutputs' structure containing the wanted
-     * outputs.
+     * returns a 'SingleDrvOutputs' structure containing all outputs.
      */
-    DrvOutputs assertPathValidity();
+    SingleDrvOutputs assertPathValidity();
 
     /**
      * Forcibly kill the child process, if any.
@@ -293,12 +329,16 @@ struct DerivationGoal : public Goal
 
     void done(
         BuildResult::Status status,
-        DrvOutputs builtOutputs = {},
+        SingleDrvOutputs builtOutputs = {},
         std::optional<Error> ex = {});
 
     void waiteeDone(GoalPtr waitee, ExitCode result) override;
 
     StorePathSet exportReferences(const StorePathSet & storePaths);
+
+    JobCategory jobCategory() const override {
+        return JobCategory::Build;
+    };
 };
 
 MakeError(NotDeterministic, BuildError);

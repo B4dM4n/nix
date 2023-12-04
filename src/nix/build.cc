@@ -9,26 +9,28 @@
 
 using namespace nix;
 
-nlohmann::json derivedPathsToJSON(const DerivedPaths & paths, ref<Store> store)
+static nlohmann::json derivedPathsToJSON(const DerivedPaths & paths, Store & store)
 {
     auto res = nlohmann::json::array();
     for (auto & t : paths) {
-        std::visit([&res, store](const auto & t) {
+        std::visit([&](const auto & t) {
             res.push_back(t.toJSON(store));
         }, t.raw());
     }
     return res;
 }
 
-nlohmann::json builtPathsWithResultToJSON(const std::vector<BuiltPathWithResult> & buildables, ref<Store> store)
+static nlohmann::json builtPathsWithResultToJSON(const std::vector<BuiltPathWithResult> & buildables, const Store & store)
 {
     auto res = nlohmann::json::array();
     for (auto & b : buildables) {
         std::visit([&](const auto & t) {
             auto j = t.toJSON(store);
             if (b.result) {
-                j["startTime"] = b.result->startTime;
-                j["stopTime"] = b.result->stopTime;
+                if (b.result->startTime)
+                    j["startTime"] = b.result->startTime;
+                if (b.result->stopTime)
+                    j["stopTime"] = b.result->stopTime;
                 if (b.result->cpuUser)
                     j["cpuUser"] = ((double) b.result->cpuUser->count()) / 1000000;
                 if (b.result->cpuSystem)
@@ -123,7 +125,7 @@ struct CmdBuild : InstallablesCommand, MixDryRun, MixJSON, MixProfile
             printMissing(store, pathsToBuild, lvlError);
 
             if (json)
-                logger->cout("%s", derivedPathsToJSON(pathsToBuild, store).dump());
+                logger->cout("%s", derivedPathsToJSON(pathsToBuild, *store).dump());
 
             return;
         }
@@ -131,9 +133,10 @@ struct CmdBuild : InstallablesCommand, MixDryRun, MixJSON, MixProfile
         auto buildables = Installable::build(
             getEvalStore(), store,
             Realise::Outputs,
-            installables, buildMode);
+            installables,
+            repair ? bmRepair : buildMode);
 
-        if (json) logger->cout("%s", builtPathsWithResultToJSON(buildables, store).dump());
+        if (json) logger->cout("%s", builtPathsWithResultToJSON(buildables, *store).dump());
 
         if (outLink != "")
             if (auto store2 = store.dynamic_pointer_cast<LocalFSStore>())

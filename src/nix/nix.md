@@ -48,20 +48,32 @@ manual](https://nixos.org/manual/nix/stable/).
 
 # Installables
 
+> **Warning** \
+> Installables are part of the unstable
+> [`nix-command` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-nix-command),
+> and subject to change without notice.
+
 Many `nix` subcommands operate on one or more *installables*.
 These are command line arguments that represent something that can be realised in the Nix store.
 
 The following types of installable are supported by most commands:
 
-- [Flake output attribute](#flake-output-attribute)
+- [Flake output attribute](#flake-output-attribute) (experimental)
 - [Store path](#store-path)
 - [Nix file](#nix-file), optionally qualified by an attribute path
 - [Nix expression](#nix-expression), optionally qualified by an attribute path
 
-For most commands, if no installable is specified, `.` as assumed.
+For most commands, if no installable is specified, `.` is assumed.
 That is, Nix will operate on the default flake output attribute of the flake in the current directory.
 
 ### Flake output attribute
+
+> **Warning** \
+> Flake output attribute installables depend on both the
+> [`flakes`](@docroot@/contributing/experimental-features.md#xp-feature-flakes)
+> and
+> [`nix-command`](@docroot@/contributing/experimental-features.md#xp-feature-nix-command)
+> experimental features, and subject to change without notice.
 
 Example: `nixpkgs#hello`
 
@@ -90,6 +102,7 @@ way:
   available in the flake. If this is undesirable, specify `path:<directory>` explicitly;
 
   For example, if `/foo/bar` is a git repository with the following structure:
+
   ```
   .
   └── baz
@@ -118,6 +131,8 @@ subcommands, these are `packages.`*system*,
 `x86_64-linux` `nix build nixpkgs#hello` will try to build the
 attributes `packages.x86_64-linux.hello`,
 `legacyPackages.x86_64-linux.hello` and `hello`.
+
+If *attrpath* begins with `.` then no prefixes or defaults are attempted. This allows the form *flakeref*[`#.`*attrpath*], such as `github:NixOS/nixpkgs#.lib.fakeSha256` to avoid a search of `packages.*system*.lib.fakeSha256`
 
 ### Store path
 
@@ -185,7 +200,7 @@ operate are determined as follows:
   of all outputs of the `glibc` package in the binary cache:
 
   ```console
-  # nix path-info -S --eval-store auto --store https://cache.nixos.org 'nixpkgs#glibc^*'
+  # nix path-info --closure-size --eval-store auto --store https://cache.nixos.org 'nixpkgs#glibc^*'
   /nix/store/g02b1lpbddhymmcjb923kf0l7s9nww58-glibc-2.33-123                 33208200
   /nix/store/851dp95qqiisjifi639r0zzg5l465ny4-glibc-2.33-123-bin             36142896
   /nix/store/kdgs3q6r7xdff1p7a9hnjr43xw2404z7-glibc-2.33-123-debug          155787312
@@ -196,7 +211,7 @@ operate are determined as follows:
   and likewise, using a store path to a "drv" file to specify the derivation:
 
   ```console
-  # nix path-info -S '/nix/store/gzaflydcr6sb3567hap9q6srzx8ggdgg-glibc-2.33-78.drv^*'
+  # nix path-info --closure-size '/nix/store/gzaflydcr6sb3567hap9q6srzx8ggdgg-glibc-2.33-78.drv^*'
   …
   ```
 * If you didn't specify the desired outputs, but the derivation has an
@@ -222,5 +237,68 @@ operate are determined as follows:
 
 Most `nix` subcommands operate on a *Nix store*. These are documented
 in [`nix help-stores`](./nix3-help-stores.md).
+
+# Shebang interpreter 
+
+The `nix` command can be used as a `#!` interpreter.
+Arguments to Nix can be passed on subsequent lines in the script.
+
+Verbatim strings may be passed in double backtick (```` `` ````) quotes. <!-- that's markdown for two backticks in inline code. -->
+Sequences of _n_ backticks of 3 or longer are parsed as _n-1_ literal backticks.
+A single space before the closing ```` `` ```` is ignored if present.
+
+`--file` and `--expr` resolve relative paths based on the script location.
+
+Examples:
+
+```
+#!/usr/bin/env nix
+#! nix shell --file ``<nixpkgs>`` hello cowsay --command bash
+
+hello | cowsay
+```
+
+or with **flakes**:
+
+```
+#!/usr/bin/env nix
+#! nix shell nixpkgs#bash nixpkgs#hello nixpkgs#cowsay --command bash
+
+hello | cowsay
+```
+
+or with an **expression**:
+
+```bash
+#! /usr/bin/env nix
+#! nix shell --impure --expr ``
+#! nix with (import (builtins.getFlake "nixpkgs") {});
+#! nix terraform.withPlugins (plugins: [ plugins.openstack ])
+#! nix ``
+#! nix --command bash
+
+terraform "$@"
+```
+
+or with cascading interpreters. Note that the `#! nix` lines don't need to follow after the first line, to accomodate other interpreters.
+
+```
+#!/usr/bin/env nix
+//! ```cargo
+//! [dependencies]
+//! time = "0.1.25"
+//! ```
+/*
+#!nix shell nixpkgs#rustc nixpkgs#rust-script nixpkgs#cargo --command rust-script
+*/
+fn main() {
+    for argument in std::env::args().skip(1) {
+        println!("{}", argument);
+    };
+    println!("{}", std::env::var("HOME").expect(""));
+    println!("{}", time::now().rfc822z());
+}
+// vim: ft=rust
+```
 
 )""

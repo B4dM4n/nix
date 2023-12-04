@@ -36,8 +36,8 @@ namespace nix {
  *
  *   std::map<std::string, Config::SettingInfo> settings;
  *   config.getSettings(settings);
- *   config["system"].description == "the current system"
- *   config["system"].value == "x86_64-linux"
+ *   settings["system"].description == "the current system"
+ *   settings["system"].value == "x86_64-linux"
  *
  *
  * The above retrieves all currently known settings from the `Config` object
@@ -52,9 +52,7 @@ class AbstractConfig
 protected:
     StringMap unknownSettings;
 
-    AbstractConfig(const StringMap & initials = {})
-        : unknownSettings(initials)
-    { }
+    AbstractConfig(StringMap initials = {});
 
 public:
 
@@ -150,12 +148,9 @@ public:
     {
         bool isAlias;
         AbstractSetting * setting;
-        SettingData(bool isAlias, AbstractSetting * setting)
-            : isAlias(isAlias), setting(setting)
-        { }
     };
 
-    typedef std::map<std::string, SettingData> Settings;
+    using Settings = std::map<std::string, SettingData>;
 
 private:
 
@@ -163,9 +158,7 @@ private:
 
 public:
 
-    Config(const StringMap & initials = {})
-        : AbstractConfig(initials)
-    { }
+    Config(StringMap initials = {});
 
     bool set(const std::string & name, const std::string & value) override;
 
@@ -206,27 +199,25 @@ protected:
         const std::set<std::string> & aliases,
         std::optional<ExperimentalFeature> experimentalFeature = std::nullopt);
 
-    virtual ~AbstractSetting()
-    {
-        // Check against a gcc miscompilation causing our constructor
-        // not to run (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=80431).
-        assert(created == 123);
-    }
+    virtual ~AbstractSetting();
 
     virtual void set(const std::string & value, bool append = false) = 0;
 
-    virtual bool isAppendable()
-    { return false; }
+    /**
+     * Whether the type is appendable; i.e. whether the `append`
+     * parameter to `set()` is allowed to be `true`.
+     */
+    virtual bool isAppendable() = 0;
 
     virtual std::string to_string() const = 0;
 
     nlohmann::json toJSON();
 
-    virtual std::map<std::string, nlohmann::json> toJSONObject();
+    virtual std::map<std::string, nlohmann::json> toJSONObject() const;
 
     virtual void convertToArg(Args & args, const std::string & category);
 
-    bool isOverridden() const { return overridden; }
+    bool isOverridden() const;
 };
 
 /**
@@ -240,6 +231,23 @@ protected:
     T value;
     const T defaultValue;
     const bool documentDefault;
+
+    /**
+     * Parse the string into a `T`.
+     *
+     * Used by `set()`.
+     */
+    virtual T parse(const std::string & str) const;
+
+    /**
+     * Append or overwrite `value` with `newValue`.
+     *
+     * Some types to do not support appending in which case `append`
+     * should never be passed. The default handles this case.
+     *
+     * @param append Whether to append or overwrite.
+     */
+    virtual void appendOrSet(T newValue, bool append);
 
 public:
 
@@ -268,9 +276,25 @@ public:
     template<typename U>
     void setDefault(const U & v) { if (!overridden) value = v; }
 
-    void set(const std::string & str, bool append = false) override;
+    /**
+     * Require any experimental feature the setting depends on
+     *
+     * Uses `parse()` to get the value from `str`, and `appendOrSet()`
+     * to set it.
+     */
+    void set(const std::string & str, bool append = false) override final;
 
-    bool isAppendable() override;
+    /**
+     * C++ trick; This is template-specialized to compile-time indicate whether
+     * the type is appendable.
+     */
+    struct trait;
+
+    /**
+     * Always defined based on the C++ magic
+     * with `trait` above.
+     */
+    bool isAppendable() override final;
 
     virtual void override(const T & v)
     {
@@ -282,18 +306,17 @@ public:
 
     void convertToArg(Args & args, const std::string & category) override;
 
-    std::map<std::string, nlohmann::json> toJSONObject() override;
+    std::map<std::string, nlohmann::json> toJSONObject() const override;
 };
 
 template<typename T>
 std::ostream & operator <<(std::ostream & str, const BaseSetting<T> & opt)
 {
-    str << (const T &) opt;
-    return str;
+    return str << static_cast<const T &>(opt);
 }
 
 template<typename T>
-bool operator ==(const T & v1, const BaseSetting<T> & v2) { return v1 == (const T &) v2; }
+bool operator ==(const T & v1, const BaseSetting<T> & v2) { return v1 == static_cast<const T &>(v2); }
 
 template<typename T>
 class Setting : public BaseSetting<T>
@@ -306,7 +329,7 @@ public:
         const std::set<std::string> & aliases = {},
         const bool documentDefault = true,
         std::optional<ExperimentalFeature> experimentalFeature = std::nullopt)
-        : BaseSetting<T>(def, documentDefault, name, description, aliases, experimentalFeature)
+        : BaseSetting<T>(def, documentDefault, name, description, aliases, std::move(experimentalFeature))
     {
         options->addSetting(this);
     }
@@ -317,30 +340,45 @@ public:
 /**
  * A special setting for Paths. These are automatically canonicalised
  * (e.g. "/foo//bar/" becomes "/foo/bar").
+ *
+ * It is mandatory to specify a path; i.e. the empty string is not
+ * permitted.
  */
 class PathSetting : public BaseSetting<Path>
 {
-    bool allowEmpty;
-
 public:
 
     PathSetting(Config * options,
-        bool allowEmpty,
         const Path & def,
         const std::string & name,
         const std::string & description,
-        const std::set<std::string> & aliases = {})
-        : BaseSetting<Path>(def, true, name, description, aliases)
-        , allowEmpty(allowEmpty)
-    {
-        options->addSetting(this);
-    }
+        const std::set<std::string> & aliases = {});
 
-    void set(const std::string & str, bool append = false) override;
+    Path parse(const std::string & str) const override;
 
     Path operator +(const char * p) const { return value + p; }
 
     void operator =(const Path & v) { this->assign(v); }
+};
+
+/**
+ * Like `PathSetting`, but the absence of a path is also allowed.
+ *
+ * `std::optional` is used instead of the empty string for clarity.
+ */
+class OptionalPathSetting : public BaseSetting<std::optional<Path>>
+{
+public:
+
+    OptionalPathSetting(Config * options,
+        const std::optional<Path> & def,
+        const std::string & name,
+        const std::string & description,
+        const std::set<std::string> & aliases = {});
+
+    std::optional<Path> parse(const std::string & str) const override;
+
+    void operator =(const std::optional<Path> & v);
 };
 
 struct GlobalConfig : public AbstractConfig

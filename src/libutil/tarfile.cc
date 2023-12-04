@@ -3,6 +3,7 @@
 
 #include "serialise.hh"
 #include "tarfile.hh"
+#include "file-system.hh"
 
 namespace nix {
 
@@ -17,7 +18,7 @@ static ssize_t callback_read(struct archive * archive, void * _self, const void 
     *buffer = self->buffer.data();
 
     try {
-        return self->source->read((char *) self->buffer.data(), 4096);
+        return self->source->read((char *) self->buffer.data(), self->buffer.size());
     } catch (EndOfFile &) {
         return 0;
     } catch (std::exception & err) {
@@ -39,7 +40,7 @@ void TarArchive::check(int err, const std::string & reason)
         throw Error(reason, archive_error_string(this->archive));
 }
 
-TarArchive::TarArchive(Source & source, bool raw) : buffer(4096)
+TarArchive::TarArchive(Source & source, bool raw) : buffer(65536)
 {
     this->archive = archive_read_new();
     this->source = &source;
