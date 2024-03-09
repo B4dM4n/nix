@@ -144,7 +144,7 @@ in
           virtualisation.memorySize = 4096;
           nix.settings.substituters = lib.mkForce [ ];
           nix.extraOptions = "experimental-features = nix-command flakes";
-          networking.hosts.${(builtins.head nodes.github.config.networking.interfaces.eth1.ipv4.addresses).address} =
+          networking.hosts.${(builtins.head nodes.github.networking.interfaces.eth1.ipv4.addresses).address} =
             [ "channels.nixos.org" "api.github.com" "github.com" ];
           security.pki.certificateFiles = [ "${cert}/ca.crt" ];
         };
@@ -185,6 +185,10 @@ in
 
     client.succeed("nix registry pin nixpkgs")
     client.succeed("nix flake metadata nixpkgs --tarball-ttl 0 >&2")
+
+    # Test fetchTree on a github URL.
+    hash = client.succeed(f"nix eval --raw --expr '(fetchTree {info['url']}).narHash'")
+    assert hash == info['locked']['narHash']
 
     # Shut down the web server. The flake should be cached on the client.
     github.succeed("systemctl stop httpd.service")

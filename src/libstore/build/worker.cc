@@ -4,6 +4,7 @@
 #include "drv-output-substitution-goal.hh"
 #include "local-derivation-goal.hh"
 #include "hook-instance.hh"
+#include "signals.hh"
 
 #include <poll.h>
 
@@ -198,8 +199,16 @@ void Worker::childStarted(GoalPtr goal, const std::set<int> & fds,
     child.respectTimeouts = respectTimeouts;
     children.emplace_back(child);
     if (inBuildSlot) {
-        if (goal->jobCategory() == JobCategory::Substitution) nrSubstitutions++;
-        else nrLocalBuilds++;
+        switch (goal->jobCategory()) {
+        case JobCategory::Substitution:
+            nrSubstitutions++;
+            break;
+        case JobCategory::Build:
+            nrLocalBuilds++;
+            break;
+        default:
+            abort();
+        }
     }
 }
 
@@ -211,14 +220,19 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
     if (i == children.end()) return;
 
     if (i->inBuildSlot) {
-        if (goal->jobCategory() == JobCategory::Substitution) {
+        switch (goal->jobCategory()) {
+        case JobCategory::Substitution:
             assert(nrSubstitutions > 0);
             nrSubstitutions--;
-        } else {
+            break;
+        case JobCategory::Build:
             assert(nrLocalBuilds > 0);
             nrLocalBuilds--;
             // wake postponed builds to give the build hook a chance to fill the free slot
             lastWokenUp = steady_time_point::min();
+            break;
+        default:
+            abort();
         }
     }
 
@@ -239,7 +253,7 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
 
 void Worker::waitForBuildSlot(GoalPtr goal)
 {
-    debug("wait for build slot");
+    goal->trace("wait for build slot");
     bool isSubstitutionGoal = goal->jobCategory() == JobCategory::Substitution;
     if ((!isSubstitutionGoal && getNrLocalBuilds() < settings.maxBuildJobs) ||
         (isSubstitutionGoal && getNrSubstitutions() < settings.maxSubstitutionJobs))
@@ -437,7 +451,7 @@ void Worker::waitForInput()
                 } else {
                     printMsg(lvlVomit, "%1%: read %2% bytes",
                         goal->getName(), rd);
-                    std::string data((char *) buffer.data(), rd);
+                    std::string_view data((char *) buffer.data(), rd);
                     j->lastOutput = after;
                     goal->handleChildOutput(k, data);
                 }
@@ -507,8 +521,10 @@ bool Worker::pathContentsGood(const StorePath & path)
     if (!pathExists(store.printStorePath(path)))
         res = false;
     else {
-        HashResult current = hashPath(info->narHash.type, store.printStorePath(path));
-        Hash nullHash(htSHA256);
+        HashResult current = hashPath(
+            *store.getFSAccessor(), CanonPath { store.printStorePath(path) },
+            FileIngestionMethod::Recursive, info->narHash.algo);
+        Hash nullHash(HashAlgorithm::SHA256);
         res = info->narHash == nullHash || info->narHash == current.first;
     }
     pathContentsGoodCache.insert_or_assign(path, res);
