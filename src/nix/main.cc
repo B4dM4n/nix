@@ -3,6 +3,7 @@
 #include "command.hh"
 #include "common-args.hh"
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "globals.hh"
 #include "legacy.hh"
 #include "shared.hh"
@@ -179,8 +180,10 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs
         for (auto & implem : *Implementations::registered) {
             auto storeConfig = implem.getConfig();
             auto storeName = storeConfig->name();
-            stores[storeName]["doc"] = storeConfig->doc();
-            stores[storeName]["settings"] = storeConfig->toJSON();
+            auto & j = stores[storeName];
+            j["doc"] = storeConfig->doc();
+            j["settings"] = storeConfig->toJSON();
+            j["experimentalFeature"] = storeConfig->experimentalFeature();
         }
         res["stores"] = std::move(stores);
 
@@ -201,14 +204,14 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
     auto vGenerateManpage = state.allocValue();
     state.eval(state.parseExprFromString(
         #include "generate-manpage.nix.gen.hh"
-        , "/"), *vGenerateManpage);
+        , CanonPath::root), *vGenerateManpage);
 
     auto vUtils = state.allocValue();
     state.cacheFile(
-        "/utils.nix", "/utils.nix",
+        CanonPath("/utils.nix"), CanonPath("/utils.nix"),
         state.parseExprFromString(
             #include "utils.nix.gen.hh"
-            , "/"),
+            , CanonPath::root),
         *vUtils);
 
     auto vDump = state.allocValue();
@@ -352,25 +355,43 @@ void mainWrapped(int argc, char * * argv)
         return;
     }
 
-    if (argc == 2 && std::string(argv[1]) == "__dump-builtins") {
+    if (argc == 2 && std::string(argv[1]) == "__dump-language") {
         experimentalFeatureSettings.experimentalFeatures = {
             Xp::Flakes,
             Xp::FetchClosure,
+            Xp::DynamicDerivations,
         };
         evalSettings.pureEval = false;
         EvalState state({}, openStore("dummy://"));
         auto res = nlohmann::json::object();
-        auto builtins = state.baseEnv.values[0]->attrs;
-        for (auto & builtin : *builtins) {
-            auto b = nlohmann::json::object();
-            if (!builtin.value->isPrimOp()) continue;
-            auto primOp = builtin.value->primOp;
-            if (!primOp->doc) continue;
-            b["arity"] = primOp->arity;
-            b["args"] = primOp->args;
-            b["doc"] = trim(stripIndentation(primOp->doc));
-            res[state.symbols[builtin.name]] = std::move(b);
-        }
+        res["builtins"] = ({
+            auto builtinsJson = nlohmann::json::object();
+            auto builtins = state.baseEnv.values[0]->attrs;
+            for (auto & builtin : *builtins) {
+                auto b = nlohmann::json::object();
+                if (!builtin.value->isPrimOp()) continue;
+                auto primOp = builtin.value->primOp;
+                if (!primOp->doc) continue;
+                b["arity"] = primOp->arity;
+                b["args"] = primOp->args;
+                b["doc"] = trim(stripIndentation(primOp->doc));
+                b["experimental-feature"] = primOp->experimentalFeature;
+                builtinsJson[state.symbols[builtin.name]] = std::move(b);
+            }
+            std::move(builtinsJson);
+        });
+        res["constants"] = ({
+            auto constantsJson = nlohmann::json::object();
+            for (auto & [name, info] : state.constantInfos) {
+                auto c = nlohmann::json::object();
+                if (!info.doc) continue;
+                c["doc"] = trim(stripIndentation(info.doc));
+                c["type"] = showType(info.type, false);
+                c["impure-only"] = info.impureOnly;
+                constantsJson[name] = std::move(c);
+            }
+            std::move(constantsJson);
+        });
         logger->cout("%s", res);
         return;
     }

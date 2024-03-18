@@ -3,6 +3,8 @@
 #include "abstract-setting-to-json.hh"
 #include "experimental-features.hh"
 
+#include "config-impl.hh"
+
 #include <nlohmann/json.hpp>
 
 namespace nix {
@@ -80,6 +82,8 @@ void Config::getSettings(std::map<std::string, SettingInfo> & res, bool overridd
 void AbstractConfig::applyConfig(const std::string & contents, const std::string & path) {
     unsigned int pos = 0;
 
+    std::vector<std::pair<std::string, std::string>> parsedContents;
+
     while (pos < contents.size()) {
         std::string line;
         while (pos < contents.size() && contents[pos] != '\n')
@@ -125,8 +129,21 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
         auto i = tokens.begin();
         advance(i, 2);
 
-        set(name, concatStringsSep(" ", Strings(i, tokens.end()))); // FIXME: slow
+        parsedContents.push_back({
+            name,
+            concatStringsSep(" ", Strings(i, tokens.end())),
+        });
     };
+
+    // First apply experimental-feature related settings
+    for (auto & [name, value] : parsedContents)
+        if (name == "experimental-features" || name == "extra-experimental-features")
+            set(name, value);
+
+    // Then apply other settings
+    for (auto & [name, value] : parsedContents)
+        if (name != "experimental-features" && name != "extra-experimental-features")
+            set(name, value);
 }
 
 void AbstractConfig::applyConfigFile(const Path & path)
@@ -191,6 +208,10 @@ std::map<std::string, nlohmann::json> AbstractSetting::toJSONObject()
     std::map<std::string, nlohmann::json> obj;
     obj.emplace("description", description);
     obj.emplace("aliases", aliases);
+    if (experimentalFeature)
+        obj.emplace("experimentalFeature", *experimentalFeature);
+    else
+        obj.emplace("experimentalFeature", nullptr);
     return obj;
 }
 
@@ -198,38 +219,9 @@ void AbstractSetting::convertToArg(Args & args, const std::string & category)
 {
 }
 
-template<typename T>
-bool BaseSetting<T>::isAppendable()
+template<> std::string BaseSetting<std::string>::parse(const std::string & str) const
 {
-    return false;
-}
-
-template<typename T>
-void BaseSetting<T>::convertToArg(Args & args, const std::string & category)
-{
-    args.addFlag({
-        .longName = name,
-        .description = fmt("Set the `%s` setting.", name),
-        .category = category,
-        .labels = {"value"},
-        .handler = {[this](std::string s) { overridden = true; set(s); }},
-        .experimentalFeature = experimentalFeature,
-    });
-
-    if (isAppendable())
-        args.addFlag({
-            .longName = "extra-" + name,
-            .description = fmt("Append to the `%s` setting.", name),
-            .category = category,
-            .labels = {"value"},
-            .handler = {[this](std::string s) { overridden = true; set(s, true); }},
-            .experimentalFeature = experimentalFeature,
-        });
-}
-
-template<> void BaseSetting<std::string>::set(const std::string & str, bool append)
-{
-    value = str;
+    return str;
 }
 
 template<> std::string BaseSetting<std::string>::to_string() const
@@ -237,29 +229,25 @@ template<> std::string BaseSetting<std::string>::to_string() const
     return value;
 }
 
-template<typename T>
-void BaseSetting<T>::set(const std::string & str, bool append)
+template<> std::optional<std::string> BaseSetting<std::optional<std::string>>::parse(const std::string & str) const
 {
-    static_assert(std::is_integral<T>::value, "Integer required.");
-    if (auto n = string2Int<T>(str))
-        value = *n;
+    if (str == "")
+        return std::nullopt;
     else
-        throw UsageError("setting '%s' has invalid value '%s'", name, str);
+        return { str };
 }
 
-template<typename T>
-std::string BaseSetting<T>::to_string() const
+template<> std::string BaseSetting<std::optional<std::string>>::to_string() const
 {
-    static_assert(std::is_integral<T>::value, "Integer required.");
-    return std::to_string(value);
+    return value ? *value : "";
 }
 
-template<> void BaseSetting<bool>::set(const std::string & str, bool append)
+template<> bool BaseSetting<bool>::parse(const std::string & str) const
 {
     if (str == "true" || str == "yes" || str == "1")
-        value = true;
+        return true;
     else if (str == "false" || str == "no" || str == "0")
-        value = false;
+        return false;
     else
         throw UsageError("Boolean setting '%s' has invalid value '%s'", name, str);
 }
@@ -287,16 +275,15 @@ template<> void BaseSetting<bool>::convertToArg(Args & args, const std::string &
     });
 }
 
-template<> void BaseSetting<Strings>::set(const std::string & str, bool append)
+template<> Strings BaseSetting<Strings>::parse(const std::string & str) const
 {
-    auto ss = tokenizeString<Strings>(str);
-    if (!append) value.clear();
-    for (auto & s : ss) value.push_back(std::move(s));
+    return tokenizeString<Strings>(str);
 }
 
-template<> bool BaseSetting<Strings>::isAppendable()
+template<> void BaseSetting<Strings>::appendOrSet(Strings && newValue, bool append)
 {
-    return true;
+    if (!append) value.clear();
+    for (auto && s : std::move(newValue)) value.push_back(std::move(s));
 }
 
 template<> std::string BaseSetting<Strings>::to_string() const
@@ -304,16 +291,16 @@ template<> std::string BaseSetting<Strings>::to_string() const
     return concatStringsSep(" ", value);
 }
 
-template<> void BaseSetting<StringSet>::set(const std::string & str, bool append)
+template<> StringSet BaseSetting<StringSet>::parse(const std::string & str) const
 {
-    if (!append) value.clear();
-    for (auto & s : tokenizeString<StringSet>(str))
-        value.insert(s);
+    return tokenizeString<StringSet>(str);
 }
 
-template<> bool BaseSetting<StringSet>::isAppendable()
+template<> void BaseSetting<StringSet>::appendOrSet(StringSet && newValue, bool append)
 {
-    return true;
+    if (!append) value.clear();
+    for (auto && s : std::move(newValue))
+        value.insert(s);
 }
 
 template<> std::string BaseSetting<StringSet>::to_string() const
@@ -321,21 +308,24 @@ template<> std::string BaseSetting<StringSet>::to_string() const
     return concatStringsSep(" ", value);
 }
 
-template<> void BaseSetting<std::set<ExperimentalFeature>>::set(const std::string & str, bool append)
+template<> std::set<ExperimentalFeature> BaseSetting<std::set<ExperimentalFeature>>::parse(const std::string & str) const
 {
-    if (!append) value.clear();
+    std::set<ExperimentalFeature> res;
     for (auto & s : tokenizeString<StringSet>(str)) {
         auto thisXpFeature = parseExperimentalFeature(s);
         if (thisXpFeature)
-            value.insert(thisXpFeature.value());
+            res.insert(thisXpFeature.value());
         else
             warn("unknown experimental feature '%s'", s);
     }
+    return res;
 }
 
-template<> bool BaseSetting<std::set<ExperimentalFeature>>::isAppendable()
+template<> void BaseSetting<std::set<ExperimentalFeature>>::appendOrSet(std::set<ExperimentalFeature> && newValue, bool append)
 {
-    return true;
+    if (!append) value.clear();
+    for (auto && s : std::move(newValue))
+        value.insert(s);
 }
 
 template<> std::string BaseSetting<std::set<ExperimentalFeature>>::to_string() const
@@ -346,20 +336,23 @@ template<> std::string BaseSetting<std::set<ExperimentalFeature>>::to_string() c
     return concatStringsSep(" ", stringifiedXpFeatures);
 }
 
-template<> void BaseSetting<StringMap>::set(const std::string & str, bool append)
+template<> StringMap BaseSetting<StringMap>::parse(const std::string & str) const
 {
-    if (!append) value.clear();
+    StringMap res;
     for (auto & s : tokenizeString<Strings>(str)) {
         auto eq = s.find_first_of('=');
         if (std::string::npos != eq)
-            value.emplace(std::string(s, 0, eq), std::string(s, eq + 1));
+            res.emplace(std::string(s, 0, eq), std::string(s, eq + 1));
         // else ignored
     }
+    return res;
 }
 
-template<> bool BaseSetting<StringMap>::isAppendable()
+template<> void BaseSetting<StringMap>::appendOrSet(StringMap && newValue, bool append)
 {
-    return true;
+    if (!append) value.clear();
+    for (auto && [k, v] : std::move(newValue))
+        value.emplace(std::move(k), std::move(v));
 }
 
 template<> std::string BaseSetting<StringMap>::to_string() const
@@ -383,15 +376,25 @@ template class BaseSetting<StringSet>;
 template class BaseSetting<StringMap>;
 template class BaseSetting<std::set<ExperimentalFeature>>;
 
-void PathSetting::set(const std::string & str, bool append)
+static Path parsePath(const AbstractSetting & s, const std::string & str)
 {
-    if (str == "") {
-        if (allowEmpty)
-            value = "";
-        else
-            throw UsageError("setting '%s' cannot be empty", name);
-    } else
-        value = canonPath(str);
+    if (str == "")
+        throw UsageError("setting '%s' is a path and paths cannot be empty", s.name);
+    else
+        return canonPath(str);
+}
+
+Path PathSetting::parse(const std::string & str) const
+{
+    return parsePath(*this, str);
+}
+
+std::optional<Path> OptionalPathSetting::parse(const std::string & str) const
+{
+    if (str == "")
+        return std::nullopt;
+    else
+        return parsePath(*this, str);
 }
 
 bool GlobalConfig::set(const std::string & name, const std::string & value)

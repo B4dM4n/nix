@@ -71,8 +71,6 @@ inputs.nixpkgs = {
 
 Here are some examples of flake references in their URL-like representation:
 
-* `.`: The flake in the current directory.
-* `/home/alice/src/patchelf`: A flake in some other directory.
 * `nixpkgs`: The `nixpkgs` entry in the flake registry.
 * `nixpkgs/a3a3dda3bacf61e8a39258a0ed9c924eeca8e293`: The `nixpkgs`
   entry in the flake registry, with its Git revision overridden to a
@@ -92,6 +90,23 @@ Here are some examples of flake references in their URL-like representation:
   A specific branch *and* revision of a Git repository.
 * `https://github.com/NixOS/patchelf/archive/master.tar.gz`: A tarball
   flake.
+
+## Path-like syntax
+
+Flakes corresponding to a local path can also be referred to by a direct path reference, either `/absolute/path/to/the/flake` or `./relative/path/to/the/flake` (note that the leading `./` is mandatory for relative paths to avoid any ambiguity).
+
+The semantic of such a path is as follows:
+
+* If the directory is part of a Git repository, then the input will be treated as a `git+file:` URL, otherwise it will be treated as a `path:` url;
+* If the directory doesn't contain a `flake.nix` file, then Nix will search for such a file upwards in the file system hierarchy until it finds any of:
+    1. The Git repository root, or
+    2. The filesystem root (/), or
+    3. A folder on a different mount point.
+
+### Examples
+
+* `.`: The flake to which the current directory belongs to.
+* `/home/alice/src/patchelf`: A flake in some other directory.
 
 ## Flake reference attributes
 
@@ -381,10 +396,12 @@ The following attributes are supported in `flake.nix`:
 
 * `nixConfig`: a set of `nix.conf` options to be set when evaluating any
   part of a flake. In the interests of security, only a small set of
-  whitelisted options (currently `bash-prompt`, `bash-prompt-prefix`,
-  `bash-prompt-suffix`, and `flake-registry`) are allowed to be set without
-  confirmation so long as `accept-flake-config` is not set in the global
-  configuration.
+  set of options is allowed to be set without confirmation so long as [`accept-flake-config`](@docroot@/command-ref/conf-file.md#conf-accept-flake-config) is not enabled in the global configuration:
+   - [`bash-prompt`](@docroot@/command-ref/conf-file.md#conf-bash-prompt)
+   - [`bash-prompt-prefix`](@docroot@/command-ref/conf-file.md#conf-bash-prompt-prefix)
+   - [`bash-prompt-suffix`](@docroot@/command-ref/conf-file.md#conf-bash-prompt-suffix)
+   - [`flake-registry`](@docroot@/command-ref/conf-file.md#conf-flake-registry)
+   - [`commit-lockfile-summary`](@docroot@/command-ref/conf-file.md#conf-commit-lockfile-summary)
 
 ## Flake inputs
 

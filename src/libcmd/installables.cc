@@ -11,6 +11,7 @@
 #include "derivations.hh"
 #include "eval-inline.hh"
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "get-drvs.hh"
 #include "store-api.hh"
 #include "shared.hh"
@@ -449,7 +450,7 @@ Installables SourceExprCommand::parseInstallables(
         else if (file)
             state->evalFile(lookupFileArg(*state, *file), *vFile);
         else {
-            auto e = state->parseExprFromString(*expr, absPath("."));
+            auto e = state->parseExprFromString(*expr, state->rootPath(CanonPath::fromCwd()));
             state->eval(e, *vFile);
         }
 
@@ -458,7 +459,7 @@ Installables SourceExprCommand::parseInstallables(
             result.push_back(
                 make_ref<InstallableAttrPath>(
                     InstallableAttrPath::parse(
-                        state, *this, vFile, prefix, extendedOutputsSpec)));
+                        state, *this, vFile, std::move(prefix), std::move(extendedOutputsSpec))));
         }
 
     } else {
@@ -474,7 +475,7 @@ Installables SourceExprCommand::parseInstallables(
             if (prefix.find('/') != std::string::npos) {
                 try {
                     result.push_back(make_ref<InstallableDerivedPath>(
-                        InstallableDerivedPath::parse(store, prefix, extendedOutputsSpec)));
+                        InstallableDerivedPath::parse(store, prefix, extendedOutputsSpec.raw)));
                     continue;
                 } catch (BadStorePath &) {
                 } catch (...) {
@@ -490,7 +491,7 @@ Installables SourceExprCommand::parseInstallables(
                         getEvalState(),
                         std::move(flakeRef),
                         fragment,
-                        extendedOutputsSpec,
+                        std::move(extendedOutputsSpec),
                         getDefaultFlakeAttrPaths(),
                         getDefaultFlakeAttrPathPrefixes(),
                         lockFlags));
@@ -512,6 +513,30 @@ ref<Installable> SourceExprCommand::parseInstallable(
     auto installables = parseInstallables(store, {installable});
     assert(installables.size() == 1);
     return installables.front();
+}
+
+static SingleBuiltPath getBuiltPath(ref<Store> evalStore, ref<Store> store, const SingleDerivedPath & b)
+{
+    return std::visit(
+        overloaded{
+            [&](const SingleDerivedPath::Opaque & bo) -> SingleBuiltPath {
+                return SingleBuiltPath::Opaque { bo.path };
+            },
+            [&](const SingleDerivedPath::Built & bfd) -> SingleBuiltPath {
+                auto drvPath = getBuiltPath(evalStore, store, *bfd.drvPath);
+                // Resolving this instead of `bfd` will yield the same result, but avoid duplicative work.
+                SingleDerivedPath::Built truncatedBfd {
+                    .drvPath = makeConstantStorePathRef(drvPath.outPath()),
+                    .output = bfd.output,
+                };
+                auto outputPath = resolveDerivedPath(*store, truncatedBfd, &*evalStore);
+                return SingleBuiltPath::Built {
+                    .drvPath = make_ref<SingleBuiltPath>(std::move(drvPath)),
+                    .output = { bfd.output, outputPath },
+                };
+            },
+        },
+        b.raw());
 }
 
 std::vector<BuiltPathWithResult> Installable::build(
@@ -567,7 +592,10 @@ std::vector<std::pair<ref<Installable>, BuiltPathWithResult>> Installable::build
                     [&](const DerivedPath::Built & bfd) {
                         auto outputs = resolveDerivedPath(*store, bfd, &*evalStore);
                         res.push_back({aux.installable, {
-                            .path = BuiltPath::Built { bfd.drvPath, outputs },
+                            .path = BuiltPath::Built {
+                                .drvPath = make_ref<SingleBuiltPath>(getBuiltPath(evalStore, store, *bfd.drvPath)),
+                                .outputs = outputs,
+                             },
                             .info = aux.info}});
                     },
                     [&](const DerivedPath::Opaque & bo) {
@@ -593,10 +621,13 @@ std::vector<std::pair<ref<Installable>, BuiltPathWithResult>> Installable::build
                 std::visit(overloaded {
                     [&](const DerivedPath::Built & bfd) {
                         std::map<std::string, StorePath> outputs;
-                        for (auto & path : buildResult.builtOutputs)
-                            outputs.emplace(path.first.outputName, path.second.outPath);
+                        for (auto & [outputName, realisation] : buildResult.builtOutputs)
+                            outputs.emplace(outputName, realisation.outPath);
                         res.push_back({aux.installable, {
-                            .path = BuiltPath::Built { bfd.drvPath, outputs },
+                            .path = BuiltPath::Built {
+                                .drvPath = make_ref<SingleBuiltPath>(getBuiltPath(evalStore, store, *bfd.drvPath)),
+                                .outputs = outputs,
+                            },
                             .info = aux.info,
                             .result = buildResult}});
                     },
@@ -690,7 +721,7 @@ StorePathSet Installable::toDerivations(
                         : throw Error("argument '%s' did not evaluate to a derivation", i->what()));
                 },
                 [&](const DerivedPath::Built & bfd) {
-                    drvPaths.insert(bfd.drvPath);
+                    drvPaths.insert(resolveDerivedPath(*store, *bfd.drvPath));
                 },
             }, b.path.raw());
 
@@ -701,7 +732,7 @@ RawInstallablesCommand::RawInstallablesCommand()
 {
     addFlag({
         .longName = "stdin",
-        .description = "Read installables from the standard input.",
+        .description = "Read installables from the standard input. No default installable applied.",
         .handler = {&readFromStdIn, true}
     });
 
@@ -730,9 +761,9 @@ void RawInstallablesCommand::run(ref<Store> store)
         while (std::cin >> word) {
             rawInstallables.emplace_back(std::move(word));
         }
+    } else {
+        applyDefaultInstallables(rawInstallables);
     }
-
-    applyDefaultInstallables(rawInstallables);
     run(store, std::move(rawInstallables));
 }
 

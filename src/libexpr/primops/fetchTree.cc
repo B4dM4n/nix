@@ -1,5 +1,6 @@
 #include "primops.hh"
 #include "eval-inline.hh"
+#include "eval-settings.hh"
 #include "store-api.hh"
 #include "fetchers.hh"
 #include "filetransfer.hh"
@@ -22,11 +23,10 @@ void emitTreeAttrs(
 {
     assert(input.isLocked());
 
-    auto attrs = state.buildBindings(8);
+    auto attrs = state.buildBindings(10);
 
-    auto storePath = state.store->printStorePath(tree.storePath);
 
-    attrs.alloc(state.sOutPath).mkString(storePath, {storePath});
+    state.mkStorePathString(tree.storePath, attrs.alloc(state.sOutPath));
 
     // FIXME: support arbitrary input attributes.
 
@@ -55,6 +55,11 @@ void emitTreeAttrs(
         else if (emptyRevFallback)
             attrs.alloc("revCount").mkInt(0);
 
+    }
+
+    if (auto dirtyRev = fetchers::maybeGetStrAttr(input.attrs, "dirtyRev")) {
+        attrs.alloc("dirtyRev").mkString(*dirtyRev);
+        attrs.alloc("dirtyShortRev").mkString(*fetchers::maybeGetStrAttr(input.attrs, "dirtyShortRev"));
     }
 
     if (auto lastModified = input.getLastModified()) {
@@ -107,7 +112,7 @@ static void fetchTree(
     const FetchTreeParams & params = FetchTreeParams{}
 ) {
     fetchers::Input input;
-    PathSet context;
+    NixStringContext context;
 
     state.forceValue(*args[0], pos);
 
@@ -195,7 +200,11 @@ static void prim_fetchTree(EvalState & state, const PosIdx pos, Value * * args, 
 }
 
 // FIXME: document
-static RegisterPrimOp primop_fetchTree("fetchTree", 1, prim_fetchTree);
+static RegisterPrimOp primop_fetchTree({
+    .name = "fetchTree",
+    .arity = 1,
+    .fun = prim_fetchTree
+});
 
 static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v,
     const std::string & who, bool unpack, std::string name)
@@ -243,10 +252,13 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
 
     // early exit if pinned and already in the store
     if (expectedHash && expectedHash->type == htSHA256) {
-        auto expectedPath =
-            unpack
-            ? state.store->makeFixedOutputPath(FileIngestionMethod::Recursive, *expectedHash, name, {})
-            : state.store->makeFixedOutputPath(FileIngestionMethod::Flat, *expectedHash, name, {});
+        auto expectedPath = state.store->makeFixedOutputPath(
+            name,
+            FixedOutputInfo {
+                .method = unpack ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat,
+                .hash = *expectedHash,
+                .references = {}
+            });
 
         if (state.store->isValidPath(expectedPath)) {
             state.allowAndSetStorePathString(expectedPath, v);
@@ -258,7 +270,7 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
     //       https://github.com/NixOS/nix/issues/4313
     auto storePath =
         unpack
-        ? fetchers::downloadTarball(state.store, *url, name, (bool) expectedHash).first.storePath
+        ? fetchers::downloadTarball(state.store, *url, name, (bool) expectedHash).tree.storePath
         : fetchers::downloadFile(state.store, *url, name, (bool) expectedHash).storePath;
 
     if (expectedHash) {
@@ -282,9 +294,9 @@ static RegisterPrimOp primop_fetchurl({
     .name = "__fetchurl",
     .args = {"url"},
     .doc = R"(
-      Download the specified URL and return the path of the downloaded
-      file. This function is not available if [restricted evaluation
-      mode](../command-ref/conf-file.md) is enabled.
+      Download the specified URL and return the path of the downloaded file.
+
+      Not available in [restricted evaluation mode](@docroot@/command-ref/conf-file.md#conf-restrict-eval).
     )",
     .fun = prim_fetchurl,
 });
@@ -334,8 +346,7 @@ static RegisterPrimOp primop_fetchTarball({
       stdenv.mkDerivation { … }
       ```
 
-      This function is not available if [restricted evaluation
-      mode](../command-ref/conf-file.md) is enabled.
+      Not available in [restricted evaluation mode](@docroot@/command-ref/conf-file.md#conf-restrict-eval).
     )",
     .fun = prim_fetchTarball,
 });
@@ -466,14 +477,9 @@ static RegisterPrimOp primop_fetchGit({
           }
           ```
 
-          > **Note**
-          >
-          > Nix will refetch the branch in accordance with
-          > the option `tarball-ttl`.
+          Nix will refetch the branch according to the [`tarball-ttl`](@docroot@/command-ref/conf-file.md#conf-tarball-ttl) setting.
 
-          > **Note**
-          >
-          > This behavior is disabled in *Pure evaluation mode*.
+          This behavior is disabled in [pure evaluation mode](@docroot@/command-ref/conf-file.md#conf-pure-eval).
 
         - To fetch the content of a checked-out work directory:
 

@@ -5,8 +5,8 @@
 # Synopsis
 
 `nix-store` {`--query` | `-q`}
-  {`--outputs` | `--requisites` | `-R` | `--references` |
-  `--referrers` | `--referrers-closure` | `--deriver` | `-d` |
+  {`--outputs` | `--requisites` | `-R` | `--references` | `--referrers` |
+  `--referrers-closure` | `--deriver` | `-d` | `--valid-derivers` |
   `--graph` | `--tree` | `--binding` *name* | `-b` *name* | `--hash` |
   `--size` | `--roots`}
   [`--use-output`] [`-u`] [`--force-realise`] [`-f`]
@@ -82,12 +82,20 @@ symlink.
     in the Nix store that are dependent on *paths*.
 
   - `--deriver`; `-d`\
-    Prints the [deriver] of the store paths *paths*. If
+    Prints the [deriver] that was used to build the store paths *paths*. If
     the path has no deriver (e.g., if it is a source file), or if the
     deriver is not known (e.g., in the case of a binary-only
     deployment), the string `unknown-deriver` is printed.
+    The returned deriver is not guaranteed to exist in the local store, for
+    example when *paths* were substituted from a binary cache.
+    Use `--valid-derivers` instead to obtain valid paths only.
 
     [deriver]: ../../glossary.md#gloss-deriver
+
+  - `--valid-derivers`\
+    Prints a set of derivation files (`.drv`) which are supposed produce
+    said paths when realized. Might print nothing, for example for source paths
+    or paths subsituted from a binary cache.
 
   - `--graph`\
     Prints the references graph of the store paths *paths* in the format
@@ -145,7 +153,7 @@ Print the closure (runtime dependencies) of the `svn` program in the
 current user environment:
 
 ```console
-$ nix-store -qR $(which svn)
+$ nix-store --query --requisites $(which svn)
 /nix/store/5mbglq5ldqld8sj57273aljwkfvj22mc-subversion-1.1.4
 /nix/store/9lz9yc6zgmc0vlqmn2ipcpkjlmbi51vv-glibc-2.3.4
 ...
@@ -154,7 +162,7 @@ $ nix-store -qR $(which svn)
 Print the build-time dependencies of `svn`:
 
 ```console
-$ nix-store -qR $(nix-store -qd $(which svn))
+$ nix-store --query --requisites $(nix-store --query --deriver $(which svn))
 /nix/store/02iizgn86m42q905rddvg4ja975bk2i4-grep-2.5.1.tar.bz2.drv
 /nix/store/07a2bzxmzwz5hp58nf03pahrv2ygwgs3-gcc-wrapper.sh
 /nix/store/0ma7c9wsbaxahwwl04gbw3fcd806ski4-glibc-2.3.4.drv
@@ -168,7 +176,7 @@ the derivation (`-qd`), not the closure of the output path that contains
 Show the build-time dependencies as a tree:
 
 ```console
-$ nix-store -q --tree $(nix-store -qd $(which svn))
+$ nix-store --query --tree $(nix-store --query --deriver $(which svn))
 /nix/store/7i5082kfb6yjbqdbiwdhhza0am2xvh6c-subversion-1.1.4.drv
 +---/nix/store/d8afh10z72n8l1cr5w42366abiblgn54-builder.sh
 +---/nix/store/fmzxmpjx2lh849ph0l36snfj9zdibw67-bash-3.0.drv
@@ -180,7 +188,7 @@ $ nix-store -q --tree $(nix-store -qd $(which svn))
 Show all paths that depend on the same OpenSSL library as `svn`:
 
 ```console
-$ nix-store -q --referrers $(nix-store -q --binding openssl $(nix-store -qd $(which svn)))
+$ nix-store --query --referrers $(nix-store --query --binding openssl $(nix-store --query --deriver $(which svn)))
 /nix/store/23ny9l9wixx21632y2wi4p585qhva1q8-sylpheed-1.0.0
 /nix/store/5mbglq5ldqld8sj57273aljwkfvj22mc-subversion-1.1.4
 /nix/store/dpmvp969yhdqs7lm2r1a3gng7pyq6vy4-subversion-1.1.3
@@ -191,7 +199,7 @@ Show all paths that directly or indirectly depend on the Glibc (C
 library) used by `svn`:
 
 ```console
-$ nix-store -q --referrers-closure $(ldd $(which svn) | grep /libc.so | awk '{print $3}')
+$ nix-store --query --referrers-closure $(ldd $(which svn) | grep /libc.so | awk '{print $3}')
 /nix/store/034a6h4vpz9kds5r6kzb9lhh81mscw43-libgnomeprintui-2.8.2
 /nix/store/15l3yi0d45prm7a82pcrknxdh6nzmxza-gawk-3.1.4
 ...
@@ -204,7 +212,7 @@ Make a picture of the runtime dependency graph of the current user
 environment:
 
 ```console
-$ nix-store -q --graph ~/.nix-profile | dot -Tps > graph.ps
+$ nix-store --query --graph ~/.nix-profile | dot -Tps > graph.ps
 $ gv graph.ps
 ```
 
@@ -212,7 +220,7 @@ Show every garbage collector root that points to a store path that
 depends on `svn`:
 
 ```console
-$ nix-store -q --roots $(which svn)
+$ nix-store --query --roots $(which svn)
 /nix/var/nix/profiles/default-81-link
 /nix/var/nix/profiles/default-82-link
 /home/eelco/.local/state/nix/profiles/profile-97-link

@@ -26,7 +26,7 @@ struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
+    unsigned int parse(const std::string & str) const override;
 };
 
 struct PluginFilesSetting : public BaseSetting<Paths>
@@ -43,7 +43,7 @@ struct PluginFilesSetting : public BaseSetting<Paths>
         options->addSetting(this);
     }
 
-    void set(const std::string & str, bool append = false) override;
+    Paths parse(const std::string & str) const override;
 };
 
 const uint32_t maxIdsPerBuild =
@@ -159,6 +159,15 @@ public:
         )",
         {"build-max-jobs"}};
 
+    Setting<unsigned int> maxSubstitutionJobs{
+        this, 16, "max-substitution-jobs",
+        R"(
+          This option defines the maximum number of substitution jobs that Nix
+          will try to run in parallel. The default is `16`. The minimum value
+          one can choose is `1` and lower values will be interpreted as `1`.
+        )",
+        {"substitution-max-jobs"}};
+
     Setting<unsigned int> buildCores{
         this,
         getDefaultCores(),
@@ -184,18 +193,24 @@ public:
     Setting<std::string> thisSystem{
         this, SYSTEM, "system",
         R"(
-          This option specifies the canonical Nix system name of the current
-          installation, such as `i686-linux` or `x86_64-darwin`. Nix can only
-          build derivations whose `system` attribute equals the value
-          specified here. In general, it never makes sense to modify this
-          value from its default, since you can use it to ‘lie’ about the
-          platform you are building on (e.g., perform a Mac OS build on a
-          Linux machine; the result would obviously be wrong). It only makes
-          sense if the Nix binaries can run on multiple platforms, e.g.,
-          ‘universal binaries’ that run on `x86_64-linux` and `i686-linux`.
+          The system type of the current Nix installation.
+          Nix will only build a given [derivation](@docroot@/language/derivations.md) locally when its `system` attribute equals any of the values specified here or in [`extra-platforms`](#conf-extra-platforms).
 
-          It defaults to the canonical Nix system name detected by `configure`
-          at build time.
+          The default value is set when Nix itself is compiled for the system it will run on.
+          The following system types are widely used, as [Nix is actively supported on these platforms](@docroot@/contributing/hacking.md#platforms):
+
+          - `x86_64-linux`
+          - `x86_64-darwin`
+          - `i686-linux`
+          - `aarch64-linux`
+          - `aarch64-darwin`
+          - `armv6l-linux`
+          - `armv7l-linux`
+
+          In general, you do not have to modify this setting.
+          While you can force Nix to run a Darwin-specific `builder` executable on a Linux machine, the result would obviously be wrong.
+
+          This value is available in the Nix language as [`builtins.currentSystem`](@docroot@/language/builtin-constants.md#builtins-currentSystem).
         )"};
 
     Setting<time_t> maxSilentTime{
@@ -227,7 +242,7 @@ public:
         )",
         {"build-timeout"}};
 
-    PathSetting buildHook{this, true, "", "build-hook",
+    Setting<Strings> buildHook{this, {}, "build-hook",
         R"(
           The path to the helper program that executes remote builds.
 
@@ -328,16 +343,6 @@ public:
           users in `build-users-group`.
 
           UIDs are allocated starting at 872415232 (0x34000000) on Linux and 56930 on macOS.
-
-          > **Warning**
-          > This is an experimental feature.
-
-          To enable it, add the following to [`nix.conf`](#):
-
-          ```
-          extra-experimental-features = auto-allocate-uids
-          auto-allocate-uids = true
-          ```
         )"};
 
     Setting<uint32_t> startId{this,
@@ -367,16 +372,6 @@ public:
 
           Cgroups are required and enabled automatically for derivations
           that require the `uid-range` system feature.
-
-          > **Warning**
-          > This is an experimental feature.
-
-          To enable it, add the following to [`nix.conf`](#):
-
-          ```
-          extra-experimental-features = cgroups
-          use-cgroups = true
-          ```
         )"};
     #endif
 
@@ -478,11 +473,6 @@ public:
         )",
         {"env-keep-derivations"}};
 
-    /**
-     * Whether to lock the Nix client and worker to the same CPU.
-     */
-    bool lockCPU;
-
     Setting<SandboxMode> sandboxMode{
         this,
         #if __linux__
@@ -540,13 +530,31 @@ public:
     Setting<bool> sandboxFallback{this, true, "sandbox-fallback",
         "Whether to disable sandboxing when the kernel doesn't allow it."};
 
+    Setting<bool> requireDropSupplementaryGroups{this, getuid() == 0, "require-drop-supplementary-groups",
+        R"(
+          Following the principle of least privilege,
+          Nix will attempt to drop supplementary groups when building with sandboxing.
+
+          However this can fail under some circumstances.
+          For example, if the user lacks the `CAP_SETGID` capability.
+          Search `setgroups(2)` for `EPERM` to find more detailed information on this.
+
+          If you encounter such a failure, setting this option to `false` will let you ignore it and continue.
+          But before doing so, you should consider the security implications carefully.
+          Not dropping supplementary groups means the build sandbox will be less restricted than intended.
+
+          This option defaults to `true` when the user is root
+          (since `root` usually has permissions to call setgroups)
+          and `false` otherwise.
+        )"};
+
 #if __linux__
     Setting<std::string> sandboxShmSize{
         this, "50%", "sandbox-dev-shm-size",
         R"(
           This option determines the maximum size of the `tmpfs` filesystem
           mounted on `/dev/shm` in Linux sandboxes. For the format, see the
-          description of the `size` option of `tmpfs` in mount8. The default
+          description of the `size` option of `tmpfs` in mount(8). The default
           is `50%`.
         )"};
 
@@ -572,8 +580,8 @@ public:
           line.
         )"};
 
-    PathSetting diffHook{
-        this, true, "", "diff-hook",
+    OptionalPathSetting diffHook{
+        this, std::nullopt, "diff-hook",
         R"(
           Absolute path to an executable capable of diffing build
           results. The hook is executed if `run-diff-hook` is true, and the
@@ -668,18 +676,20 @@ public:
         getDefaultExtraPlatforms(),
         "extra-platforms",
         R"(
-          Platforms other than the native one which this machine is capable of
-          building for. This can be useful for supporting additional
-          architectures on compatible machines: i686-linux can be built on
-          x86\_64-linux machines (and the default for this setting reflects
-          this); armv7 is backwards-compatible with armv6 and armv5tel; some
-          aarch64 machines can also natively run 32-bit ARM code; and
-          qemu-user may be used to support non-native platforms (though this
-          may be slow and buggy). Most values for this are not enabled by
-          default because build systems will often misdetect the target
-          platform and generate incompatible code, so you may wish to
-          cross-check the results of using this option against proper
-          natively-built versions of your derivations.
+          System types of executables that can be run on this machine.
+
+          Nix will only build a given [derivation](@docroot@/language/derivations.md) locally when its `system` attribute equals any of the values specified here or in the [`system` option](#conf-system).
+
+          Setting this can be useful to build derivations locally on compatible machines:
+          - `i686-linux` executables can be run on `x86_64-linux` machines (set by default)
+          - `x86_64-darwin` executables can be run on macOS `aarch64-darwin` with Rosetta 2 (set by default where applicable)
+          - `armv6` and `armv5tel` executables can be run on `armv7`
+          - some `aarch64` machines can also natively run 32-bit ARM code
+          - `qemu-user` may be used to support non-native platforms (though this
+          may be slow and buggy)
+
+          Build systems will usually detect the target platform to be the current physical system and therefore produce machine code incompatible with what may be intended in the derivation.
+          You should design your derivation's `builder` accordingly and cross-check the results when using this option against natively-built versions of your derivation.
         )", {}, false};
 
     Setting<StringSet> systemFeatures{
@@ -707,32 +717,29 @@ public:
         Strings{"https://cache.nixos.org/"},
         "substituters",
         R"(
-          A list of [URLs of Nix stores](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format)
-          to be used as substituters, separated by whitespace.
-          Substituters are tried based on their Priority value, which each substituter can set
-          independently. Lower value means higher priority.
-          The default is `https://cache.nixos.org`, with a Priority of 40.
+          A list of [URLs of Nix stores](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format) to be used as substituters, separated by whitespace.
+          A substituter is an additional [store]{@docroot@/glossary.md##gloss-store} from which Nix can obtain [store objects](@docroot@/glossary.md#gloss-store-object) instead of building them.
 
-          At least one of the following conditions must be met for Nix to use
-          a substituter:
+          Substituters are tried based on their priority value, which each substituter can set independently.
+          Lower value means higher priority.
+          The default is `https://cache.nixos.org`, which has a priority of 40.
 
-          - the substituter is in the [`trusted-substituters`](#conf-trusted-substituters) list
-          - the user calling Nix is in the [`trusted-users`](#conf-trusted-users) list
+          At least one of the following conditions must be met for Nix to use a substituter:
 
-          In addition, each store path should be trusted as described
-          in [`trusted-public-keys`](#conf-trusted-public-keys)
+          - The substituter is in the [`trusted-substituters`](#conf-trusted-substituters) list
+          - The user calling Nix is in the [`trusted-users`](#conf-trusted-users) list
+
+          In addition, each store path should be trusted as described in [`trusted-public-keys`](#conf-trusted-public-keys)
         )",
         {"binary-caches"}};
 
     Setting<StringSet> trustedSubstituters{
         this, {}, "trusted-substituters",
         R"(
-          A list of [URLs of Nix stores](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format),
-          separated by whitespace. These are
-          not used by default, but can be enabled by users of the Nix daemon
-          by specifying `--option substituters urls` on the command
-          line. Unprivileged users are only allowed to pass a subset of the
-          URLs listed in `substituters` and `trusted-substituters`.
+          A list of [Nix store URLs](@docroot@/command-ref/new-cli/nix3-help-stores.md#store-url-format), separated by whitespace.
+          These are not used by default, but users of the Nix daemon can enable them by specifying [`substituters`](#conf-substituters).
+
+          Unprivileged users (those set in only [`allowed-users`](#conf-allowed-users) but not [`trusted-users`](#conf-trusted-users)) can pass as `substituters` only those URLs listed in `trusted-substituters`.
         )",
         {"trusted-binary-caches"}};
 
@@ -912,12 +919,11 @@ public:
         this, {}, "hashed-mirrors",
         R"(
           A list of web servers used by `builtins.fetchurl` to obtain files by
-          hash. The default is `http://tarballs.nixos.org/`. Given a hash type
-          *ht* and a base-16 hash *h*, Nix will try to download the file from
-          *hashed-mirror*/*ht*/*h*. This allows files to be downloaded even if
-          they have disappeared from their original URI. For example, given
-          the default mirror `http://tarballs.nixos.org/`, when building the
-          derivation
+          hash. Given a hash type *ht* and a base-16 hash *h*, Nix will try to
+          download the file from *hashed-mirror*/*ht*/*h*. This allows files to
+          be downloaded even if they have disappeared from their original URI.
+          For example, given an example mirror `http://tarballs.nixos.org/`,
+          when building the derivation
 
           ```nix
           builtins.fetchurl {
@@ -997,7 +1003,7 @@ public:
         this, false, "use-xdg-base-directories",
         R"(
           If set to `true`, Nix will conform to the [XDG Base Directory Specification] for files in `$HOME`.
-          The environment variables used to implement this are documented in the [Environment Variables section](@docroot@/installation/env-variables.md).
+          The environment variables used to implement this are documented in the [Environment Variables section](@docroot@/command-ref/env-common.md).
 
           [XDG Base Directory Specification]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
 
@@ -1011,6 +1017,18 @@ public:
           | `~/.nix-profile`  | `$XDG_STATE_HOME/nix/profile`  |
           | `~/.nix-defexpr`  | `$XDG_STATE_HOME/nix/defexpr`  |
           | `~/.nix-channels` | `$XDG_STATE_HOME/nix/channels` |
+
+          If you already have Nix installed and are using [profiles](@docroot@/package-management/profiles.md) or [channels](@docroot@/command-ref/nix-channel.md), you should migrate manually when you enable this option.
+          If `$XDG_STATE_HOME` is not set, use `$HOME/.local/state/nix` instead of `$XDG_STATE_HOME/nix`.
+          This can be achieved with the following shell commands:
+
+          ```sh
+          nix_state_home=${XDG_STATE_HOME-$HOME/.local/state}/nix
+          mkdir -p $nix_state_home
+          mv $HOME/.nix-profile $nix_state_home/profile
+          mv $HOME/.nix-defexpr $nix_state_home/defexpr
+          mv $HOME/.nix-channels $nix_state_home/channels
+          ```
         )"
     };
 };

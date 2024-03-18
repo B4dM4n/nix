@@ -92,12 +92,15 @@ enum BuildMode { bmNormal, bmRepair, bmCheck };
 enum TrustedFlag : bool { NotTrusted = false, Trusted = true };
 
 struct BuildResult;
+struct KeyedBuildResult;
 
 
 typedef std::map<StorePath, std::optional<ContentAddress>> StorePathCAMap;
 
 struct StoreConfig : public Config
 {
+    typedef std::map<std::string, std::string> Params;
+
     using Config::Config;
 
     StoreConfig() = delete;
@@ -106,14 +109,29 @@ struct StoreConfig : public Config
 
     virtual ~StoreConfig() { }
 
+    /**
+     * The name of this type of store.
+     */
     virtual const std::string name() = 0;
 
+    /**
+     * Documentation for this type of store.
+     */
     virtual std::string doc()
     {
         return "";
     }
 
-    const PathSetting storeDir_{this, false, settings.nixStore,
+    /**
+     * An experimental feature this type store is gated, if it is to be
+     * experimental.
+     */
+    virtual std::optional<ExperimentalFeature> experimentalFeature() const
+    {
+        return std::nullopt;
+    }
+
+    const PathSetting storeDir_{this, settings.nixStore,
         "store",
         R"(
           Logical location of the Nix store, usually
@@ -152,10 +170,6 @@ struct StoreConfig : public Config
 
 class Store : public std::enable_shared_from_this<Store>, public virtual StoreConfig
 {
-public:
-
-    typedef std::map<std::string, std::string> Params;
-
 protected:
 
     struct PathInfoCacheValue {
@@ -268,17 +282,11 @@ public:
     StorePath makeOutputPath(std::string_view id,
         const Hash & hash, std::string_view name) const;
 
-    StorePath makeFixedOutputPath(FileIngestionMethod method,
-        const Hash & hash, std::string_view name,
-        const StorePathSet & references = {},
-        bool hasSelfReference = false) const;
+    StorePath makeFixedOutputPath(std::string_view name, const FixedOutputInfo & info) const;
 
-    StorePath makeTextPath(std::string_view name, const Hash & hash,
-        const StorePathSet & references = {}) const;
+    StorePath makeTextPath(std::string_view name, const TextInfo & info) const;
 
-    StorePath makeFixedOutputPathFromCA(std::string_view name, ContentAddress ca,
-        const StorePathSet & references = {},
-        bool hasSelfReference = false) const;
+    StorePath makeFixedOutputPathFromCA(std::string_view name, const ContentAddressWithReferences & ca) const;
 
     /**
      * Preparatory part of addToStore().
@@ -430,7 +438,20 @@ public:
      * derivation. All outputs are mentioned so ones mising the mapping
      * are mapped to `std::nullopt`.
      */
-    virtual std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(const StorePath & path);
+    virtual std::map<std::string, std::optional<StorePath>> queryPartialDerivationOutputMap(
+        const StorePath & path,
+        Store * evalStore = nullptr);
+
+    /**
+     * Like `queryPartialDerivationOutputMap` but only considers
+     * statically known output paths (i.e. those that can be gotten from
+     * the derivation itself.
+     *
+     * Just a helper function for implementing
+     * `queryPartialDerivationOutputMap`.
+     */
+    virtual std::map<std::string, std::optional<StorePath>> queryStaticPartialDerivationOutputMap(
+        const StorePath & path);
 
     /**
      * Query the mapping outputName=>outputPath for the given derivation.
@@ -575,7 +596,7 @@ public:
      * case of a build/substitution error, this function won't throw an
      * exception, but return a BuildResult containing an error message.
      */
-    virtual std::vector<BuildResult> buildPathsWithResults(
+    virtual std::vector<KeyedBuildResult> buildPathsWithResults(
         const std::vector<DerivedPath> & paths,
         BuildMode buildMode = bmNormal,
         std::shared_ptr<Store> evalStore = nullptr);
@@ -678,15 +699,13 @@ public:
     /**
      * @return An object to access files in the Nix store.
      */
-    virtual ref<FSAccessor> getFSAccessor()
-    { unsupported("getFSAccessor"); }
+    virtual ref<FSAccessor> getFSAccessor() = 0;
 
     /**
      * Repair the contents of the given path by redownloading it using
      * a substituter (if available).
      */
-    virtual void repairPath(const StorePath & path)
-    { unsupported("repairPath"); }
+    virtual void repairPath(const StorePath & path);
 
     /**
      * Add signatures to the specified store path. The signatures are
@@ -926,6 +945,7 @@ void removeTempRoots();
  * Resolve the derived path completely, failing if any derivation output
  * is unknown.
  */
+StorePath resolveDerivedPath(Store &, const SingleDerivedPath &, Store * evalStore = nullptr);
 OutputPathMap resolveDerivedPath(Store &, const DerivedPath::Built &, Store * evalStore = nullptr);
 
 
@@ -1028,7 +1048,7 @@ std::optional<ValidPathInfo> decodeValidPathInfo(
  */
 std::pair<std::string, Store::Params> splitUriAndParams(const std::string & uri);
 
-std::optional<ContentAddress> getDerivationCA(const BasicDerivation & drv);
+const ContentAddress * getDerivationCA(const BasicDerivation & drv);
 
 std::map<DrvOutput, StorePath> drvOutputReferences(
     Store & store,

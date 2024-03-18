@@ -27,8 +27,6 @@ static ref<Store> store()
     if (!_store) {
         try {
             initLibStore();
-            loadConfFile();
-            settings.lockCPU = false;
             _store = openStore();
         } catch (Error & e) {
             croak("%s", e.what());
@@ -295,7 +293,11 @@ SV * makeFixedOutputPath(int recursive, char * algo, char * hash, char * name)
         try {
             auto h = Hash::parseAny(hash, parseHashType(algo));
             auto method = recursive ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat;
-            auto path = store()->makeFixedOutputPath(method, h, name);
+            auto path = store()->makeFixedOutputPath(name, FixedOutputInfo {
+                .method = method,
+                .hash = h,
+                .references = {},
+            });
             XPUSHs(sv_2mortal(newSVpv(store()->printStorePath(path).c_str(), 0)));
         } catch (Error & e) {
             croak("%s", e.what());
@@ -322,7 +324,7 @@ SV * derivationFromPath(char * drvPath)
             hv_stores(hash, "outputs", newRV((SV *) outputs));
 
             AV * inputDrvs = newAV();
-            for (auto & i : drv.inputDrvs)
+            for (auto & i : drv.inputDrvs.map)
                 av_push(inputDrvs, newSVpv(store()->printStorePath(i.first).c_str(), 0)); // !!! ignores i->second
             hv_stores(hash, "inputDrvs", newRV((SV *) inputDrvs));
 

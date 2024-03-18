@@ -48,20 +48,32 @@ manual](https://nixos.org/manual/nix/stable/).
 
 # Installables
 
+> **Warning** \
+> Installables are part of the unstable
+> [`nix-command` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-nix-command),
+> and subject to change without notice.
+
 Many `nix` subcommands operate on one or more *installables*.
 These are command line arguments that represent something that can be realised in the Nix store.
 
 The following types of installable are supported by most commands:
 
-- [Flake output attribute](#flake-output-attribute)
+- [Flake output attribute](#flake-output-attribute) (experimental)
 - [Store path](#store-path)
 - [Nix file](#nix-file), optionally qualified by an attribute path
 - [Nix expression](#nix-expression), optionally qualified by an attribute path
 
-For most commands, if no installable is specified, `.` as assumed.
+For most commands, if no installable is specified, `.` is assumed.
 That is, Nix will operate on the default flake output attribute of the flake in the current directory.
 
 ### Flake output attribute
+
+> **Warning** \
+> Flake output attribute installables depend on both the
+> [`flakes`](@docroot@/contributing/experimental-features.md#xp-feature-flakes)
+> and
+> [`nix-command`](@docroot@/contributing/experimental-features.md#xp-feature-nix-command)
+> experimental features, and subject to change without notice.
 
 Example: `nixpkgs#hello`
 
@@ -90,6 +102,7 @@ way:
   available in the flake. If this is undesirable, specify `path:<directory>` explicitly;
 
   For example, if `/foo/bar` is a git repository with the following structure:
+
   ```
   .
   └── baz
@@ -185,7 +198,7 @@ operate are determined as follows:
   of all outputs of the `glibc` package in the binary cache:
 
   ```console
-  # nix path-info -S --eval-store auto --store https://cache.nixos.org 'nixpkgs#glibc^*'
+  # nix path-info --closure-size --eval-store auto --store https://cache.nixos.org 'nixpkgs#glibc^*'
   /nix/store/g02b1lpbddhymmcjb923kf0l7s9nww58-glibc-2.33-123                 33208200
   /nix/store/851dp95qqiisjifi639r0zzg5l465ny4-glibc-2.33-123-bin             36142896
   /nix/store/kdgs3q6r7xdff1p7a9hnjr43xw2404z7-glibc-2.33-123-debug          155787312
@@ -196,7 +209,7 @@ operate are determined as follows:
   and likewise, using a store path to a "drv" file to specify the derivation:
 
   ```console
-  # nix path-info -S '/nix/store/gzaflydcr6sb3567hap9q6srzx8ggdgg-glibc-2.33-78.drv^*'
+  # nix path-info --closure-size '/nix/store/gzaflydcr6sb3567hap9q6srzx8ggdgg-glibc-2.33-78.drv^*'
   …
   ```
 * If you didn't specify the desired outputs, but the derivation has an

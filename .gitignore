@@ -18,7 +18,7 @@ perl/Makefile.config
 /doc/manual/generated/*
 /doc/manual/nix.json
 /doc/manual/conf-file.json
-/doc/manual/builtins.json
+/doc/manual/language.json
 /doc/manual/xp-features.json
 /doc/manual/src/SUMMARY.md
 /doc/manual/src/command-ref/new-cli
@@ -26,6 +26,7 @@ perl/Makefile.config
 /doc/manual/src/command-ref/experimental-features-shortlist.md
 /doc/manual/src/contributing/experimental-feature-descriptions.md
 /doc/manual/src/language/builtins.md
+/doc/manual/src/language/builtin-constants.md
 
 # /scripts/
 /scripts/nix-profile.sh
@@ -50,6 +51,8 @@ perl/Makefile.config
 /src/libutil/tests/libnixutil-tests
 
 /src/nix/nix
+
+/src/nix/doc
 
 # /src/nix-env/
 /src/nix-env/nix-env
@@ -85,11 +88,14 @@ perl/Makefile.config
 /tests/shell.drv
 /tests/config.nix
 /tests/ca/config.nix
+/tests/dyn-drv/config.nix
 /tests/repl-result-out
+/tests/test-libstoreconsumer/test-libstoreconsumer
 
 # /tests/lang/
 /tests/lang/*.out
 /tests/lang/*.out.xml
+/tests/lang/*.err
 /tests/lang/*.ast
 
 /perl/lib/Nix/Config.pm
@@ -133,3 +139,6 @@ nix-rust/target
 result
 
 .vscode/
+
+# clangd and possibly more
+.cache/
