@@ -141,7 +141,9 @@ static int main_build_remote(int argc, char * * argv)
                         m.systemSupported(neededSystem) &&
                         m.allSupported(requiredFeatures) &&
                         m.mandatoryMet(requiredFeatures) &&
-                        (m.storeUri != "ssh://localhost" || canBuildLocally))
+                        m.storeUri != "ssh://localhost" ||
+                        m.storeUri == "ssh://localhost" &&
+                        canBuildLocally)
                     {
                         rightType = true;
                         AutoCloseFD free;
