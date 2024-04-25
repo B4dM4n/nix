@@ -1,4 +1,5 @@
 #include "buildenv.hh"
+#include "derivations.hh"
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -63,9 +64,9 @@ static void createLinks(State & state, const Path & srcDir, const Path & dstDir,
             continue;
 
         else if (S_ISDIR(srcSt.st_mode)) {
-            struct stat dstSt;
-            auto res = lstat(dstFile.c_str(), &dstSt);
-            if (res == 0) {
+            auto dstStOpt = maybeLstat(dstFile.c_str());
+            if (dstStOpt) {
+                auto & dstSt = *dstStOpt;
                 if (S_ISDIR(dstSt.st_mode)) {
                     createLinks(state, srcFile, dstFile, priority);
                     continue;
@@ -75,20 +76,23 @@ static void createLinks(State & state, const Path & srcDir, const Path & dstDir,
                         throw Error("collision between '%1%' and non-directory '%2%'", srcFile, target);
                     if (unlink(dstFile.c_str()) == -1)
                         throw SysError("unlinking '%1%'", dstFile);
-                    if (mkdir(dstFile.c_str(), 0755) == -1)
+                    if (mkdir(dstFile.c_str()
+                #ifndef _WIN32 // TODO abstract mkdir perms for Windows
+                            , 0755
+                #endif
+                            ) == -1)
                         throw SysError("creating directory '%1%'", dstFile);
                     createLinks(state, target, dstFile, state.priorities[dstFile]);
                     createLinks(state, srcFile, dstFile, priority);
                     continue;
                 }
-            } else if (errno != ENOENT)
-                throw SysError("getting status of '%1%'", dstFile);
+            }
         }
 
         else {
-            struct stat dstSt;
-            auto res = lstat(dstFile.c_str(), &dstSt);
-            if (res == 0) {
+            auto dstStOpt = maybeLstat(dstFile.c_str());
+            if (dstStOpt) {
+                auto & dstSt = *dstStOpt;
                 if (S_ISLNK(dstSt.st_mode)) {
                     auto prevPriority = state.priorities[dstFile];
                     if (prevPriority == priority)
@@ -103,8 +107,7 @@ static void createLinks(State & state, const Path & srcDir, const Path & dstDir,
                         throw SysError("unlinking '%1%'", dstFile);
                 } else if (S_ISDIR(dstSt.st_mode))
                     throw Error("collision between non-directory '%1%' and directory '%2%'", srcFile, dstFile);
-            } else if (errno != ENOENT)
-                throw SysError("getting status of '%1%'", dstFile);
+            }
         }
 
         createSymlink(srcFile, dstFile);
@@ -160,7 +163,9 @@ void buildProfile(const Path & out, Packages && pkgs)
     debug("created %d symlinks in user environment", state.symlinks);
 }
 
-void builtinBuildenv(const BasicDerivation & drv)
+void builtinBuildenv(
+    const BasicDerivation & drv,
+    const std::map<std::string, Path> & outputs)
 {
     auto getAttr = [&](const std::string & name) {
         auto i = drv.env.find(name);
@@ -168,21 +173,25 @@ void builtinBuildenv(const BasicDerivation & drv)
         return i->second;
     };
 
-    Path out = getAttr("out");
+    auto out = outputs.at("out");
     createDirs(out);
 
     /* Convert the stuff we get from the environment back into a
      * coherent data type. */
     Packages pkgs;
-    auto derivations = tokenizeString<Strings>(getAttr("derivations"));
-    while (!derivations.empty()) {
-        /* !!! We're trusting the caller to structure derivations env var correctly */
-        auto active = derivations.front(); derivations.pop_front();
-        auto priority = stoi(derivations.front()); derivations.pop_front();
-        auto outputs = stoi(derivations.front()); derivations.pop_front();
-        for (auto n = 0; n < outputs; n++) {
-            auto path = derivations.front(); derivations.pop_front();
-            pkgs.emplace_back(path, active != "false", priority);
+    {
+        auto derivations = tokenizeString<Strings>(getAttr("derivations"));
+
+        auto itemIt = derivations.begin();
+        while (itemIt != derivations.end()) {
+            /* !!! We're trusting the caller to structure derivations env var correctly */
+            const bool active = "false" != *itemIt++;
+            const int priority = stoi(*itemIt++);
+            const size_t outputs = stoul(*itemIt++);
+
+            for (size_t n {0}; n < outputs; n++) {
+                pkgs.emplace_back(std::move(*itemIt++), active, priority);
+            }
         }
     }
 

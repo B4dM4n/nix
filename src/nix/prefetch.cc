@@ -9,6 +9,9 @@
 #include "attr-path.hh"
 #include "eval-inline.hh"
 #include "legacy.hh"
+#include "posix-source-accessor.hh"
+#include "misc-store-flags.hh"
+#include "terminal.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -33,8 +36,8 @@ std::string resolveMirrorUrl(EvalState & state, const std::string & url)
         vMirrors);
     state.forceAttrs(vMirrors, noPos, "while evaluating the set of all mirrors");
 
-    auto mirrorList = vMirrors.attrs->find(state.symbols.create(mirrorName));
-    if (mirrorList == vMirrors.attrs->end())
+    auto mirrorList = vMirrors.attrs()->get(state.symbols.create(mirrorName));
+    if (!mirrorList)
         throw Error("unknown mirror name '%s'", mirrorName);
     state.forceList(*mirrorList->value, noPos, "while evaluating one mirror configuration");
 
@@ -46,13 +49,13 @@ std::string resolveMirrorUrl(EvalState & state, const std::string & url)
 }
 
 std::tuple<StorePath, Hash> prefetchFile(
-    ref<Store> store,
-    std::string_view url,
-    std::optional<std::string> name,
-    HashType hashType,
-    std::optional<Hash> expectedHash,
-    bool unpack,
-    bool executable)
+        ref<Store> store,
+        std::string_view url,
+        std::optional<std::string> name,
+        HashAlgorithm hashAlgo,
+        std::optional<Hash> expectedHash,
+        bool unpack,
+        bool executable)
 {
     auto ingestionMethod = unpack || executable ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat;
 
@@ -69,12 +72,10 @@ std::tuple<StorePath, Hash> prefetchFile(
     /* If an expected hash is given, the file may already exist in
        the store. */
     if (expectedHash) {
-        hashType = expectedHash->type;
+        hashAlgo = expectedHash->algo;
         storePath = store->makeFixedOutputPath(*name, FixedOutputInfo {
-            .hash = {
-                .method = ingestionMethod,
-                .hash = *expectedHash,
-            },
+            .method = ingestionMethod,
+            .hash = *expectedHash,
             .references = {},
         });
         if (store->isValidPath(*storePath))
@@ -94,7 +95,7 @@ std::tuple<StorePath, Hash> prefetchFile(
             if (executable)
                 mode = 0700;
 
-            AutoCloseFD fd = open(tmpFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, mode);
+            AutoCloseFD fd = toDescriptor(open(tmpFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, mode));
             if (!fd) throw SysError("creating temporary file '%s'", tmpFile);
 
             FdSink sink(fd.get());
@@ -124,10 +125,13 @@ std::tuple<StorePath, Hash> prefetchFile(
         Activity act(*logger, lvlChatty, actUnknown,
             fmt("adding '%s' to the store", url));
 
-        auto info = store->addToStoreSlow(*name, tmpFile, ingestionMethod, hashType, expectedHash);
+        auto [accessor, canonPath] = PosixSourceAccessor::createAtRoot(tmpFile);
+        auto info = store->addToStoreSlow(
+            *name, accessor, canonPath,
+            ingestionMethod, hashAlgo, {}, expectedHash);
         storePath = info.path;
         assert(info.ca);
-        hash = info.ca->getHash();
+        hash = info.ca->hash;
     }
 
     return {storePath.value(), hash.value()};
@@ -136,7 +140,7 @@ std::tuple<StorePath, Hash> prefetchFile(
 static int main_nix_prefetch_url(int argc, char * * argv)
 {
     {
-        HashType ht = htSHA256;
+        HashAlgorithm ha = HashAlgorithm::SHA256;
         std::vector<std::string> args;
         bool printPath = getEnv("PRINT_PATH") == "1";
         bool fromExpr = false;
@@ -157,7 +161,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
                 printVersion("nix-prefetch-url");
             else if (*arg == "--type") {
                 auto s = getArg(*arg, arg, end);
-                ht = parseHashType(s);
+                ha = parseHashAlgo(s);
             }
             else if (*arg == "--print-path")
                 printPath = true;
@@ -185,11 +189,11 @@ static int main_nix_prefetch_url(int argc, char * * argv)
 
         Finally f([]() { stopProgressBar(); });
 
-        if (isatty(STDERR_FILENO))
+        if (isTTY())
           startProgressBar();
 
         auto store = openStore();
-        auto state = std::make_unique<EvalState>(myArgs.searchPath, store);
+        auto state = std::make_unique<EvalState>(myArgs.lookupPath, store);
 
         Bindings & autoArgs = *myArgs.getAutoArgs(*state);
 
@@ -210,7 +214,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
             state->forceAttrs(v, noPos, "while evaluating the source attribute to prefetch");
 
             /* Extract the URL. */
-            auto * attr = v.attrs->get(state->symbols.create("urls"));
+            auto * attr = v.attrs()->get(state->symbols.create("urls"));
             if (!attr)
                 throw Error("attribute 'urls' missing");
             state->forceList(*attr->value, noPos, "while evaluating the urls to prefetch");
@@ -219,7 +223,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
             url = state->forceString(*attr->value->listElems()[0], noPos, "while evaluating the first url from the urls list");
 
             /* Extract the hash mode. */
-            auto attr2 = v.attrs->get(state->symbols.create("outputHashMode"));
+            auto attr2 = v.attrs()->get(state->symbols.create("outputHashMode"));
             if (!attr2)
                 printInfo("warning: this does not look like a fetchurl call");
             else
@@ -227,7 +231,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
 
             /* Extract the name. */
             if (!name) {
-                auto attr3 = v.attrs->get(state->symbols.create("name"));
+                auto attr3 = v.attrs()->get(state->symbols.create("name"));
                 if (!attr3)
                     name = state->forceString(*attr3->value, noPos, "while evaluating the name of the source to prefetch");
             }
@@ -235,10 +239,10 @@ static int main_nix_prefetch_url(int argc, char * * argv)
 
         std::optional<Hash> expectedHash;
         if (args.size() == 2)
-            expectedHash = Hash::parseAny(args[1], ht);
+            expectedHash = Hash::parseAny(args[1], ha);
 
         auto [storePath, hash] = prefetchFile(
-            store, resolveMirrorUrl(*state, url), name, ht, expectedHash, unpack, executable);
+            store, resolveMirrorUrl(*state, url), name, ha, expectedHash, unpack, executable);
 
         stopProgressBar();
 
@@ -259,8 +263,9 @@ struct CmdStorePrefetchFile : StoreCommand, MixJSON
 {
     std::string url;
     bool executable = false;
+    bool unpack = false;
     std::optional<std::string> name;
-    HashType hashType = htSHA256;
+    HashAlgorithm hashAlgo = HashAlgorithm::SHA256;
     std::optional<Hash> expectedHash;
 
     CmdStorePrefetchFile()
@@ -277,11 +282,11 @@ struct CmdStorePrefetchFile : StoreCommand, MixJSON
             .description = "The expected hash of the file.",
             .labels = {"hash"},
             .handler = {[&](std::string s) {
-                expectedHash = Hash::parseAny(s, hashType);
+                expectedHash = Hash::parseAny(s, hashAlgo);
             }}
         });
 
-        addFlag(Flag::mkHashTypeFlag("hash-type", &hashType));
+        addFlag(flag::hashAlgo("hash-type", &hashAlgo));
 
         addFlag({
             .longName = "executable",
@@ -289,6 +294,14 @@ struct CmdStorePrefetchFile : StoreCommand, MixJSON
                 "Make the resulting file executable. Note that this causes the "
                 "resulting hash to be a NAR hash rather than a flat file hash.",
             .handler = {&executable, true},
+        });
+
+        addFlag({
+            .longName = "unpack",
+            .description =
+                "Unpack the archive (which must be a tarball or zip file) and add "
+                "the result to the Nix store.",
+            .handler = {&unpack, true},
         });
 
         expectArg("url", &url);
@@ -307,18 +320,18 @@ struct CmdStorePrefetchFile : StoreCommand, MixJSON
     }
     void run(ref<Store> store) override
     {
-        auto [storePath, hash] = prefetchFile(store, url, name, hashType, expectedHash, false, executable);
+        auto [storePath, hash] = prefetchFile(store, url, name, hashAlgo, expectedHash, unpack, executable);
 
         if (json) {
             auto res = nlohmann::json::object();
             res["storePath"] = store->printStorePath(storePath);
-            res["hash"] = hash.to_string(SRI, true);
+            res["hash"] = hash.to_string(HashFormat::SRI, true);
             logger->cout(res.dump());
         } else {
             notice("Downloaded '%s' to '%s' (hash '%s').",
                 url,
                 store->printStorePath(storePath),
-                hash.to_string(SRI, true));
+                hash.to_string(HashFormat::SRI, true));
         }
     }
 };

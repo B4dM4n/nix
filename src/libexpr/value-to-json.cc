@@ -1,7 +1,7 @@
 #include "value-to-json.hh"
 #include "eval-inline.hh"
-#include "util.hh"
 #include "store-api.hh"
+#include "signals.hh"
 
 #include <cstdlib>
 #include <iomanip>
@@ -22,16 +22,16 @@ json printValueAsJSON(EvalState & state, bool strict,
     switch (v.type()) {
 
         case nInt:
-            out = v.integer;
+            out = v.integer();
             break;
 
         case nBool:
-            out = v.boolean;
+            out = v.boolean();
             break;
 
         case nString:
             copyContext(v, context);
-            out = v.string.s;
+            out = v.c_str();
             break;
 
         case nPath:
@@ -43,6 +43,7 @@ json printValueAsJSON(EvalState & state, bool strict,
             break;
 
         case nNull:
+            // already initialized as null
             break;
 
         case nAttrs: {
@@ -51,45 +52,55 @@ json printValueAsJSON(EvalState & state, bool strict,
                 out = *maybeString;
                 break;
             }
-            auto i = v.attrs->find(state.sOutPath);
-            if (i == v.attrs->end()) {
-                out = json::object();
-                StringSet names;
-                for (auto & j : *v.attrs)
-                    names.emplace(state.symbols[j.name]);
-                for (auto & j : names) {
-                    Attr & a(*v.attrs->find(state.symbols.create(j)));
-                    out[j] = printValueAsJSON(state, strict, *a.value, a.pos, context, copyToStore);
-                }
-            } else
+            if (auto i = v.attrs()->get(state.sOutPath))
                 return printValueAsJSON(state, strict, *i->value, i->pos, context, copyToStore);
+            else {
+                out = json::object();
+                for (auto & a : v.attrs()->lexicographicOrder(state.symbols)) {
+                    try {
+                        out[state.symbols[a->name]] = printValueAsJSON(state, strict, *a->value, a->pos, context, copyToStore);
+                    } catch (Error & e) {
+                        e.addTrace(state.positions[a->pos],
+                            HintFmt("while evaluating attribute '%1%'", state.symbols[a->name]));
+                        throw;
+                    }
+                }
+            }
             break;
         }
 
         case nList: {
             out = json::array();
-            for (auto elem : v.listItems())
-                out.push_back(printValueAsJSON(state, strict, *elem, pos, context, copyToStore));
+            int i = 0;
+            for (auto elem : v.listItems()) {
+                try {
+                    out.push_back(printValueAsJSON(state, strict, *elem, pos, context, copyToStore));
+                } catch (Error & e) {
+                    e.addTrace(state.positions[pos],
+                        HintFmt("while evaluating list element at index %1%", i));
+                    throw;
+                }
+                i++;
+            }
             break;
         }
 
         case nExternal:
-            return v.external->printValueAsJSON(state, strict, context, copyToStore);
+            return v.external()->printValueAsJSON(state, strict, context, copyToStore);
             break;
 
         case nFloat:
-            out = v.fpoint;
+            out = v.fpoint();
             break;
 
         case nThunk:
         case nFunction:
-            auto e = TypeError({
-                .msg = hintfmt("cannot convert %1% to JSON", showType(v)),
-                .errPos = state.positions[v.determinePos(pos)]
-            });
-            e.addTrace(state.positions[pos], hintfmt("message for the trace"));
-            state.debugThrowLastTrace(e);
-            throw e;
+            state.error<TypeError>(
+                "cannot convert %1% to JSON",
+                showType(v)
+            )
+            .atPos(v.determinePos(pos))
+            .debugThrow();
     }
     return out;
 }
@@ -103,7 +114,8 @@ void printValueAsJSON(EvalState & state, bool strict,
 json ExternalValueBase::printValueAsJSON(EvalState & state, bool strict,
     NixStringContext & context, bool copyToStore) const
 {
-    state.debugThrowLastTrace(TypeError("cannot convert %1% to JSON", showType()));
+    state.error<TypeError>("cannot convert %1% to JSON", showType())
+    .debugThrow();
 }
 
 

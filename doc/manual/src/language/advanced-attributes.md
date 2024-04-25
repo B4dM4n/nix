@@ -112,6 +112,13 @@ Derivations can declare some infrequently used optional attributes.
     > environmental variables come from the environment of the
     > `nix-build`.
 
+    If the [`configurable-impure-env` experimental
+    feature](@docroot@/contributing/experimental-features.md#xp-feature-configurable-impure-env)
+    is enabled, these environment variables can also be controlled
+    through the
+    [`impure-env`](@docroot@/command-ref/conf-file.md#conf-impure-env)
+    configuration setting.
+
   - [`outputHash`]{#adv-attr-outputHash}; [`outputHashAlgo`]{#adv-attr-outputHashAlgo}; [`outputHashMode`]{#adv-attr-outputHashMode}\
     These attributes declare that the derivation is a so-called
     *fixed-output derivation*, which means that a cryptographic hash of
@@ -181,9 +188,13 @@ Derivations can declare some infrequently used optional attributes.
     }
     ```
 
-    The `outputHashAlgo` attribute specifies the hash algorithm used to
-    compute the hash. It can currently be `"sha1"`, `"sha256"` or
-    `"sha512"`.
+    The `outputHash` attribute must be a string containing the hash in either hexadecimal or "nix32" encoding, or following the format for integrity metadata as defined by [SRI](https://www.w3.org/TR/SRI/).
+    The "nix32" encoding is an adaptation of base-32 encoding.
+    The [`convertHash`](@docroot@/language/builtins.md#builtins-convertHash) function shows how to convert between different encodings, and the [`nix-hash` command](../command-ref/nix-hash.md) has information about obtaining the hash for some contents, as well as converting to and from encodings.
+
+    The `outputHashAlgo` attribute specifies the hash algorithm used to compute the hash.
+    It can currently be `"sha1"`, `"sha256"`, `"sha512"`, or `null`.
+    `outputHashAlgo` can only be `null` when `outputHash` follows the SRI format.
 
     The `outputHashMode` attribute determines how the hash is computed.
     It must be one of the following two values:
@@ -196,16 +207,16 @@ Derivations can declare some infrequently used optional attributes.
 
         This is the default.
 
-      - `"recursive"`\
-        The hash is computed over the NAR archive dump of the output
+      - `"recursive"` or `"nar"`\
+        The hash is computed over the [NAR archive](@docroot@/glossary.md#gloss-nar) dump of the output
         (i.e., the result of [`nix-store --dump`](@docroot@/command-ref/nix-store/dump.md)). In
         this case, the output can be anything, including a directory
         tree.
 
-    The `outputHash` attribute, finally, must be a string containing
-    the hash in either hexadecimal or base-32 notation. (See the
-    [`nix-hash` command](../command-ref/nix-hash.md) for information
-    about converting to and from base-32 notation.)
+    `"recursive"` is the traditional way of indicating this,
+    and is supported since 2005 (virtually the entire history of Nix).
+    `"nar"` is more clear, and consistent with other parts of Nix (such as the CLI),
+    however support for it is only added in Nix version 2.21.
 
   - [`__contentAddressed`]{#adv-attr-__contentAddressed}
     > **Warning**
@@ -229,6 +240,8 @@ Derivations can declare some infrequently used optional attributes.
     [`outputHashAlgo`](#adv-attr-outputHashAlgo)
     like for *fixed-output derivations* (see above).
 
+    It also implicitly requires that the machine to build the derivation must have the `ca-derivations` [system feature](@docroot@/command-ref/conf-file.md#conf-system-features).
+
   - [`passAsFile`]{#adv-attr-passAsFile}\
     A list of names of attributes that should be passed via files rather
     than environment variables. For example, if you have
@@ -248,41 +261,36 @@ Derivations can declare some infrequently used optional attributes.
     of the environment (typically, a few hundred kilobyte).
 
   - [`preferLocalBuild`]{#adv-attr-preferLocalBuild}\
-    If this attribute is set to `true` and [distributed building is
-    enabled](../advanced-topics/distributed-builds.md), then, if
-    possible, the derivation will be built locally instead of forwarded
-    to a remote machine. This is appropriate for trivial builders
-    where the cost of doing a download or remote build would exceed
-    the cost of building locally.
+    If this attribute is set to `true` and [distributed building is enabled](@docroot@/command-ref/conf-file.md#conf-builders), then, if possible, the derivation will be built locally instead of being forwarded to a remote machine.
+    This is useful for derivations that are cheapest to build locally.
 
   - [`allowSubstitutes`]{#adv-attr-allowSubstitutes}\
-    If this attribute is set to `false`, then Nix will always build this
-    derivation; it will not try to substitute its outputs. This is
-    useful for very trivial derivations (such as `writeText` in Nixpkgs)
-    that are cheaper to build than to substitute from a binary cache.
+    If this attribute is set to `false`, then Nix will always build this derivation (locally or remotely); it will not try to substitute its outputs.
+    This is useful for derivations that are cheaper to build than to substitute.
+
+    This attribute can be ignored by setting [`always-allow-substitutes`](@docroot@/command-ref/conf-file.md#conf-always-allow-substitutes) to `true`.
 
     > **Note**
     >
-    > You need to have a builder configured which satisfies the
-    > derivation’s `system` attribute, since the derivation cannot be
-    > substituted. Thus it is usually a good idea to align `system` with
-    > `builtins.currentSystem` when setting `allowSubstitutes` to
-    > `false`. For most trivial derivations this should be the case.
+    > If set to `false`, the [`builder`](./derivations.md#attr-builder) should be able to run on the system type specified in the [`system` attribute](./derivations.md#attr-system), since the derivation cannot be substituted.
 
   - [`__structuredAttrs`]{#adv-attr-structuredAttrs}\
     If the special attribute `__structuredAttrs` is set to `true`, the other derivation
-    attributes are serialised in JSON format and made available to the
-    builder via the file `.attrs.json` in the builder’s temporary
-    directory. This obviates the need for [`passAsFile`](#adv-attr-passAsFile) since JSON files
-    have no size restrictions, unlike process environments.
+    attributes are serialised into a file in JSON format. The environment variable
+    `NIX_ATTRS_JSON_FILE` points to the exact location of that file both in a build
+    and a [`nix-shell`](../command-ref/nix-shell.md). This obviates the need for
+    [`passAsFile`](#adv-attr-passAsFile) since JSON files have no size restrictions,
+    unlike process environments.
 
     It also makes it possible to tweak derivation settings in a structured way; see
     [`outputChecks`](#adv-attr-outputChecks) for example.
 
     As a convenience to Bash builders,
-    Nix writes a script named `.attrs.sh` to the builder’s directory
-    that initialises shell variables corresponding to all attributes
-    that are representable in Bash. This includes non-nested
+    Nix writes a script that initialises shell variables
+    corresponding to all attributes that are representable in Bash. The
+    environment variable `NIX_ATTRS_SH_FILE` points to the exact
+    location of the script, both in a build and a
+    [`nix-shell`](../command-ref/nix-shell.md). This includes non-nested
     (associative) arrays. For example, the attribute `hardening.format = true`
     ends up as the Bash associative array element `${hardening[format]}`.
 
@@ -295,7 +303,7 @@ Derivations can declare some infrequently used optional attributes.
     [`disallowedReferences`](#adv-attr-disallowedReferences) and [`disallowedRequisites`](#adv-attr-disallowedRequisites),
     the following attributes are available:
 
-    - `maxSize` defines the maximum size of the resulting [store object](../glossary.md#gloss-store-object).
+    - `maxSize` defines the maximum size of the resulting [store object](@docroot@/glossary.md#gloss-store-object).
     - `maxClosureSize` defines the maximum size of the output's closure.
     - `ignoreSelfRefs` controls whether self-references should be considered when
       checking for allowed references/requisites.
@@ -320,16 +328,6 @@ Derivations can declare some infrequently used optional attributes.
     ```
 
   - [`unsafeDiscardReferences`]{#adv-attr-unsafeDiscardReferences}\
-    > **Warning**
-    > This attribute is part of an [experimental feature](@docroot@/contributing/experimental-features.md).
-    >
-    > To use this attribute, you must enable the
-    > [`discard-references`](@docroot@/contributing/experimental-features.md#xp-feature-discard-references) experimental feature.
-    > For example, in [nix.conf](../command-ref/conf-file.md) you could add:
-    >
-    > ```
-    > extra-experimental-features = discard-references
-    > ```
 
     When using [structured attributes](#adv-attr-structuredAttrs), the
     attribute `unsafeDiscardReferences` is an attribute set with a boolean value for each output name.
@@ -345,3 +343,15 @@ Derivations can declare some infrequently used optional attributes.
     This is useful, for example, when generating self-contained filesystem images with
     their own embedded Nix store: hashes found inside such an image refer
     to the embedded store and not to the host's Nix store.
+
+- [`requiredSystemFeatures`]{#adv-attr-requiredSystemFeatures}\
+
+  If a derivation has the `requiredSystemFeatures` attribute, then Nix will only build it on a machine that has the corresponding features set in its [`system-features` configuration](@docroot@/command-ref/conf-file.md#conf-system-features).
+
+  For example, setting
+
+  ```nix
+  requiredSystemFeatures = [ "kvm" ];
+  ```
+
+  ensures that the derivation can only be built on a machine with the `kvm` feature.

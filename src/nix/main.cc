@@ -1,8 +1,11 @@
 #include <algorithm>
 
+#include "args/root.hh"
+#include "current-process.hh"
 #include "command.hh"
 #include "common-args.hh"
 #include "eval.hh"
+#include "eval-settings.hh"
 #include "globals.hh"
 #include "legacy.hh"
 #include "shared.hh"
@@ -11,24 +14,58 @@
 #include "finally.hh"
 #include "loggers.hh"
 #include "markdown.hh"
+#include "memory-input-accessor.hh"
+#include "terminal.hh"
+#include "users.hh"
 
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <ifaddrs.h>
-#include <netdb.h>
-#include <netinet/in.h>
-
+#include <regex>
 #include <nlohmann/json.hpp>
 
+#ifndef _WIN32
+# include <sys/socket.h>
+# include <ifaddrs.h>
+# include <netdb.h>
+# include <netinet/in.h>
+#endif
+
+#if __linux__
+# include "namespaces.hh"
+#endif
+
+#ifndef _WIN32
 extern std::string chrootHelperName;
 
 void chrootHelper(int argc, char * * argv);
+#endif
 
 namespace nix {
+
+#ifdef _WIN32
+[[maybe_unused]]
+#endif
+static bool haveProxyEnvironmentVariables()
+{
+    static const std::vector<std::string> proxyVariables = {
+        "http_proxy",
+        "https_proxy",
+        "ftp_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "FTP_PROXY"
+    };
+    for (auto & proxyVariable: proxyVariables) {
+        if (getEnv(proxyVariable).has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* Check if we have a non-loopback/link-local network interface. */
 static bool haveInternet()
 {
+#ifndef _WIN32
     struct ifaddrs * addrs;
 
     if (getifaddrs(&addrs))
@@ -49,19 +86,25 @@ static bool haveInternet()
         }
     }
 
+    if (haveProxyEnvironmentVariables()) return true;
+
     return false;
+#else
+    // TODO implement on Windows
+    return true;
+#endif
 }
 
 std::string programPath;
 
-struct NixArgs : virtual MultiCommand, virtual MixCommonArgs
+struct NixArgs : virtual MultiCommand, virtual MixCommonArgs, virtual RootArgs
 {
     bool useNet = true;
     bool refresh = false;
     bool helpRequested = false;
     bool showVersion = false;
 
-    NixArgs() : MultiCommand(RegisterCommand::getCommandsFor({})), MixCommonArgs("nix")
+    NixArgs() : MultiCommand("", RegisterCommand::getCommandsFor({})), MixCommonArgs("nix")
     {
         categories.clear();
         categories[catHelp] = "Help commands";
@@ -128,10 +171,12 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs
         {"ping-store", {"store", "ping"}},
         {"sign-paths", {"store", "sign"}},
         {"show-derivation", {"derivation", "show"}},
+        {"show-config", {"config", "show"}},
         {"to-base16", {"hash", "to-base16"}},
         {"to-base32", {"hash", "to-base32"}},
         {"to-base64", {"hash", "to-base64"}},
         {"verify", {"store", "verify"}},
+        {"doctor", {"config", "check"}},
     };
 
     bool aliasUsed = false;
@@ -179,10 +224,13 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs
         for (auto & implem : *Implementations::registered) {
             auto storeConfig = implem.getConfig();
             auto storeName = storeConfig->name();
-            stores[storeName]["doc"] = storeConfig->doc();
-            stores[storeName]["settings"] = storeConfig->toJSON();
+            auto & j = stores[storeName];
+            j["doc"] = storeConfig->doc();
+            j["settings"] = storeConfig->toJSON();
+            j["experimentalFeature"] = storeConfig->experimentalFeature();
         }
         res["stores"] = std::move(stores);
+        res["fetchers"] = fetchers::dumpRegisterInputSchemeInfo();
 
         return res.dump();
     }
@@ -201,23 +249,31 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
     auto vGenerateManpage = state.allocValue();
     state.eval(state.parseExprFromString(
         #include "generate-manpage.nix.gen.hh"
-        , CanonPath::root), *vGenerateManpage);
+        , state.rootPath(CanonPath::root)), *vGenerateManpage);
 
-    auto vUtils = state.allocValue();
-    state.cacheFile(
-        CanonPath("/utils.nix"), CanonPath("/utils.nix"),
-        state.parseExprFromString(
-            #include "utils.nix.gen.hh"
-            , CanonPath::root),
-        *vUtils);
+    state.corepkgsFS->addFile(
+        CanonPath("utils.nix"),
+        #include "utils.nix.gen.hh"
+        );
+
+    state.corepkgsFS->addFile(
+        CanonPath("/generate-settings.nix"),
+        #include "generate-settings.nix.gen.hh"
+        );
+
+    state.corepkgsFS->addFile(
+        CanonPath("/generate-store-info.nix"),
+        #include "generate-store-info.nix.gen.hh"
+        );
 
     auto vDump = state.allocValue();
     vDump->mkString(toplevel.dumpCli());
 
     auto vRes = state.allocValue();
-    state.callFunction(*vGenerateManpage, *vDump, *vRes, noPos);
+    state.callFunction(*vGenerateManpage, state.getBuiltin("false"), *vRes, noPos);
+    state.callFunction(*vRes, *vDump, *vRes, noPos);
 
-    auto attr = vRes->attrs->get(state.symbols.create(mdName + ".md"));
+    auto attr = vRes->attrs()->get(state.symbols.create(mdName + ".md"));
     if (!attr)
         throw UsageError("Nix has no subcommand '%s'", concatStringsSep("", subcommand));
 
@@ -229,10 +285,7 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
 
 static NixArgs & getNixArgs(Command & cmd)
 {
-    assert(cmd.parent);
-    MultiCommand * toplevel = cmd.parent;
-    while (toplevel->parent) toplevel = toplevel->parent;
-    return dynamic_cast<NixArgs &>(*toplevel);
+    return dynamic_cast<NixArgs &>(cmd.getRoot());
 }
 
 struct CmdHelp : Command
@@ -282,7 +335,7 @@ struct CmdHelpStores : Command
     std::string doc() override
     {
         return
-          #include "help-stores.md"
+          #include "generated-doc/help-stores.md"
           ;
     }
 
@@ -302,16 +355,18 @@ void mainWrapped(int argc, char * * argv)
 
     /* The chroot helper needs to be run before any threads have been
        started. */
+#ifndef _WIN32
     if (argc > 0 && argv[0] == chrootHelperName) {
         chrootHelper(argc, argv);
         return;
     }
+#endif
 
     initNix();
     initGC();
 
     #if __linux__
-    if (getuid() == 0) {
+    if (isRootUser()) {
         try {
             saveMountNamespace();
             if (unshare(CLONE_NEWNS) == -1)
@@ -324,6 +379,9 @@ void mainWrapped(int argc, char * * argv)
 
     programPath = argv[0];
     auto programName = std::string(baseNameOf(programPath));
+    auto extensionPos = programName.find_last_of(".");
+    if (extensionPos != std::string::npos)
+        programName.erase(extensionPos);
 
     if (argc > 1 && std::string_view(argv[1]) == "__build-remote") {
         programName = "build-remote";
@@ -339,7 +397,9 @@ void mainWrapped(int argc, char * * argv)
 
     setLogFormat("bar");
     settings.verboseBuild = false;
-    if (isatty(STDERR_FILENO)) {
+
+    // If on a terminal, progress will be displayed via progress bars etc. (thus verbosity=notice)
+    if (nix::isTTY()) {
         verbosity = lvlNotice;
     } else {
         verbosity = lvlInfo;
@@ -352,25 +412,43 @@ void mainWrapped(int argc, char * * argv)
         return;
     }
 
-    if (argc == 2 && std::string(argv[1]) == "__dump-builtins") {
+    if (argc == 2 && std::string(argv[1]) == "__dump-language") {
         experimentalFeatureSettings.experimentalFeatures = {
             Xp::Flakes,
             Xp::FetchClosure,
+            Xp::DynamicDerivations,
+            Xp::FetchTree,
         };
         evalSettings.pureEval = false;
         EvalState state({}, openStore("dummy://"));
         auto res = nlohmann::json::object();
-        auto builtins = state.baseEnv.values[0]->attrs;
-        for (auto & builtin : *builtins) {
-            auto b = nlohmann::json::object();
-            if (!builtin.value->isPrimOp()) continue;
-            auto primOp = builtin.value->primOp;
-            if (!primOp->doc) continue;
-            b["arity"] = primOp->arity;
-            b["args"] = primOp->args;
-            b["doc"] = trim(stripIndentation(primOp->doc));
-            res[state.symbols[builtin.name]] = std::move(b);
-        }
+        res["builtins"] = ({
+            auto builtinsJson = nlohmann::json::object();
+            for (auto & builtin : *state.baseEnv.values[0]->attrs()) {
+                auto b = nlohmann::json::object();
+                if (!builtin.value->isPrimOp()) continue;
+                auto primOp = builtin.value->primOp();
+                if (!primOp->doc) continue;
+                b["arity"] = primOp->arity;
+                b["args"] = primOp->args;
+                b["doc"] = trim(stripIndentation(primOp->doc));
+                b["experimental-feature"] = primOp->experimentalFeature;
+                builtinsJson[state.symbols[builtin.name]] = std::move(b);
+            }
+            std::move(builtinsJson);
+        });
+        res["constants"] = ({
+            auto constantsJson = nlohmann::json::object();
+            for (auto & [name, info] : state.constantInfos) {
+                auto c = nlohmann::json::object();
+                if (!info.doc) continue;
+                c["doc"] = trim(stripIndentation(info.doc));
+                c["type"] = showType(info.type, false);
+                c["impure-only"] = info.impureOnly;
+                constantsJson[name] = std::move(c);
+            }
+            std::move(constantsJson);
+        });
         logger->cout("%s", res);
         return;
     }
@@ -382,24 +460,26 @@ void mainWrapped(int argc, char * * argv)
 
     Finally printCompletions([&]()
     {
-        if (completions) {
-            switch (completionType) {
-            case ctNormal:
+        if (args.completions) {
+            switch (args.completions->type) {
+            case Completions::Type::Normal:
                 logger->cout("normal"); break;
-            case ctFilenames:
+            case Completions::Type::Filenames:
                 logger->cout("filenames"); break;
-            case ctAttrs:
+            case Completions::Type::Attrs:
                 logger->cout("attrs"); break;
             }
-            for (auto & s : *completions)
+            for (auto & s : args.completions->completions)
                 logger->cout(s.completion + "\t" + trim(s.description));
         }
     });
 
     try {
-        args.parseCmdline(argvToStrings(argc, argv));
+        auto isNixCommand = std::regex_search(programName, std::regex("nix$"));
+        auto allowShebang = isNixCommand && argc > 1;
+        args.parseCmdline(argvToStrings(argc, argv),allowShebang);
     } catch (UsageError &) {
-        if (!args.helpRequested && !completions) throw;
+        if (!args.helpRequested && !args.completions) throw;
     }
 
     if (args.helpRequested) {
@@ -416,10 +496,7 @@ void mainWrapped(int argc, char * * argv)
         return;
     }
 
-    if (completions) {
-        args.completionHook();
-        return;
-    }
+    if (args.completions) return;
 
     if (args.showVersion) {
         printVersion(programName);
@@ -465,9 +542,11 @@ void mainWrapped(int argc, char * * argv)
 
 int main(int argc, char * * argv)
 {
+#ifndef _WIN32 // TODO implement on Windows
     // Increase the default stack size for the evaluator and for
     // libstdc++'s std::regex.
     nix::setStackSize(64 * 1024 * 1024);
+#endif
 
     return nix::handleExceptions(argv[0], [&]() {
         nix::mainWrapped(argc, argv);

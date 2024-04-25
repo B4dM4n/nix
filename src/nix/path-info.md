@@ -43,7 +43,7 @@ R""(
   command):
 
   ```console
-  # nix path-info --json --all | jq -r 'sort_by(.registrationTime)[-11:-1][].path'
+  # nix path-info --json --all | jq -r 'to_entries | sort_by(.value.registrationTime) | .[-11:-1][] | .key'
   ```
 
 * Show the size of the entire Nix store:
@@ -58,19 +58,19 @@ R""(
 
   ```console
   # nix path-info --json --all --closure-size \
-    | jq 'map(select(.closureSize > 1e9)) | sort_by(.closureSize) | map([.path, .closureSize])'
+    | jq 'map_values(.closureSize | select(. < 1e9)) | to_entries | sort_by(.value)'
   [
     …,
-    [
-      "/nix/store/zqamz3cz4dbzfihki2mk7a63mbkxz9xq-nixos-system-machine-20.09.20201112.3090c65",
-      5887562256
-    ]
+    {
+      .key = "/nix/store/zqamz3cz4dbzfihki2mk7a63mbkxz9xq-nixos-system-machine-20.09.20201112.3090c65",
+      .value = 5887562256,
+    }
   ]
   ```
 
 * Print the path of the [store derivation] produced by `nixpkgs#hello`:
 
-  [store derivation]: ../../glossary.md#gloss-store-derivation
+  [store derivation]: @docroot@/glossary.md#gloss-store-derivation
 
   ```console
   # nix path-info --derivation nixpkgs#hello

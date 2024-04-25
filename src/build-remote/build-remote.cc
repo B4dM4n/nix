@@ -137,11 +137,8 @@ static int main_build_remote(int argc, char * * argv)
                 for (auto & m : machines) {
                     debug("considering building on remote machine '%s'", m.storeUri);
 
-                    if (m.enabled
-                        && (neededSystem == "builtin"
-                            || std::find(m.systemTypes.begin(),
-                                m.systemTypes.end(),
-                                neededSystem) != m.systemTypes.end()) &&
+                    if (m.enabled &&
+                        m.systemSupported(neededSystem) &&
                         m.allSupported(requiredFeatures) &&
                         m.mandatoryMet(requiredFeatures))
                     {
@@ -205,7 +202,7 @@ static int main_build_remote(int argc, char * * argv)
                         else
                             drvstr = "<unknown>";
 
-                        auto error = hintformat(errorText);
+                        auto error = HintFmt::fromFormatString(errorText);
                         error
                             % drvstr
                             % neededSystem
@@ -214,7 +211,7 @@ static int main_build_remote(int argc, char * * argv)
 
                         for (auto & m : machines)
                             error
-                                % concatStringsSep<std::vector<std::string>>(", ", m.systemTypes)
+                                % concatStringsSep<StringSet>(", ", m.systemTypes)
                                 % m.maxJobs
                                 % concatStringsSep<StringSet>(", ", m.supportedFeatures)
                                 % concatStringsSep<StringSet>(", ", m.mandatoryFeatures);
@@ -299,7 +296,7 @@ connected:
             !trusted || *trusted;
         });
 
-        // See the very large comment in `case wopBuildDerivation:` in
+        // See the very large comment in `case WorkerProto::Op::BuildDerivation:` in
         // `src/libstore/daemon.cc` that explains the trust model here.
         //
         // This condition mirrors that: that code enforces the "rules" outlined there;
@@ -314,7 +311,7 @@ connected:
             //
             // 2. Changing the `inputSrcs` set changes the associated
             //    output ids, which break CA derivations
-            if (!drv.inputDrvs.empty())
+            if (!drv.inputDrvs.map.empty())
                 drv.inputSrcs = store->parseStorePathSet(inputs);
             optResult = sshStore->buildDerivation(*drvPath, (const BasicDerivation &) drv);
             auto & result = *optResult;
@@ -322,7 +319,12 @@ connected:
                 throw Error("build of '%s' on '%s' failed: %s", store->printStorePath(*drvPath), storeUri, result.errorMsg);
         } else {
             copyClosure(*store, *sshStore, StorePathSet {*drvPath}, NoRepair, NoCheckSigs, substitute);
-            auto res = sshStore->buildPathsWithResults({ DerivedPath::Built { *drvPath, OutputsSpec::All {} } });
+            auto res = sshStore->buildPathsWithResults({
+                DerivedPath::Built {
+                    .drvPath = makeConstantStorePathRef(*drvPath),
+                    .outputs = OutputsSpec::All {},
+                }
+            });
             // One path to build should produce exactly one build result
             assert(res.size() == 1);
             optResult = std::move(res[0]);

@@ -4,8 +4,9 @@
 #include "filetransfer.hh"
 #include "store-api.hh"
 #include "legacy.hh"
-#include "fetchers.hh"
-#include "util.hh"
+#include "eval-settings.hh" // for defexpr
+#include "users.hh"
+#include "tarball.hh"
 
 #include <fcntl.h>
 #include <regex>
@@ -111,7 +112,7 @@ static void update(const StringSet & channelNames)
             // We want to download the url to a file to see if it's a tarball while also checking if we
             // got redirected in the process, so that we can grab the various parts of a nix channel
             // definition from a consistent location if the redirect changes mid-download.
-            auto result = fetchers::downloadFile(store, url, std::string(baseNameOf(url)), false);
+            auto result = fetchers::downloadFile(store, url, std::string(baseNameOf(url)));
             auto filename = store->toRealPath(result.storePath);
             url = result.effectiveUrl;
 
@@ -125,9 +126,9 @@ static void update(const StringSet & channelNames)
             if (!unpacked) {
                 // Download the channel tarball.
                 try {
-                    filename = store->toRealPath(fetchers::downloadFile(store, url + "/nixexprs.tar.xz", "nixexprs.tar.xz", false).storePath);
+                    filename = store->toRealPath(fetchers::downloadFile(store, url + "/nixexprs.tar.xz", "nixexprs.tar.xz").storePath);
                 } catch (FileTransferError & e) {
-                    filename = store->toRealPath(fetchers::downloadFile(store, url + "/nixexprs.tar.bz2", "nixexprs.tar.bz2", false).storePath);
+                    filename = store->toRealPath(fetchers::downloadFile(store, url + "/nixexprs.tar.bz2", "nixexprs.tar.bz2").storePath);
                 }
             }
             // Regardless of where it came from, add the expression representing this channel to accumulated expression
@@ -137,7 +138,7 @@ static void update(const StringSet & channelNames)
 
     // Unpack the channel tarballs into the Nix store and install them
     // into the channels profile.
-    std::cerr << "unpacking channels...\n";
+    std::cerr << "unpacking " << exprs.size() << " channels...\n";
     Strings envArgs{ "--profile", profile, "--file", unpackChannelPath, "--install", "--remove-all", "--from-expression" };
     for (auto & expr : exprs)
         envArgs.push_back(std::move(expr));
@@ -165,7 +166,7 @@ static int main_nix_channel(int argc, char ** argv)
         // Figure out the name of the `.nix-channels' file to use
         auto home = getHome();
         channelsList = settings.useXDGBaseDirectories ? createNixStateDir() + "/channels" : home + "/.nix-channels";
-        nixDefExpr = settings.useXDGBaseDirectories ? createNixStateDir() + "/defexpr" : home + "/.nix-defexpr";
+        nixDefExpr = getNixDefExpr();
 
         // Figure out the name of the channels profile.
         profile = profilesDir() +  "/channels";
@@ -177,6 +178,7 @@ static int main_nix_channel(int argc, char ** argv)
             cRemove,
             cList,
             cUpdate,
+            cListGenerations,
             cRollback
         } cmd = cNone;
         std::vector<std::string> args;
@@ -193,6 +195,8 @@ static int main_nix_channel(int argc, char ** argv)
                 cmd = cList;
             } else if (*arg == "--update") {
                 cmd = cUpdate;
+            } else if (*arg == "--list-generations") {
+                cmd = cListGenerations;
             } else if (*arg == "--rollback") {
                 cmd = cRollback;
             } else {
@@ -236,6 +240,11 @@ static int main_nix_channel(int argc, char ** argv)
                 break;
             case cUpdate:
                 update(StringSet(args.begin(), args.end()));
+                break;
+            case cListGenerations:
+                if (!args.empty())
+                    throw UsageError("'--list-generations' expects no arguments");
+                std::cout << runProgram(settings.nixBinDir + "/nix-env", false, {"--profile", profile, "--list-generations"}) << std::flush;
                 break;
             case cRollback:
                 if (args.size() > 1)

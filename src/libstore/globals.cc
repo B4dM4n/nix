@@ -1,5 +1,5 @@
 #include "globals.hh"
-#include "util.hh"
+#include "current-process.hh"
 #include "archive.hh"
 #include "args.hh"
 #include "abstract-setting-to-json.hh"
@@ -9,21 +9,29 @@
 #include <map>
 #include <mutex>
 #include <thread>
-#include <dlfcn.h>
-#include <sys/utsname.h>
 
 #include <nlohmann/json.hpp>
 
-#include <sodium/core.h>
+#ifndef _WIN32
+# include <dlfcn.h>
+# include <sys/utsname.h>
+#endif
 
 #ifdef __GLIBC__
-#include <gnu/lib-names.h>
-#include <nss.h>
-#include <dlfcn.h>
+# include <gnu/lib-names.h>
+# include <nss.h>
+# include <dlfcn.h>
+#endif
+
+#if __APPLE__
+# include "processes.hh"
 #endif
 
 #include "config-impl.hh"
 
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 namespace nix {
 
@@ -41,7 +49,13 @@ static GlobalConfig::Register rSettings(&settings);
 
 Settings::Settings()
     : nixPrefix(NIX_PREFIX)
-    , nixStore(canonPath(getEnvNonEmpty("NIX_STORE_DIR").value_or(getEnvNonEmpty("NIX_STORE").value_or(NIX_STORE_DIR))))
+    , nixStore(
+#ifndef _WIN32
+        // On Windows `/nix/store` is not a canonical path, but we dont'
+        // want to deal with that yet.
+        canonPath
+#endif
+        (getEnvNonEmpty("NIX_STORE_DIR").value_or(getEnvNonEmpty("NIX_STORE").value_or(NIX_STORE_DIR))))
     , nixDataDir(canonPath(getEnvNonEmpty("NIX_DATA_DIR").value_or(NIX_DATA_DIR)))
     , nixLogDir(canonPath(getEnvNonEmpty("NIX_LOG_DIR").value_or(NIX_LOG_DIR)))
     , nixStateDir(canonPath(getEnvNonEmpty("NIX_STATE_DIR").value_or(NIX_STATE_DIR)))
@@ -51,7 +65,9 @@ Settings::Settings()
     , nixManDir(canonPath(NIX_MAN_DIR))
     , nixDaemonSocketFile(canonPath(getEnvNonEmpty("NIX_DAEMON_SOCKET_PATH").value_or(nixStateDir + DEFAULT_SOCKET_PATH)))
 {
-    buildUsersGroup = getuid() == 0 ? "nixbld" : "";
+#ifndef _WIN32
+    buildUsersGroup = isRootUser() ? "nixbld" : "";
+#endif
     allowSymlinkedStore = getEnv("NIX_IGNORE_SYMLINK_STORE") == "1";
 
     auto sslOverride = getEnv("NIX_SSL_CERT_FILE").value_or(getEnv("SSL_CERT_FILE").value_or(""));
@@ -77,12 +93,45 @@ Settings::Settings()
     allowedImpureHostPrefixes = tokenizeString<StringSet>("/System/Library /usr/lib /dev /bin/sh");
 #endif
 
-    buildHook = getSelfExe().value_or("nix") + " __build-remote";
+    /* Set the build hook location
+
+       For builds we perform a self-invocation, so Nix has to be self-aware.
+       That is, it has to know where it is installed. We don't think it's sentient.
+
+       Normally, nix is installed according to `nixBinDir`, which is set at compile time,
+       but can be overridden. This makes for a great default that works even if this
+       code is linked as a library into some other program whose main is not aware
+       that it might need to be a build remote hook.
+
+       However, it may not have been installed at all. For example, if it's a static build,
+       there's a good chance that it has been moved out of its installation directory.
+       That makes `nixBinDir` useless. Instead, we'll query the OS for the path to the
+       current executable, using `getSelfExe()`.
+
+       As a last resort, we resort to `PATH`. Hopefully we find a `nix` there that's compatible.
+       If you're porting Nix to a new platform, that might be good enough for a while, but
+       you'll want to improve `getSelfExe()` to work on your platform.
+     */
+    std::string nixExePath = nixBinDir + "/nix";
+    if (!pathExists(nixExePath)) {
+        nixExePath = getSelfExe().value_or("nix");
+    }
+    buildHook = {
+        nixExePath,
+        "__build-remote",
+    };
 }
 
 void loadConfFile()
 {
-    globalConfig.applyConfigFile(settings.nixConfDir + "/nix.conf");
+    auto applyConfigFile = [&](const Path & path) {
+        try {
+            std::string contents = readFile(path);
+            globalConfig.applyConfig(contents, path);
+        } catch (SystemError &) { }
+    };
+
+    applyConfigFile(settings.nixConfDir + "/nix.conf");
 
     /* We only want to send overrides to the daemon, i.e. stuff from
        ~/.nix/nix.conf or the command line. */
@@ -90,7 +139,7 @@ void loadConfFile()
 
     auto files = settings.nixUserConfFiles;
     for (auto file = files.rbegin(); file != files.rend(); file++) {
-        globalConfig.applyConfigFile(*file);
+        applyConfigFile(*file);
     }
 
     auto nixConfEnv = getEnv("NIX_CONFIG");
@@ -128,6 +177,29 @@ unsigned int Settings::getDefaultCores()
       return concurrency;
 }
 
+#if __APPLE__
+static bool hasVirt() {
+
+    int hasVMM;
+    int hvSupport;
+    size_t size;
+
+    size = sizeof(hasVMM);
+    if (sysctlbyname("kern.hv_vmm_present", &hasVMM, &size, NULL, 0) == 0) {
+        if (hasVMM)
+            return false;
+    }
+
+    // whether the kernel and hardware supports virt
+    size = sizeof(hvSupport);
+    if (sysctlbyname("kern.hv_support", &hvSupport, &size, NULL, 0) == 0) {
+        return hvSupport == 1;
+    } else {
+        return false;
+    }
+}
+#endif
+
 StringSet Settings::getDefaultSystemFeatures()
 {
     /* For backwards compatibility, accept some "features" that are
@@ -142,6 +214,11 @@ StringSet Settings::getDefaultSystemFeatures()
     #if __linux__
     if (access("/dev/kvm", R_OK | W_OK) == 0)
         features.insert("kvm");
+    #endif
+
+    #if __APPLE__
+    if (hasVirt())
+        features.insert("apple-virt");
     #endif
 
     return features;
@@ -173,11 +250,15 @@ StringSet Settings::getDefaultExtraPlatforms()
 
 bool Settings::isWSL1()
 {
+#if __linux__
     struct utsname utsbuf;
     uname(&utsbuf);
     // WSL1 uses -Microsoft suffix
     // WSL2 uses -microsoft-standard suffix
     return hasSuffix(utsbuf.release, "-Microsoft");
+#else
+    return false;
+#endif
 }
 
 Path Settings::getDefaultSSLCertFile()
@@ -304,10 +385,20 @@ void initPlugins()
         for (const auto & file : pluginFiles) {
             /* handle is purposefully leaked as there may be state in the
                DSO needed by the action of the plugin. */
+#ifndef _WIN32 // TODO implement via DLL loading on Windows
             void *handle =
                 dlopen(file.c_str(), RTLD_LAZY | RTLD_LOCAL);
             if (!handle)
                 throw Error("could not dynamically open plugin file '%s': %s", file, dlerror());
+
+            /* Older plugins use a statically initialized object to run their code.
+               Newer plugins can also export nix_plugin_entry() */
+            void (*nix_plugin_entry)() = (void (*)())dlsym(handle, "nix_plugin_entry");
+            if (nix_plugin_entry)
+                nix_plugin_entry();
+#else
+                throw Error("could not dynamically open plugin file '%s'", file);
+#endif
         }
     }
 
@@ -365,14 +456,13 @@ void assertLibStoreInitialized() {
     };
 }
 
-void initLibStore() {
+void initLibStore(bool loadConfig) {
+    if (initLibStoreDone) return;
 
     initLibUtil();
 
-    if (sodium_init() == -1)
-        throw Error("could not initialise libsodium");
-
-    loadConfFile();
+    if (loadConfig)
+        loadConfFile();
 
     preloadNSS();
 
@@ -380,7 +470,7 @@ void initLibStore() {
        sshd). This breaks build users because they don't have access
        to the TMPDIR, in particular in ‘nix-store --serve’. */
 #if __APPLE__
-    if (hasPrefix(getEnv("TMPDIR").value_or("/tmp"), "/var/folders/"))
+    if (hasPrefix(defaultTempDir(), "/var/folders/"))
         unsetenv("TMPDIR");
 #endif
 

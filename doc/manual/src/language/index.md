@@ -1,12 +1,17 @@
 # Nix Language
 
-The Nix language is
+The Nix language is designed for conveniently creating and composing *derivations* – precise descriptions of how contents of existing files are used to derive new files.
+
+> **Tip**
+>
+> These pages are written as a reference.
+> If you are learning Nix, nix.dev has a good [introduction to the Nix language](https://nix.dev/tutorials/nix-language).
+
+The language is:
 
 - *domain-specific*
 
-  It only exists for the Nix package manager:
-  to describe packages and configurations as well as their variants and compositions.
-  It is not intended for general purpose use.
+  It comes with [built-in functions](@docroot@/language/builtins.md) to integrate with the Nix store, which manages files and performs the derivations declared in the Nix language.
 
 - *declarative*
 
@@ -25,7 +30,7 @@ The Nix language is
 
 - *lazy*
 
-  Expressions are only evaluated when their value is needed.
+  Values are only computed when they are needed.
 
 - *dynamically typed*
 
@@ -84,7 +89,8 @@ This is an incomplete overview of language features, by example.
   </td>
   <td>
 
-   A multi-line string. Strips common prefixed whitespace. Evaluates to `"multi\n line\n  string"`.
+   <!-- FIXME: using two no-break spaces, because apparently mdBook swallows the second regular space! -->
+   A multi-line string. Strips common prefixed whitespace. Evaluates to `"multi\n line\n  string"`.
 
   </td>
  </tr>
@@ -429,6 +435,32 @@ This is an incomplete overview of language features, by example.
   <td>
 
    Add all attributes from the given set to the scope (evaluates to `1`)
+
+  </td>
+ </tr>
+ <tr>
+  <td>
+
+   `inherit pkgs src;`
+
+  </td>
+  <td>
+
+   Adds the variables to the current scope (attribute set or `let` binding).
+   Desugars to `pkgs = pkgs; src = src;`
+
+  </td>
+ </tr>
+ <tr>
+  <td>
+
+   `inherit (pkgs) lib stdenv;`
+
+  </td>
+  <td>
+
+   Adds the attributes, from the attribute set in parentheses, to the current scope (attribute set or `let` binding).
+   Desugars to `lib = pkgs.lib; stdenv = pkgs.stdenv;`
 
   </td>
  </tr>

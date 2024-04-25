@@ -1,10 +1,11 @@
 #include "globals.hh"
+#include "current-process.hh"
 #include "shared.hh"
 #include "store-api.hh"
 #include "gc-store.hh"
-#include "util.hh"
 #include "loggers.hh"
 #include "progress-bar.hh"
+#include "signals.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -107,10 +108,12 @@ std::string getArg(const std::string & opt,
     return *i;
 }
 
+#ifndef _WIN32
 static void sigHandler(int signo) { }
+#endif
 
 
-void initNix()
+void initNix(bool loadConfig)
 {
     /* Turn on buffering for cerr. */
 #if HAVE_PUBSETBUF
@@ -118,9 +121,10 @@ void initNix()
     std::cerr.rdbuf()->pubsetbuf(buf, sizeof(buf));
 #endif
 
-    initLibStore();
+    initLibStore(loadConfig);
 
-    startSignalHandlerThread();
+#ifndef _WIN32
+    unix::startSignalHandlerThread();
 
     /* Reset SIGCHLD to its default. */
     struct sigaction act;
@@ -134,6 +138,7 @@ void initNix()
     /* Install a dummy SIGUSR1 handler for use with pthread_kill(). */
     act.sa_handler = sigHandler;
     if (sigaction(SIGUSR1, &act, 0)) throw SysError("handling SIGUSR1");
+#endif
 
 #if __APPLE__
     /* HACK: on darwin, we need can’t use sigprocmask with SIGWINCH.
@@ -155,21 +160,26 @@ void initNix()
     if (sigaction(SIGTRAP, &act, 0)) throw SysError("handling SIGTRAP");
 #endif
 
+#ifndef _WIN32
     /* Register a SIGSEGV handler to detect stack overflows.
        Why not initLibExpr()? initGC() is essentially that, but
        detectStackOverflow is not an instance of the init function concept, as
        it may have to be invoked more than once per process. */
     detectStackOverflow();
+#endif
 
     /* There is no privacy in the Nix system ;-)  At least not for
        now.  In particular, store objects should be readable by
        everybody. */
     umask(0022);
 
+#ifndef _WIN32
     /* Initialise the PRNG. */
     struct timeval tv;
     gettimeofday(&tv, 0);
     srandom(tv.tv_usec);
+#endif
+
 
 }
 
@@ -307,7 +317,7 @@ void printVersion(const std::string & programName)
 void showManPage(const std::string & name)
 {
     restoreProcessContext();
-    setenv("MANPATH", settings.nixManDir.c_str(), 1);
+    setEnv("MANPATH", settings.nixManDir.c_str());
     execlp("man", "man", name.c_str(), nullptr);
     throw SysError("command 'man %1%' failed", name.c_str());
 }
@@ -339,7 +349,7 @@ int handleExceptions(const std::string & programName, std::function<void()> fun)
         return 1;
     } catch (BaseError & e) {
         logError(e.info());
-        return e.status;
+        return e.info().status;
     } catch (std::bad_alloc & e) {
         printError(error + "out of memory");
         return 1;
@@ -364,11 +374,14 @@ RunPager::RunPager()
     Pipe toPager;
     toPager.create();
 
+#ifdef _WIN32 // TODO re-enable on Windows, once we can start processes.
+    throw Error("Commit signature verification not implemented on Windows yet");
+#else
     pid = startProcess([&]() {
         if (dup2(toPager.readSide.get(), STDIN_FILENO) == -1)
             throw SysError("dupping stdin");
         if (!getenv("LESS"))
-            setenv("LESS", "FRSXMK", 1);
+            setEnv("LESS", "FRSXMK");
         restoreProcessContext();
         if (pager)
             execl("/bin/sh", "sh", "-c", pager, nullptr);
@@ -379,20 +392,23 @@ RunPager::RunPager()
     });
 
     pid.setKillSignal(SIGINT);
-    stdout = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 0);
+    std_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 0);
     if (dup2(toPager.writeSide.get(), STDOUT_FILENO) == -1)
-        throw SysError("dupping stdout");
+        throw SysError("dupping standard output");
+#endif
 }
 
 
 RunPager::~RunPager()
 {
     try {
+#ifndef _WIN32 // TODO re-enable on Windows, once we can start processes.
         if (pid != -1) {
             std::cout.flush();
-            dup2(stdout, STDOUT_FILENO);
+            dup2(std_out, STDOUT_FILENO);
             pid.wait();
         }
+#endif
     } catch (...) {
         ignoreException();
     }
@@ -406,7 +422,5 @@ PrintFreed::~PrintFreed()
             results.paths.size(),
             showBytes(results.bytesFreed));
 }
-
-Exit::~Exit() { }
 
 }

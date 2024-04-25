@@ -1,16 +1,23 @@
 #include "daemon.hh"
-#include "monitor-fd.hh"
+#include "signals.hh"
 #include "worker-protocol.hh"
+#include "worker-protocol-impl.hh"
 #include "build-result.hh"
 #include "store-api.hh"
 #include "store-cast.hh"
 #include "gc-store.hh"
 #include "log-store.hh"
+#include "indirect-root-store.hh"
 #include "path-with-outputs.hh"
 #include "finally.hh"
 #include "archive.hh"
 #include "derivations.hh"
 #include "args.hh"
+#include "git.hh"
+
+#ifndef _WIN32 // TODO need graceful async exit support on Windows?
+# include "monitor-fd.hh"
+#endif
 
 namespace nix::daemon {
 
@@ -43,9 +50,9 @@ struct TunnelLogger : public Logger
 
     Sync<State> state_;
 
-    unsigned int clientVersion;
+    WorkerProto::Version clientVersion;
 
-    TunnelLogger(FdSink & to, unsigned int clientVersion)
+    TunnelLogger(FdSink & to, WorkerProto::Version clientVersion)
         : to(to), clientVersion(clientVersion) { }
 
     void enqueueMsg(const std::string & s)
@@ -117,7 +124,7 @@ struct TunnelLogger : public Logger
             if (GET_PROTOCOL_MINOR(clientVersion) >= 26) {
                 to << STDERR_ERROR << *ex;
             } else {
-                to << STDERR_ERROR << ex->what() << ex->status;
+                to << STDERR_ERROR << ex->what() << ex->info().status;
             }
         }
     }
@@ -251,7 +258,7 @@ struct ClientSettings
                 else if (setSubstituters(settings.substituters))
                     ;
                 else
-                    debug("ignoring the client-specified setting '%s', because it is a restricted setting and you are not a trusted user", name);
+                    warn("ignoring the client-specified setting '%s', because it is a restricted setting and you are not a trusted user", name);
             } catch (UsageError & e) {
                 warn(e.what());
             }
@@ -259,25 +266,22 @@ struct ClientSettings
     }
 };
 
-static std::vector<DerivedPath> readDerivedPaths(Store & store, unsigned int clientVersion, Source & from)
-{
-    std::vector<DerivedPath> reqs;
-    if (GET_PROTOCOL_MINOR(clientVersion) >= 30) {
-        reqs = WorkerProto<std::vector<DerivedPath>>::read(store, from);
-    } else {
-        for (auto & s : readStrings<Strings>(from))
-            reqs.push_back(parsePathWithOutputs(store, s).toDerivedPath());
-    }
-    return reqs;
-}
-
 static void performOp(TunnelLogger * logger, ref<Store> store,
-    TrustedFlag trusted, RecursiveFlag recursive, unsigned int clientVersion,
-    Source & from, BufferedSink & to, unsigned int op)
+    TrustedFlag trusted, RecursiveFlag recursive, WorkerProto::Version clientVersion,
+    Source & from, BufferedSink & to, WorkerProto::Op op)
 {
+    WorkerProto::ReadConn rconn {
+        .from = from,
+        .version = clientVersion,
+    };
+    WorkerProto::WriteConn wconn {
+        .to = to,
+        .version = clientVersion,
+    };
+
     switch (op) {
 
-    case wopIsValidPath: {
+    case WorkerProto::Op::IsValidPath: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         bool result = store->isValidPath(path);
@@ -286,8 +290,8 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQueryValidPaths: {
-        auto paths = WorkerProto<StorePathSet>::read(*store, from);
+    case WorkerProto::Op::QueryValidPaths: {
+        auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
 
         SubstituteFlag substitute = NoSubstitute;
         if (GET_PROTOCOL_MINOR(clientVersion) >= 27) {
@@ -300,11 +304,11 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         }
         auto res = store->queryValidPaths(paths, substitute);
         logger->stopWork();
-        workerProtoWrite(*store, to, res);
+        WorkerProto::write(*store, wconn, res);
         break;
     }
 
-    case wopHasSubstitutes: {
+    case WorkerProto::Op::HasSubstitutes: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         StorePathSet paths; // FIXME
@@ -315,45 +319,45 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQuerySubstitutablePaths: {
-        auto paths = WorkerProto<StorePathSet>::read(*store, from);
+    case WorkerProto::Op::QuerySubstitutablePaths: {
+        auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
         logger->startWork();
         auto res = store->querySubstitutablePaths(paths);
         logger->stopWork();
-        workerProtoWrite(*store, to, res);
+        WorkerProto::write(*store, wconn, res);
         break;
     }
 
-    case wopQueryPathHash: {
+    case WorkerProto::Op::QueryPathHash: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         auto hash = store->queryPathInfo(path)->narHash;
         logger->stopWork();
-        to << hash.to_string(Base16, false);
+        to << hash.to_string(HashFormat::Base16, false);
         break;
     }
 
-    case wopQueryReferences:
-    case wopQueryReferrers:
-    case wopQueryValidDerivers:
-    case wopQueryDerivationOutputs: {
+    case WorkerProto::Op::QueryReferences:
+    case WorkerProto::Op::QueryReferrers:
+    case WorkerProto::Op::QueryValidDerivers:
+    case WorkerProto::Op::QueryDerivationOutputs: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         StorePathSet paths;
-        if (op == wopQueryReferences)
+        if (op == WorkerProto::Op::QueryReferences)
             for (auto & i : store->queryPathInfo(path)->references)
                 paths.insert(i);
-        else if (op == wopQueryReferrers)
+        else if (op == WorkerProto::Op::QueryReferrers)
             store->queryReferrers(path, paths);
-        else if (op == wopQueryValidDerivers)
+        else if (op == WorkerProto::Op::QueryValidDerivers)
             paths = store->queryValidDerivers(path);
         else paths = store->queryDerivationOutputs(path);
         logger->stopWork();
-        workerProtoWrite(*store, to, paths);
+        WorkerProto::write(*store, wconn, paths);
         break;
     }
 
-    case wopQueryDerivationOutputNames: {
+    case WorkerProto::Op::QueryDerivationOutputNames: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         auto names = store->readDerivation(path).outputNames();
@@ -362,16 +366,16 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQueryDerivationOutputMap: {
+    case WorkerProto::Op::QueryDerivationOutputMap: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         auto outputs = store->queryPartialDerivationOutputMap(path);
         logger->stopWork();
-        workerProtoWrite(*store, to, outputs);
+        WorkerProto::write(*store, wconn, outputs);
         break;
     }
 
-    case wopQueryDeriver: {
+    case WorkerProto::Op::QueryDeriver: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         auto info = store->queryPathInfo(path);
@@ -380,7 +384,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQueryPathFromHashPart: {
+    case WorkerProto::Op::QueryPathFromHashPart: {
         auto hashPart = readString(from);
         logger->startWork();
         auto path = store->queryPathFromHashPart(hashPart);
@@ -389,11 +393,11 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddToStore: {
+    case WorkerProto::Op::AddToStore: {
         if (GET_PROTOCOL_MINOR(clientVersion) >= 25) {
             auto name = readString(from);
             auto camStr = readString(from);
-            auto refs = WorkerProto<StorePathSet>::read(*store, from);
+            auto refs = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
             bool repairBool;
             from >> repairBool;
             auto repair = RepairFlag{repairBool};
@@ -401,31 +405,32 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
             logger->startWork();
             auto pathInfo = [&]() {
                 // NB: FramedSource must be out of scope before logger->stopWork();
-                auto [contentAddressMethod, hashType_] = ContentAddressMethod::parse(camStr);
-                auto hashType = hashType_; // work around clang bug
+                auto [contentAddressMethod, hashAlgo] = ContentAddressMethod::parseWithAlgo(camStr);
                 FramedSource source(from);
-                // TODO this is essentially RemoteStore::addCAToStore. Move it up to Store.
-                return std::visit(overloaded {
-                    [&](const TextIngestionMethod &) {
-                        if (hashType != htSHA256)
-                            throw UnimplementedError("When adding text-hashed data called '%s', only SHA-256 is supported but '%s' was given",
-                                name, printHashType(hashType));
-                        // We could stream this by changing Store
-                        std::string contents = source.drain();
-                        auto path = store->addTextToStore(name, contents, refs, repair);
-                        return store->queryPathInfo(path);
-                    },
-                    [&](const FileIngestionMethod & fim) {
-                        auto path = store->addToStoreFromDump(source, name, fim, hashType, repair, refs);
-                        return store->queryPathInfo(path);
-                    },
-                }, contentAddressMethod.raw);
+                FileSerialisationMethod dumpMethod;
+                switch (contentAddressMethod.getFileIngestionMethod()) {
+                case FileIngestionMethod::Flat:
+                    dumpMethod = FileSerialisationMethod::Flat;
+                    break;
+                case FileIngestionMethod::Recursive:
+                    dumpMethod = FileSerialisationMethod::Recursive;
+                    break;
+                case FileIngestionMethod::Git:
+                    // Use NAR; Git is not a serialization method
+                    dumpMethod = FileSerialisationMethod::Recursive;
+                    break;
+                default:
+                    assert(false);
+                }
+                // TODO these two steps are essentially RemoteStore::addCAToStore. Move it up to Store.
+                auto path = store->addToStoreFromDump(source, name, dumpMethod, contentAddressMethod, hashAlgo, refs, repair);
+                return store->queryPathInfo(path);
             }();
             logger->stopWork();
 
-            pathInfo->write(to, *store, GET_PROTOCOL_MINOR(clientVersion));
+            WorkerProto::Serialise<ValidPathInfo>::write(*store, wconn, *pathInfo);
         } else {
-            HashType hashAlgo;
+            HashAlgorithm hashAlgo;
             std::string baseName;
             FileIngestionMethod method;
             {
@@ -441,33 +446,26 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
                     hashAlgoRaw = "sha256";
                     method = FileIngestionMethod::Recursive;
                 }
-                hashAlgo = parseHashType(hashAlgoRaw);
+                hashAlgo = parseHashAlgo(hashAlgoRaw);
             }
 
+            // Old protocol always sends NAR, regardless of hashing method
             auto dumpSource = sinkToSource([&](Sink & saved) {
-                if (method == FileIngestionMethod::Recursive) {
-                    /* We parse the NAR dump through into `saved` unmodified,
-                       so why all this extra work? We still parse the NAR so
-                       that we aren't sending arbitrary data to `saved`
-                       unwittingly`, and we know when the NAR ends so we don't
-                       consume the rest of `from` and can't parse another
-                       command. (We don't trust `addToStoreFromDump` to not
-                       eagerly consume the entire stream it's given, past the
-                       length of the Nar. */
-                    TeeSource savedNARSource(from, saved);
-                    ParseSink sink; /* null sink; just parse the NAR */
-                    parseDump(sink, savedNARSource);
-                } else {
-                    /* Incrementally parse the NAR file, stripping the
-                       metadata, and streaming the sole file we expect into
-                       `saved`. */
-                    RetrieveRegularNARSink savedRegular { saved };
-                    parseDump(savedRegular, from);
-                    if (!savedRegular.regular) throw Error("regular file expected");
-                }
+                /* We parse the NAR dump through into `saved` unmodified,
+                   so why all this extra work? We still parse the NAR so
+                   that we aren't sending arbitrary data to `saved`
+                   unwittingly`, and we know when the NAR ends so we don't
+                   consume the rest of `from` and can't parse another
+                   command. (We don't trust `addToStoreFromDump` to not
+                   eagerly consume the entire stream it's given, past the
+                   length of the Nar. */
+                TeeSource savedNARSource(from, saved);
+                NullFileSystemObjectSink sink; /* just parse the NAR */
+                parseDump(sink, savedNARSource);
             });
             logger->startWork();
-            auto path = store->addToStoreFromDump(*dumpSource, baseName, method, hashAlgo);
+            auto path = store->addToStoreFromDump(
+                *dumpSource, baseName, FileSerialisationMethod::Recursive, method, hashAlgo);
             logger->stopWork();
 
             to << store->printStorePath(path);
@@ -475,7 +473,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddMultipleToStore: {
+    case WorkerProto::Op::AddMultipleToStore: {
         bool repair, dontCheckSigs;
         from >> repair >> dontCheckSigs;
         if (!trusted && dontCheckSigs)
@@ -492,18 +490,21 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddTextToStore: {
+    case WorkerProto::Op::AddTextToStore: {
         std::string suffix = readString(from);
         std::string s = readString(from);
-        auto refs = WorkerProto<StorePathSet>::read(*store, from);
+        auto refs = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
         logger->startWork();
-        auto path = store->addTextToStore(suffix, s, refs, NoRepair);
+        auto path = ({
+            StringSource source { s };
+            store->addToStoreFromDump(source, suffix, FileSerialisationMethod::Flat, TextIngestionMethod {}, HashAlgorithm::SHA256, refs, NoRepair);
+        });
         logger->stopWork();
         to << store->printStorePath(path);
         break;
     }
 
-    case wopExportPath: {
+    case WorkerProto::Op::ExportPath: {
         auto path = store->parseStorePath(readString(from));
         readInt(from); // obsolete
         logger->startWork();
@@ -514,7 +515,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopImportPaths: {
+    case WorkerProto::Op::ImportPaths: {
         logger->startWork();
         TunnelSource source(from, to);
         auto paths = store->importPaths(source,
@@ -526,8 +527,8 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopBuildPaths: {
-        auto drvs = readDerivedPaths(*store, clientVersion, from);
+    case WorkerProto::Op::BuildPaths: {
+        auto drvs = WorkerProto::Serialise<DerivedPaths>::read(*store, rconn);
         BuildMode mode = bmNormal;
         if (GET_PROTOCOL_MINOR(clientVersion) >= 15) {
             mode = (BuildMode) readInt(from);
@@ -551,8 +552,8 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopBuildPathsWithResults: {
-        auto drvs = readDerivedPaths(*store, clientVersion, from);
+    case WorkerProto::Op::BuildPathsWithResults: {
+        auto drvs = WorkerProto::Serialise<DerivedPaths>::read(*store, rconn);
         BuildMode mode = bmNormal;
         mode = (BuildMode) readInt(from);
 
@@ -567,14 +568,23 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         auto results = store->buildPathsWithResults(drvs, mode);
         logger->stopWork();
 
-        workerProtoWrite(*store, to, results);
+        WorkerProto::write(*store, wconn, results);
 
         break;
     }
 
-    case wopBuildDerivation: {
+    case WorkerProto::Op::BuildDerivation: {
         auto drvPath = store->parseStorePath(readString(from));
         BasicDerivation drv;
+        /*
+         * Note: unlike wopEnsurePath, this operation reads a
+         * derivation-to-be-realized from the client with
+         * readDerivation(Source,Store) rather than reading it from
+         * the local store with Store::readDerivation().  Since the
+         * derivation-to-be-realized is not registered in the store
+         * it cannot be trusted that its outPath was calculated
+         * correctly.
+         */
         readDerivation(from, *store, drv, Derivation::nameFromPath(drvPath));
         BuildMode buildMode = (BuildMode) readInt(from);
         logger->startWork();
@@ -636,20 +646,11 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
 
         auto res = store->buildDerivation(drvPath, drv, buildMode);
         logger->stopWork();
-        to << res.status << res.errorMsg;
-        if (GET_PROTOCOL_MINOR(clientVersion) >= 29) {
-            to << res.timesBuilt << res.isNonDeterministic << res.startTime << res.stopTime;
-        }
-        if (GET_PROTOCOL_MINOR(clientVersion) >= 28) {
-            DrvOutputs builtOutputs;
-            for (auto & [output, realisation] : res.builtOutputs)
-                builtOutputs.insert_or_assign(realisation.id, realisation);
-            workerProtoWrite(*store, to, builtOutputs);
-        }
+        WorkerProto::write(*store, wconn, res);
         break;
     }
 
-    case wopEnsurePath: {
+    case WorkerProto::Op::EnsurePath: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         store->ensurePath(path);
@@ -658,7 +659,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddTempRoot: {
+    case WorkerProto::Op::AddTempRoot: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         store->addTempRoot(path);
@@ -667,12 +668,27 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddIndirectRoot: {
+    case WorkerProto::Op::AddPermRoot: {
+        if (!trusted)
+            throw Error(
+                "you are not privileged to create perm roots\n\n"
+                "hint: you can just do this client-side without special privileges, and probably want to do that instead.");
+        auto storePath = WorkerProto::Serialise<StorePath>::read(*store, rconn);
+        Path gcRoot = absPath(readString(from));
+        logger->startWork();
+        auto & localFSStore = require<LocalFSStore>(*store);
+        localFSStore.addPermRoot(storePath, gcRoot);
+        logger->stopWork();
+        to << gcRoot;
+        break;
+    }
+
+    case WorkerProto::Op::AddIndirectRoot: {
         Path path = absPath(readString(from));
 
         logger->startWork();
-        auto & gcStore = require<GcStore>(*store);
-        gcStore.addIndirectRoot(path);
+        auto & indirectRootStore = require<IndirectRootStore>(*store);
+        indirectRootStore.addIndirectRoot(path);
         logger->stopWork();
 
         to << 1;
@@ -680,14 +696,14 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
     }
 
     // Obsolete.
-    case wopSyncWithGC: {
+    case WorkerProto::Op::SyncWithGC: {
         logger->startWork();
         logger->stopWork();
         to << 1;
         break;
     }
 
-    case wopFindRoots: {
+    case WorkerProto::Op::FindRoots: {
         logger->startWork();
         auto & gcStore = require<GcStore>(*store);
         Roots roots = gcStore.findRoots(!trusted);
@@ -706,10 +722,10 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopCollectGarbage: {
+    case WorkerProto::Op::CollectGarbage: {
         GCOptions options;
         options.action = (GCOptions::GCAction) readInt(from);
-        options.pathsToDelete = WorkerProto<StorePathSet>::read(*store, from);
+        options.pathsToDelete = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
         from >> options.ignoreLiveness >> options.maxFreed;
         // obsolete fields
         readInt(from);
@@ -730,7 +746,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopSetOptions: {
+    case WorkerProto::Op::SetOptions: {
 
         ClientSettings clientSettings;
 
@@ -767,7 +783,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQuerySubstitutablePathInfo: {
+    case WorkerProto::Op::QuerySubstitutablePathInfo: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         SubstitutablePathInfos infos;
@@ -779,22 +795,22 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         else {
             to << 1
                << (i->second.deriver ? store->printStorePath(*i->second.deriver) : "");
-            workerProtoWrite(*store, to, i->second.references);
+            WorkerProto::write(*store, wconn, i->second.references);
             to << i->second.downloadSize
                << i->second.narSize;
         }
         break;
     }
 
-    case wopQuerySubstitutablePathInfos: {
+    case WorkerProto::Op::QuerySubstitutablePathInfos: {
         SubstitutablePathInfos infos;
         StorePathCAMap pathsMap = {};
         if (GET_PROTOCOL_MINOR(clientVersion) < 22) {
-            auto paths = WorkerProto<StorePathSet>::read(*store, from);
+            auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
             for (auto & path : paths)
                 pathsMap.emplace(path, std::nullopt);
         } else
-            pathsMap = WorkerProto<StorePathCAMap>::read(*store, from);
+            pathsMap = WorkerProto::Serialise<StorePathCAMap>::read(*store, rconn);
         logger->startWork();
         store->querySubstitutablePathInfos(pathsMap, infos);
         logger->stopWork();
@@ -802,21 +818,21 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         for (auto & i : infos) {
             to << store->printStorePath(i.first)
                << (i.second.deriver ? store->printStorePath(*i.second.deriver) : "");
-            workerProtoWrite(*store, to, i.second.references);
+            WorkerProto::write(*store, wconn, i.second.references);
             to << i.second.downloadSize << i.second.narSize;
         }
         break;
     }
 
-    case wopQueryAllValidPaths: {
+    case WorkerProto::Op::QueryAllValidPaths: {
         logger->startWork();
         auto paths = store->queryAllValidPaths();
         logger->stopWork();
-        workerProtoWrite(*store, to, paths);
+        WorkerProto::write(*store, wconn, paths);
         break;
     }
 
-    case wopQueryPathInfo: {
+    case WorkerProto::Op::QueryPathInfo: {
         auto path = store->parseStorePath(readString(from));
         std::shared_ptr<const ValidPathInfo> info;
         logger->startWork();
@@ -829,7 +845,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         if (info) {
             if (GET_PROTOCOL_MINOR(clientVersion) >= 17)
                 to << 1;
-            info->write(to, *store, GET_PROTOCOL_MINOR(clientVersion), false);
+            WorkerProto::write(*store, wconn, static_cast<const UnkeyedValidPathInfo &>(*info));
         } else {
             assert(GET_PROTOCOL_MINOR(clientVersion) >= 17);
             to << 0;
@@ -837,14 +853,14 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopOptimiseStore:
+    case WorkerProto::Op::OptimiseStore:
         logger->startWork();
         store->optimiseStore();
         logger->stopWork();
         to << 1;
         break;
 
-    case wopVerifyStore: {
+    case WorkerProto::Op::VerifyStore: {
         bool checkContents, repair;
         from >> checkContents >> repair;
         logger->startWork();
@@ -856,19 +872,17 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddSignatures: {
+    case WorkerProto::Op::AddSignatures: {
         auto path = store->parseStorePath(readString(from));
         StringSet sigs = readStrings<StringSet>(from);
         logger->startWork();
-        if (!trusted)
-            throw Error("you are not privileged to add signatures");
         store->addSignatures(path, sigs);
         logger->stopWork();
         to << 1;
         break;
     }
 
-    case wopNarFromPath: {
+    case WorkerProto::Op::NarFromPath: {
         auto path = store->parseStorePath(readString(from));
         logger->startWork();
         logger->stopWork();
@@ -876,15 +890,15 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopAddToStoreNar: {
+    case WorkerProto::Op::AddToStoreNar: {
         bool repair, dontCheckSigs;
         auto path = store->parseStorePath(readString(from));
         auto deriver = readString(from);
-        auto narHash = Hash::parseAny(readString(from), htSHA256);
+        auto narHash = Hash::parseAny(readString(from), HashAlgorithm::SHA256);
         ValidPathInfo info { path, narHash };
         if (deriver != "")
             info.deriver = store->parseStorePath(deriver);
-        info.references = WorkerProto<StorePathSet>::read(*store, from);
+        info.references = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
         from >> info.registrationTime >> info.narSize >> info.ultimate;
         info.sigs = readStrings<StringSet>(from);
         info.ca = ContentAddress::parseOpt(readString(from));
@@ -911,7 +925,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
                 source = std::make_unique<TunnelSource>(from, to);
             else {
                 TeeSource tee { from, saved };
-                ParseSink ether;
+                NullFileSystemObjectSink ether;
                 parseDump(ether, tee);
                 source = std::make_unique<StringSource>(saved.s);
             }
@@ -928,21 +942,21 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
-    case wopQueryMissing: {
-        auto targets = readDerivedPaths(*store, clientVersion, from);
+    case WorkerProto::Op::QueryMissing: {
+        auto targets = WorkerProto::Serialise<DerivedPaths>::read(*store, rconn);
         logger->startWork();
         StorePathSet willBuild, willSubstitute, unknown;
         uint64_t downloadSize, narSize;
         store->queryMissing(targets, willBuild, willSubstitute, unknown, downloadSize, narSize);
         logger->stopWork();
-        workerProtoWrite(*store, to, willBuild);
-        workerProtoWrite(*store, to, willSubstitute);
-        workerProtoWrite(*store, to, unknown);
+        WorkerProto::write(*store, wconn, willBuild);
+        WorkerProto::write(*store, wconn, willSubstitute);
+        WorkerProto::write(*store, wconn, unknown);
         to << downloadSize << narSize;
         break;
     }
 
-    case wopRegisterDrvOutput: {
+    case WorkerProto::Op::RegisterDrvOutput: {
         logger->startWork();
         if (GET_PROTOCOL_MINOR(clientVersion) < 31) {
             auto outputId = DrvOutput::parse(readString(from));
@@ -950,14 +964,14 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
             store->registerDrvOutput(Realisation{
                 .id = outputId, .outPath = outputPath});
         } else {
-            auto realisation = WorkerProto<Realisation>::read(*store, from);
+            auto realisation = WorkerProto::Serialise<Realisation>::read(*store, rconn);
             store->registerDrvOutput(realisation);
         }
         logger->stopWork();
         break;
     }
 
-    case wopQueryRealisation: {
+    case WorkerProto::Op::QueryRealisation: {
         logger->startWork();
         auto outputId = DrvOutput::parse(readString(from));
         auto info = store->queryRealisation(outputId);
@@ -965,16 +979,16 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         if (GET_PROTOCOL_MINOR(clientVersion) < 31) {
             std::set<StorePath> outPaths;
             if (info) outPaths.insert(info->outPath);
-            workerProtoWrite(*store, to, outPaths);
+            WorkerProto::write(*store, wconn, outPaths);
         } else {
             std::set<Realisation> realisations;
             if (info) realisations.insert(*info);
-            workerProtoWrite(*store, to, realisations);
+            WorkerProto::write(*store, wconn, realisations);
         }
         break;
     }
 
-    case wopAddBuildLog: {
+    case WorkerProto::Op::AddBuildLog: {
         StorePath path{readString(from)};
         logger->startWork();
         if (!trusted)
@@ -991,6 +1005,10 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
         break;
     }
 
+    case WorkerProto::Op::QueryFailedPaths:
+    case WorkerProto::Op::ClearFailedPaths:
+        throw Error("Removed operation %1%", op);
+
     default:
         throw Error("invalid operation %1%", op);
     }
@@ -1003,14 +1021,16 @@ void processConnection(
     TrustedFlag trusted,
     RecursiveFlag recursive)
 {
+#ifndef _WIN32 // TODO need graceful async exit support on Windows?
     auto monitor = !recursive ? std::make_unique<MonitorFdHup>(from.fd) : nullptr;
+#endif
 
     /* Exchange the greeting. */
     unsigned int magic = readInt(from);
     if (magic != WORKER_MAGIC_1) throw Error("protocol mismatch");
     to << WORKER_MAGIC_2 << PROTOCOL_VERSION;
     to.flush();
-    unsigned int clientVersion = readInt(from);
+    WorkerProto::Version clientVersion = readInt(from);
 
     if (clientVersion < 0x10a)
         throw Error("the Nix client version is too old");
@@ -1024,7 +1044,7 @@ void processConnection(
     unsigned int opCount = 0;
 
     Finally finally([&]() {
-        _isInterrupted = false;
+        setInterrupted(false);
         printMsgUsing(prevLogger, lvlDebug, "%d operations", opCount);
     });
 
@@ -1045,7 +1065,11 @@ void processConnection(
         auto temp = trusted
             ? store->isTrustedClient()
             : std::optional { NotTrusted };
-        workerProtoWrite(*store, to, temp);
+        WorkerProto::WriteConn wconn {
+            .to = to,
+            .version = clientVersion,
+        };
+        WorkerProto::write(*store, wconn, temp);
     }
 
     /* Send startup error messages to the client. */
@@ -1058,9 +1082,9 @@ void processConnection(
 
         /* Process client requests. */
         while (true) {
-            WorkerOp op;
+            WorkerProto::Op op;
             try {
-                op = (WorkerOp) readInt(from);
+                op = (enum WorkerProto::Op) readInt(from);
             } catch (Interrupted & e) {
                 break;
             } catch (EndOfFile & e) {

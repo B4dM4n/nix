@@ -75,11 +75,35 @@ struct FileTransferRequest
 
 struct FileTransferResult
 {
+    /**
+     * Whether this is a cache hit (i.e. the ETag supplied in the
+     * request is still valid). If so, `data` is empty.
+     */
     bool cached = false;
+
+    /**
+     * The ETag of the object.
+     */
     std::string etag;
-    std::string effectiveUri;
+
+    /**
+     * All URLs visited in the redirect chain.
+     */
+    std::vector<std::string> urls;
+
+    /**
+     * The response body.
+     */
     std::string data;
+
     uint64_t bodySize = 0;
+
+    /**
+     * An "immutable" URL for this resource (i.e. one whose contents
+     * will never change), as returned by the `Link: <url>;
+     * rel="immutable"` header.
+     */
+    std::optional<std::string> immutableUrl;
 };
 
 class Store;
@@ -112,7 +136,10 @@ struct FileTransfer
      * Download a file, writing its data to a sink. The sink will be
      * invoked on the thread of the caller.
      */
-    void download(FileTransferRequest && request, Sink & sink);
+    void download(
+        FileTransferRequest && request,
+        Sink & sink,
+        std::function<void(FileTransferResult)> resultCallback = {});
 
     enum Error { NotFound, Forbidden, Misc, Transient, Interrupted };
 };

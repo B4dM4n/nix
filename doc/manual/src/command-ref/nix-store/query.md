@@ -5,8 +5,8 @@
 # Synopsis
 
 `nix-store` {`--query` | `-q`}
-  {`--outputs` | `--requisites` | `-R` | `--references` |
-  `--referrers` | `--referrers-closure` | `--deriver` | `-d` |
+  {`--outputs` | `--requisites` | `-R` | `--references` | `--referrers` |
+  `--referrers-closure` | `--deriver` | `-d` | `--valid-derivers` |
   `--graph` | `--tree` | `--binding` *name* | `-b` *name* | `--hash` |
   `--size` | `--roots`}
   [`--use-output`] [`-u`] [`--force-realise`] [`-f`]
@@ -40,12 +40,12 @@ symlink.
     derivations *paths*. These are the paths that will be produced when
     the derivation is built.
 
-    [output paths]: ../../glossary.md#gloss-output-path
+    [output paths]: @docroot@/glossary.md#gloss-output-path
 
   - `--requisites`; `-R`\
     Prints out the [closure] of the store path *paths*.
 
-    [closure]: ../../glossary.md#gloss-closure
+    [closure]: @docroot@/glossary.md#gloss-closure
 
     This query has one option:
 
@@ -66,7 +66,7 @@ symlink.
     *paths*, that is, their immediate dependencies. (For *all*
     dependencies, use `--requisites`.)
 
-    [references]: ../../glossary.md#gloss-reference
+    [references]: @docroot@/glossary.md#gloss-reference
 
   - `--referrers`\
     Prints the set of *referrers* of the store paths *paths*, that is,
@@ -82,12 +82,20 @@ symlink.
     in the Nix store that are dependent on *paths*.
 
   - `--deriver`; `-d`\
-    Prints the [deriver] of the store paths *paths*. If
+    Prints the [deriver] that was used to build the store paths *paths*. If
     the path has no deriver (e.g., if it is a source file), or if the
     deriver is not known (e.g., in the case of a binary-only
     deployment), the string `unknown-deriver` is printed.
+    The returned deriver is not guaranteed to exist in the local store, for
+    example when *paths* were substituted from a binary cache.
+    Use `--valid-derivers` instead to obtain valid paths only.
 
-    [deriver]: ../../glossary.md#gloss-deriver
+    [deriver]: @docroot@/glossary.md#gloss-deriver
+
+  - `--valid-derivers`\
+    Prints a set of derivation files (`.drv`) which are supposed produce
+    said paths when realized. Might print nothing, for example for source paths
+    or paths subsituted from a binary cache.
 
   - `--graph`\
     Prints the references graph of the store paths *paths* in the format

@@ -2,6 +2,7 @@
 #include "globals.hh"
 #include "eval.hh"
 #include "eval-inline.hh"
+#include "eval-settings.hh"
 #include "names.hh"
 #include "get-drvs.hh"
 #include "common-args.hh"
@@ -66,11 +67,9 @@ struct CmdSearch : InstallableValueCommand, MixJSON
         settings.readOnlyMode = true;
         evalSettings.enableImportFromDerivation.setDefault(false);
 
-        // Empty search string should match all packages
-        // Use "^" here instead of ".*" due to differences in resulting highlighting
-        // (see #1893 -- libc++ claims empty search string is not in POSIX grammar)
+        // Recommend "^" here instead of ".*" due to differences in resulting highlighting
         if (res.empty())
-            res.push_back("^");
+            throw UsageError("Must provide at least one regex! To match all packages, use '%s'.", "nix search <installable> ^");
 
         std::vector<std::regex> regexes;
         std::vector<std::regex> excludeRegexes;
