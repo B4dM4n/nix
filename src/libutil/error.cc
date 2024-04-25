@@ -11,14 +11,15 @@
 
 namespace nix {
 
-void BaseError::addTrace(std::shared_ptr<Pos> && e, hintformat hint, bool frame)
+void BaseError::addTrace(std::shared_ptr<Pos> && e, HintFmt hint, TracePrint print)
 {
-    err.traces.push_front(Trace { .pos = std::move(e), .hint = hint, .frame = frame });
+    err.traces.push_front(Trace { .pos = std::move(e), .hint = hint, .print = print });
 }
 
-void throwExceptionSelfCheck(){
+void throwExceptionSelfCheck()
+{
     // This is meant to be caught in initLibUtil()
-    throw SysError("C++ exception handling is broken. This would appear to be a problem with the way Nix was compiled and/or linked and/or loaded.");
+    throw Error("C++ exception handling is broken. This would appear to be a problem with the way Nix was compiled and/or linked and/or loaded.");
 }
 
 // c++ std::exception descendants must have a 'const char* what()' function.
@@ -37,7 +38,7 @@ const std::string & BaseError::calcWhat() const
 
 std::optional<std::string> ErrorInfo::programName = std::nullopt;
 
-std::ostream & operator <<(std::ostream & os, const hintformat & hf)
+std::ostream & operator <<(std::ostream & os, const HintFmt & hf)
 {
     return os << hf.str();
 }
@@ -61,8 +62,7 @@ inline bool operator<(const Trace& lhs, const Trace& rhs)
     // This formats a freshly formatted hint string and then throws it away, which
     // shouldn't be much of a problem because it only runs when pos is equal, and this function is
     // used for trace printing, which is infrequent.
-    return std::forward_as_tuple(lhs.hint.str(), lhs.frame)
-        < std::forward_as_tuple(rhs.hint.str(), rhs.frame);
+    return lhs.hint.str() < rhs.hint.str();
 }
 inline bool operator> (const Trace& lhs, const Trace& rhs) { return rhs < lhs; }
 inline bool operator<=(const Trace& lhs, const Trace& rhs) { return !(lhs > rhs); }
@@ -164,7 +164,7 @@ static bool printPosMaybe(std::ostream & oss, std::string_view indent, const std
     return hasPos;
 }
 
-void printTrace(
+static void printTrace(
     std::ostream & output,
     const std::string_view & indent,
     size_t & count,
@@ -335,7 +335,7 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
      *      try {
      *          e->eval(*this, env, v);
      *          if (v.type() != nAttrs)
-     *              throwTypeError("expected a set but found %1%", v);
+     *              error<TypeError>("expected a set but found %1%", v);
      *      } catch (Error & e) {
      *          e.addTrace(pos, errorCtx);
      *          throw;
@@ -349,7 +349,7 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
      *      e->eval(*this, env, v);
      *      try {
      *          if (v.type() != nAttrs)
-     *              throwTypeError("expected a set but found %1%", v);
+     *              error<TypeError>("expected a set but found %1%", v);
      *      } catch (Error & e) {
      *          e.addTrace(pos, errorCtx);
      *          throw;
@@ -373,7 +373,6 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
     // prepended to each element of the trace
     auto ellipsisIndent = "  ";
 
-    bool frameOnly = false;
     if (!einfo.traces.empty()) {
         // Stack traces seen since we last printed a chunk of `duplicate frames
         // omitted`.
@@ -381,37 +380,45 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
         // A consecutive sequence of stack traces that are all in `tracesSeen`.
         std::vector<Trace> skippedTraces;
         size_t count = 0;
+        bool truncate = false;
 
         for (const auto & trace : einfo.traces) {
             if (trace.hint.str().empty()) continue;
-            if (frameOnly && !trace.frame) continue;
 
             if (!showTrace && count > 3) {
-                oss << "\n" << ANSI_WARNING "(stack trace truncated; use '--show-trace' to show the full trace)" ANSI_NORMAL << "\n";
-                break;
+                truncate = true;
             }
 
-            if (tracesSeen.count(trace)) {
-                skippedTraces.push_back(trace);
-                continue;
+            if (!truncate || trace.print == TracePrint::Always) {
+
+                if (tracesSeen.count(trace)) {
+                    skippedTraces.push_back(trace);
+                    continue;
+                }
+
+                tracesSeen.insert(trace);
+
+                printSkippedTracesMaybe(oss, ellipsisIndent, count, skippedTraces, tracesSeen);
+
+                count++;
+
+                printTrace(oss, ellipsisIndent, count, trace);
             }
-            tracesSeen.insert(trace);
-
-            printSkippedTracesMaybe(oss, ellipsisIndent, count, skippedTraces, tracesSeen);
-
-            count++;
-            frameOnly = trace.frame;
-
-            printTrace(oss, ellipsisIndent, count, trace);
         }
 
+
         printSkippedTracesMaybe(oss, ellipsisIndent, count, skippedTraces, tracesSeen);
+
+        if (truncate) {
+            oss << "\n" << ANSI_WARNING "(stack trace truncated; use '--show-trace' to show the full, detailed trace)" ANSI_NORMAL << "\n";
+        }
+
         oss << "\n" << prefix;
     }
 
     oss << einfo.msg << "\n";
 
-    printPosMaybe(oss, "", einfo.errPos);
+    printPosMaybe(oss, "", einfo.pos);
 
     auto suggestions = einfo.suggestions.trim();
     if (!suggestions.suggestions.empty()) {

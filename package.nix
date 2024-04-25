@@ -1,10 +1,12 @@
 { lib
+, fetchurl
 , stdenv
 , releaseTools
 , autoconf-archive
 , autoreconfHook
 , aws-sdk-cpp
 , boehmgc
+, buildPackages
 , nlohmann_json
 , bison
 , boost
@@ -24,6 +26,7 @@
 , libgit2
 , libseccomp
 , libsodium
+, man
 , lowdown
 , mdbook
 , mdbook-linkcheck
@@ -74,7 +77,10 @@
 # sounds so long as evaluation just takes places within short-lived
 # processes. (When the process exits, the memory is reclaimed; it is
 # only leaked *within* the process.)
-, enableGC ? true
+#
+# Temporarily disabled on Windows because the `GC_throw_bad_alloc`
+# symbol is missing during linking.
+, enableGC ? !stdenv.hostPlatform.isWindows
 
 # Whether to enable Markdown rendering in the Nix binary.
 , enableMarkdown ? !stdenv.hostPlatform.isWindows
@@ -87,9 +93,10 @@
 # - readline
 , readlineFlavor ? if stdenv.hostPlatform.isWindows then "readline" else "editline"
 
-# Whether to build the internal API docs, can be done separately from
+# Whether to build the internal/external API docs, can be done separately from
 # everything else.
-, enableInternalAPIDocs ? false
+, enableInternalAPIDocs ? forDevShell
+, enableExternalAPIDocs ? forDevShell
 
 # Whether to install unit tests. This is useful when cross compiling
 # since we cannot run them natively during the build, but can do so
@@ -154,13 +161,15 @@ in {
     in
       fileset.toSource {
         root = ./.;
-        fileset = fileset.intersect baseFiles (fileset.unions ([
+        fileset = fileset.intersection baseFiles (fileset.unions ([
           # For configure
           ./.version
           ./configure.ac
           ./m4
           # TODO: do we really need README.md? It doesn't seem used in the build.
           ./README.md
+          # This could be put behind a conditional
+          ./maintainers/local.mk
           # For make, regardless of what we are building
           ./local.mk
           ./Makefile
@@ -178,6 +187,9 @@ in {
           ./doc/manual
         ] ++ lib.optionals enableInternalAPIDocs [
           ./doc/internal-api
+        ] ++ lib.optionals enableExternalAPIDocs [
+          ./doc/external-api
+        ] ++ lib.optionals (enableInternalAPIDocs || enableExternalAPIDocs) [
           # Source might not be compiled, but still must be available
           # for Doxygen to gather comments.
           ./src
@@ -195,7 +207,7 @@ in {
     ++ lib.optional doBuild "dev"
     # If we are doing just build or just docs, the one thing will use
     # "out". We only need additional outputs if we are doing both.
-    ++ lib.optional (doBuild && (enableManual || enableInternalAPIDocs)) "doc"
+    ++ lib.optional (doBuild && (enableManual || enableInternalAPIDocs || enableExternalAPIDocs)) "doc"
     ++ lib.optional installUnitTests "check";
 
   nativeBuildInputs = [
@@ -209,10 +221,15 @@ in {
     (lib.getBin lowdown)
     mdbook
     mdbook-linkcheck
+  ] ++ lib.optionals doInstallCheck [
+    git
+    mercurial
+    openssh
+    man # for testing `nix-* --help`
   ] ++ lib.optionals (doInstallCheck || enableManual) [
     jq # Also for custom mdBook preprocessor.
   ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux
-    ++ lib.optional enableInternalAPIDocs doxygen
+    ++ lib.optional (enableInternalAPIDocs || enableExternalAPIDocs) doxygen
   ;
 
   buildInputs = lib.optionals doBuild [
@@ -232,7 +249,13 @@ in {
   ] ++ lib.optionals buildUnitTests [
     gtest
     rapidcheck
-  ] ++ lib.optional stdenv.isLinux libseccomp
+  ] ++ lib.optional stdenv.isLinux (libseccomp.overrideAttrs (_: rec {
+    version = "2.5.5";
+    src = fetchurl {
+      url = "https://github.com/seccomp/libseccomp/releases/download/v${version}/libseccomp-${version}.tar.gz";
+      hash = "sha256-JIosik2bmFiqa69ScSw0r+/PnJ6Ut23OAsHJqiX7M3U=";
+    };
+  }))
     ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid
     # There have been issues building these dependencies
     ++ lib.optional (stdenv.hostPlatform == stdenv.buildPlatform && (stdenv.isLinux || stdenv.isDarwin))
@@ -248,12 +271,6 @@ in {
 
   dontBuild = !attrs.doBuild;
   doCheck = attrs.doCheck;
-
-  nativeCheckInputs = [
-    git
-    mercurial
-    openssh
-  ];
 
   disallowedReferences = [ boost ];
 
@@ -282,6 +299,7 @@ in {
     (lib.enableFeature buildUnitTests "unit-tests")
     (lib.enableFeature doInstallCheck "functional-tests")
     (lib.enableFeature enableInternalAPIDocs "internal-api-docs")
+    (lib.enableFeature enableExternalAPIDocs "external-api-docs")
     (lib.enableFeature enableManual "doc-gen")
     (lib.enableFeature enableGC "gc")
     (lib.enableFeature enableMarkdown "markdown")
@@ -306,7 +324,8 @@ in {
   makeFlags = "profiledir=$(out)/etc/profile.d PRECOMPILE_HEADERS=1";
 
   installTargets = lib.optional doBuild "install"
-    ++ lib.optional enableInternalAPIDocs "internal-api-html";
+    ++ lib.optional enableInternalAPIDocs "internal-api-html"
+    ++ lib.optional enableExternalAPIDocs "external-api-html";
 
   installFlags = "sysconfdir=$(out)/etc";
 
@@ -333,6 +352,16 @@ in {
   '' + lib.optionalString enableInternalAPIDocs ''
     mkdir -p ''${!outputDoc}/nix-support
     echo "doc internal-api-docs $out/share/doc/nix/internal-api/html" >> ''${!outputDoc}/nix-support/hydra-build-products
+  ''
+    + lib.optionalString enableExternalAPIDocs ''
+    mkdir -p ''${!outputDoc}/nix-support
+    echo "doc external-api-docs $out/share/doc/nix/external-api/html" >> ''${!outputDoc}/nix-support/hydra-build-products
+  '';
+
+  # So the check output gets links for DLLs in the out output.
+  preFixup = lib.optionalString (stdenv.hostPlatform.isWindows && builtins.elem "check" finalAttrs.outputs) ''
+    ln -s "$check/lib/"*.dll "$check/bin"
+    ln -s "$out/bin/"*.dll "$check/bin"
   '';
 
   doInstallCheck = attrs.doInstallCheck;
@@ -343,15 +372,22 @@ in {
 
   # Work around weird bug where it doesn't think there is a Makefile.
   installCheckPhase = if (!doBuild && doInstallCheck) then ''
+    runHook preInstallCheck
     mkdir -p src/nix-channel
     make installcheck -j$NIX_BUILD_CORES -l$NIX_BUILD_CORES
   '' else null;
 
   # Needed for tests if we are not doing a build, but testing existing
   # built Nix.
-  preInstallCheck = lib.optionalString (! doBuild) ''
-    mkdir -p src/nix-channel
-  '';
+  preInstallCheck =
+    lib.optionalString (! doBuild) ''
+      mkdir -p src/nix-channel
+    ''
+    # See https://github.com/NixOS/nix/issues/2523
+    # Occurs often in tests since https://github.com/NixOS/nix/pull/9900
+    + lib.optionalString stdenv.hostPlatform.isDarwin ''
+      export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+    '';
 
   separateDebugInfo = !stdenv.hostPlatform.isStatic;
 

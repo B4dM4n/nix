@@ -1,11 +1,33 @@
 #pragma once
 
+#include <filesystem>
+
 #include "canon-path.hh"
 #include "hash.hh"
 
 namespace nix {
 
 struct Sink;
+
+/**
+ * Note there is a decent chance this type soon goes away because the problem is solved another way.
+ * See the discussion in https://github.com/NixOS/nix/pull/9985.
+ */
+enum class SymlinkResolution {
+    /**
+     * Resolve symlinks in the ancestors only.
+     *
+     * Only the last component of the result is possibly a symlink.
+     */
+    Ancestors,
+
+    /**
+     * Resolve symlinks fully, realpath(3)-style.
+     *
+     * No component of the result will be a symlink.
+     */
+    Full,
+};
 
 /**
  * A read-only filesystem abstraction. This is used by the Nix
@@ -110,16 +132,16 @@ struct SourceAccessor
         PathFilter & filter = defaultPathFilter);
 
     Hash hashPath(
-            const CanonPath & path,
-            PathFilter & filter = defaultPathFilter,
-            HashAlgorithm ha = HashAlgorithm::SHA256);
+        const CanonPath & path,
+        PathFilter & filter = defaultPathFilter,
+        HashAlgorithm ha = HashAlgorithm::SHA256);
 
     /**
      * Return a corresponding path in the root filesystem, if
      * possible. This is only possible for filesystems that are
      * materialized in the root filesystem.
      */
-    virtual std::optional<CanonPath> getPhysicalPath(const CanonPath & path)
+    virtual std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path)
     { return std::nullopt; }
 
     bool operator == (const SourceAccessor & x) const
@@ -135,6 +157,17 @@ struct SourceAccessor
     void setPathDisplay(std::string displayPrefix, std::string displaySuffix = "");
 
     virtual std::string showPath(const CanonPath & path);
+
+    /**
+     * Resolve any symlinks in `path` according to the given
+     * resolution mode.
+     *
+     * @param mode might only be a temporary solution for this.
+     * See the discussion in https://github.com/NixOS/nix/pull/9985.
+     */
+    CanonPath resolveSymlinks(
+        const CanonPath & path,
+        SymlinkResolution mode = SymlinkResolution::Full);
 };
 
 }

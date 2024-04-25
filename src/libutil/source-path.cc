@@ -35,17 +35,17 @@ void SourcePath::dumpPath(
     PathFilter & filter) const
 { return accessor->dumpPath(path, sink, filter); }
 
-std::optional<CanonPath> SourcePath::getPhysicalPath() const
+std::optional<std::filesystem::path> SourcePath::getPhysicalPath() const
 { return accessor->getPhysicalPath(path); }
 
 std::string SourcePath::to_string() const
 { return accessor->showPath(path); }
 
-SourcePath SourcePath::operator+(const CanonPath & x) const
-{ return {accessor, path + x}; }
+SourcePath SourcePath::operator / (const CanonPath & x) const
+{ return {accessor, path / x}; }
 
-SourcePath SourcePath::operator+(std::string_view c) const
-{  return {accessor, path + c}; }
+SourcePath SourcePath::operator / (std::string_view c) const
+{ return {accessor, path / c}; }
 
 bool SourcePath::operator==(const SourcePath & x) const
 {
@@ -60,40 +60,6 @@ bool SourcePath::operator!=(const SourcePath & x) const
 bool SourcePath::operator<(const SourcePath & x) const
 {
     return std::tie(*accessor, path) < std::tie(*x.accessor, x.path);
-}
-
-SourcePath SourcePath::resolveSymlinks() const
-{
-    auto res = SourcePath(accessor);
-
-    int linksAllowed = 1024;
-
-    std::list<std::string> todo;
-    for (auto & c : path)
-        todo.push_back(std::string(c));
-
-    while (!todo.empty()) {
-        auto c = *todo.begin();
-        todo.pop_front();
-        if (c == "" || c == ".")
-            ;
-        else if (c == "..")
-            res.path.pop();
-        else {
-            res.path.push(c);
-            if (auto st = res.maybeLstat(); st && st->type == InputAccessor::tSymlink) {
-                if (!linksAllowed--)
-                    throw Error("infinite symlink recursion in path '%s'", path);
-                auto target = res.readLink();
-                res.path.pop();
-                if (hasPrefix(target, "/"))
-                    res.path = CanonPath::root;
-                todo.splice(todo.begin(), tokenizeString<std::list<std::string>>(target, "/"));
-            }
-        }
-    }
-
-    return res;
 }
 
 std::ostream & operator<<(std::ostream & str, const SourcePath & path)

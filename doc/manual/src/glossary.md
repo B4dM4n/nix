@@ -37,7 +37,7 @@
   This can be achieved by:
   - Fetching a pre-built [store object] from a [substituter]
   - Running the [`builder`](@docroot@/language/derivations.md#attr-builder) executable as specified in the corresponding [derivation]
-  - Delegating to a [remote builder](@docroot@/advanced-topics/distributed-builds.html) and retrieving the outputs
+  - Delegating to a [remote machine](@docroot@/command-ref/conf-file.md#conf-builders) and retrieving the outputs
   <!-- TODO: link [running] to build process page, #8888 -->
 
   See [`nix-store --realise`](@docroot@/command-ref/nix-store/realise.md) for a detailed description of the algorithm.
@@ -59,23 +59,12 @@
 
 - [store]{#gloss-store}
 
-  A collection of store objects, with operations to manipulate that collection.
-  See [Nix store](./store/index.md) for details.
+  A collection of [store objects][store object], with operations to manipulate that collection.
+  See [Nix Store](./store/index.md) for details.
 
-  There are many types of stores.
-  See [`nix help-stores`](@docroot@/command-ref/new-cli/nix3-help-stores.md) for a complete list.
-
-  From the perspective of the location where Nix is invoked, the Nix store can be  referred to _local_ or _remote_.
-  Only a [local store]{#gloss-local-store} exposes a location in the file system of the machine where Nix is invoked that allows access to store objects, typically `/nix/store`.
-  Local stores can be used for building [derivations](#gloss-derivation).
-  See [Local Store](@docroot@/command-ref/new-cli/nix3-help-stores.md#local-store) for details.
+  There are many types of stores, see [Store Types](./store/types/index.md) for details.
 
   [store]: #gloss-store
-  [local store]: #gloss-local-store
-
-- [chroot store]{#gloss-chroot-store}
-
-  A [local store] whose canonical path is anything other than `/nix/store`.
 
 - [binary cache]{#gloss-binary-cache}
 
@@ -87,7 +76,7 @@
 
 - [store path]{#gloss-store-path}
 
-  The location of a [store object](@docroot@/store/index.md#store-object) in the file system, i.e., an immediate child of the Nix store directory.
+  The location of a [store object] in the file system, i.e., an immediate child of the Nix store directory.
 
   > **Example**
   >
@@ -97,7 +86,7 @@
 
   [store path]: #gloss-store-path
 
-- [file system object]{#gloss-store-object}
+- [file system object]{#gloss-file-system-object}
 
   The Nix data model for representing simplified file system data.
 
@@ -226,6 +215,9 @@
 
   [output path]: #gloss-output-path
 
+- [output closure]{#gloss-output-closure}\
+  The [closure] of an [output path]. It only contains what is [reachable] from the output.
+
 - [deriver]{#gloss-deriver}
 
   The [store derivation] that produced an [output path].
@@ -243,6 +235,7 @@
   - All paths in the store path's [closure] are valid.
 
   [validity]: #gloss-validity
+  [local store]: @docroot@/store/types/local-store.md
 
 - [user environment]{#gloss-user-env}
 
@@ -301,6 +294,25 @@
   [string]: ./language/values.md#type-string
   [path]: ./language/values.md#type-path
   [attribute name]: ./language/values.md#attribute-set
+
+- [base directory]{#gloss-base-directory}
+
+  The location from which relative paths are resolved.
+
+  - For expressions in a file, the base directory is the directory containing that file.
+    This is analogous to the directory of a [base URL](https://datatracker.ietf.org/doc/html/rfc1808#section-3.3).
+    <!-- which is sufficient for resolving non-empty URLs -->
+
+  <!--
+    The wording here may look awkward, but it's for these reasons:
+      * "with --expr": it's a flag, and not an option with an accompanying value
+      * "written in": the expression itself must be written as an argument,
+        whereas the more natural "passed as an argument" allows an interpretation
+        where the expression could be passed by file name.
+    -->
+  - For expressions written in command line arguments with [`--expr`](@docroot@/command-ref/opt-common.html#opt-expr), the base directory is the current working directory.
+
+  [base directory]: #gloss-base-directory
 
 - [experimental feature]{#gloss-experimental-feature}
 

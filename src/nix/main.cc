@@ -2,7 +2,6 @@
 
 #include "args/root.hh"
 #include "current-process.hh"
-#include "namespaces.hh"
 #include "command.hh"
 #include "common-args.hh"
 #include "eval.hh"
@@ -16,25 +15,57 @@
 #include "loggers.hh"
 #include "markdown.hh"
 #include "memory-input-accessor.hh"
+#include "terminal.hh"
+#include "users.hh"
 
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <ifaddrs.h>
-#include <netdb.h>
-#include <netinet/in.h>
 #include <regex>
-
 #include <nlohmann/json.hpp>
 
+#ifndef _WIN32
+# include <sys/socket.h>
+# include <ifaddrs.h>
+# include <netdb.h>
+# include <netinet/in.h>
+#endif
+
+#if __linux__
+# include "namespaces.hh"
+#endif
+
+#ifndef _WIN32
 extern std::string chrootHelperName;
 
 void chrootHelper(int argc, char * * argv);
+#endif
 
 namespace nix {
+
+#ifdef _WIN32
+[[maybe_unused]]
+#endif
+static bool haveProxyEnvironmentVariables()
+{
+    static const std::vector<std::string> proxyVariables = {
+        "http_proxy",
+        "https_proxy",
+        "ftp_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "FTP_PROXY"
+    };
+    for (auto & proxyVariable: proxyVariables) {
+        if (getEnv(proxyVariable).has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* Check if we have a non-loopback/link-local network interface. */
 static bool haveInternet()
 {
+#ifndef _WIN32
     struct ifaddrs * addrs;
 
     if (getifaddrs(&addrs))
@@ -55,7 +86,13 @@ static bool haveInternet()
         }
     }
 
+    if (haveProxyEnvironmentVariables()) return true;
+
     return false;
+#else
+    // TODO implement on Windows
+    return true;
+#endif
 }
 
 std::string programPath;
@@ -236,7 +273,7 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
     state.callFunction(*vGenerateManpage, state.getBuiltin("false"), *vRes, noPos);
     state.callFunction(*vRes, *vDump, *vRes, noPos);
 
-    auto attr = vRes->attrs->get(state.symbols.create(mdName + ".md"));
+    auto attr = vRes->attrs()->get(state.symbols.create(mdName + ".md"));
     if (!attr)
         throw UsageError("Nix has no subcommand '%s'", concatStringsSep("", subcommand));
 
@@ -318,16 +355,18 @@ void mainWrapped(int argc, char * * argv)
 
     /* The chroot helper needs to be run before any threads have been
        started. */
+#ifndef _WIN32
     if (argc > 0 && argv[0] == chrootHelperName) {
         chrootHelper(argc, argv);
         return;
     }
+#endif
 
     initNix();
     initGC();
 
     #if __linux__
-    if (getuid() == 0) {
+    if (isRootUser()) {
         try {
             saveMountNamespace();
             if (unshare(CLONE_NEWNS) == -1)
@@ -340,6 +379,9 @@ void mainWrapped(int argc, char * * argv)
 
     programPath = argv[0];
     auto programName = std::string(baseNameOf(programPath));
+    auto extensionPos = programName.find_last_of(".");
+    if (extensionPos != std::string::npos)
+        programName.erase(extensionPos);
 
     if (argc > 1 && std::string_view(argv[1]) == "__build-remote") {
         programName = "build-remote";
@@ -355,7 +397,9 @@ void mainWrapped(int argc, char * * argv)
 
     setLogFormat("bar");
     settings.verboseBuild = false;
-    if (isatty(STDERR_FILENO)) {
+
+    // If on a terminal, progress will be displayed via progress bars etc. (thus verbosity=notice)
+    if (nix::isTTY()) {
         verbosity = lvlNotice;
     } else {
         verbosity = lvlInfo;
@@ -380,11 +424,10 @@ void mainWrapped(int argc, char * * argv)
         auto res = nlohmann::json::object();
         res["builtins"] = ({
             auto builtinsJson = nlohmann::json::object();
-            auto builtins = state.baseEnv.values[0]->attrs;
-            for (auto & builtin : *builtins) {
+            for (auto & builtin : *state.baseEnv.values[0]->attrs()) {
                 auto b = nlohmann::json::object();
                 if (!builtin.value->isPrimOp()) continue;
-                auto primOp = builtin.value->primOp;
+                auto primOp = builtin.value->primOp();
                 if (!primOp->doc) continue;
                 b["arity"] = primOp->arity;
                 b["args"] = primOp->args;
@@ -499,9 +542,11 @@ void mainWrapped(int argc, char * * argv)
 
 int main(int argc, char * * argv)
 {
+#ifndef _WIN32 // TODO implement on Windows
     // Increase the default stack size for the evaluator and for
     // libstdc++'s std::regex.
     nix::setStackSize(64 * 1024 * 1024);
+#endif
 
     return nix::handleExceptions(argv[0], [&]() {
         nix::mainWrapped(argc, argv);

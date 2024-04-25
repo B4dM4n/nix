@@ -3,6 +3,7 @@
 
 #include "print.hh"
 #include "eval.hh"
+#include "eval-error.hh"
 
 namespace nix {
 
@@ -84,8 +85,8 @@ Env & EvalState::allocEnv(size_t size)
 void EvalState::forceValue(Value & v, const PosIdx pos)
 {
     if (v.isThunk()) {
-        Env * env = v.thunk.env;
-        Expr * expr = v.thunk.expr;
+        Env * env = v.payload.thunk.env;
+        Expr * expr = v.payload.thunk.expr;
         try {
             v.mkBlackhole();
             //checkInterrupt();
@@ -97,7 +98,7 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
         }
     }
     else if (v.isApp())
-        callFunction(*v.app.left, *v.app.right, v, pos);
+        callFunction(*v.payload.app.left, *v.payload.app.right, v, pos);
 }
 
 
@@ -115,10 +116,11 @@ inline void EvalState::forceAttrs(Value & v, Callable getPos, std::string_view e
     PosIdx pos = getPos();
     forceValue(v, pos);
     if (v.type() != nAttrs) {
-        error("expected a set but found %1%: %2%",
-              showType(v),
-              ValuePrinter(*this, v, errorPrintOptions))
-            .withTrace(pos, errorCtx).debugThrow<TypeError>();
+        error<TypeError>(
+            "expected a set but found %1%: %2%",
+            showType(v),
+            ValuePrinter(*this, v, errorPrintOptions)
+        ).withTrace(pos, errorCtx).debugThrow();
     }
 }
 
@@ -128,10 +130,11 @@ inline void EvalState::forceList(Value & v, const PosIdx pos, std::string_view e
 {
     forceValue(v, pos);
     if (!v.isList()) {
-        error("expected a list but found %1%: %2%",
-              showType(v),
-              ValuePrinter(*this, v, errorPrintOptions))
-            .withTrace(pos, errorCtx).debugThrow<TypeError>();
+        error<TypeError>(
+            "expected a list but found %1%: %2%",
+            showType(v),
+            ValuePrinter(*this, v, errorPrintOptions)
+        ).withTrace(pos, errorCtx).debugThrow();
     }
 }
 

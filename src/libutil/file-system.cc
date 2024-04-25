@@ -1,5 +1,7 @@
 #include "environment-variables.hh"
 #include "file-system.hh"
+#include "file-path.hh"
+#include "file-path-impl.hh"
 #include "signals.hh"
 #include "finally.hh"
 #include "serialise.hh"
@@ -17,15 +19,30 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+# include <io.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace nix {
+
+/**
+ * Treat the string as possibly an absolute path, by inspecting the
+ * start of it. Return whether it was probably intended to be
+ * absolute.
+ */
+static bool isAbsolute(PathView path)
+{
+    return fs::path { path }.is_absolute();
+}
+
 
 Path absPath(PathView path, std::optional<PathView> dir, bool resolveSymlinks)
 {
     std::string scratch;
 
-    if (path[0] != '/') {
+    if (!isAbsolute(path)) {
         // In this case we need to call `canonPath` on a newly-created
         // string. We set `scratch` to that string first, and then set
         // `path` to `scratch`. This ensures the newly-created string
@@ -58,69 +75,46 @@ Path canonPath(PathView path, bool resolveSymlinks)
 {
     assert(path != "");
 
-    std::string s;
-    s.reserve(256);
-
-    if (path[0] != '/')
+    if (!isAbsolute(path))
         throw Error("not an absolute path: '%1%'", path);
 
+    // For Windows
+    auto rootName = fs::path { path }.root_name();
+
+    /* This just exists because we cannot set the target of `remaining`
+       (the callback parameter) directly to a newly-constructed string,
+       since it is `std::string_view`. */
     std::string temp;
 
     /* Count the number of times we follow a symlink and stop at some
        arbitrary (but high) limit to prevent infinite loops. */
     unsigned int followCount = 0, maxFollow = 1024;
 
-    while (1) {
-
-        /* Skip slashes. */
-        while (!path.empty() && path[0] == '/') path.remove_prefix(1);
-        if (path.empty()) break;
-
-        /* Ignore `.'. */
-        if (path == "." || path.substr(0, 2) == "./")
-            path.remove_prefix(1);
-
-        /* If `..', delete the last component. */
-        else if (path == ".." || path.substr(0, 3) == "../")
-        {
-            if (!s.empty()) s.erase(s.rfind('/'));
-            path.remove_prefix(2);
-        }
-
-        /* Normal component; copy it. */
-        else {
-            s += '/';
-            if (const auto slash = path.find('/'); slash == path.npos) {
-                s += path;
-                path = {};
-            } else {
-                s += path.substr(0, slash);
-                path = path.substr(slash);
-            }
-
-            /* If s points to a symlink, resolve it and continue from there */
-            if (resolveSymlinks && isLink(s)) {
+    auto ret = canonPathInner<NativePathTrait>(
+        path,
+        [&followCount, &temp, maxFollow, resolveSymlinks]
+        (std::string & result, std::string_view & remaining) {
+            if (resolveSymlinks && isLink(result)) {
                 if (++followCount >= maxFollow)
-                    throw Error("infinite symlink recursion in path '%1%'", path);
-                temp = concatStrings(readLink(s), path);
-                path = temp;
-                if (!temp.empty() && temp[0] == '/') {
-                    s.clear();  /* restart for symlinks pointing to absolute path */
+                    throw Error("infinite symlink recursion in path '%0%'", remaining);
+                remaining = (temp = concatStrings(readLink(result), remaining));
+                if (isAbsolute(remaining)) {
+                    /* restart for symlinks pointing to absolute path */
+                    result.clear();
                 } else {
-                    s = dirOf(s);
-                    if (s == "/") {  // we don’t want trailing slashes here, which dirOf only produces if s = /
-                        s.clear();
+                    result = dirOf(result);
+                    if (result == "/") {
+                        /* we don’t want trailing slashes here, which `dirOf`
+                           only produces if `result = /` */
+                        result.clear();
                     }
                 }
             }
-        }
-    }
+        });
 
-    if (s.empty()) {
-        s = "/";
-    }
-
-    return s;
+    if (!rootName.empty())
+        ret = rootName.string() + std::move(ret);
+    return ret;
 }
 
 
@@ -139,10 +133,10 @@ std::string_view baseNameOf(std::string_view path)
         return "";
 
     auto last = path.size() - 1;
-    if (path[last] == '/' && last > 0)
+    while (last > 0 && NativePathTrait::isPathSep(path[last]))
         last -= 1;
 
-    auto pos = path.rfind('/', last);
+    auto pos = NativePathTrait::rfindPathSep(path, last);
     if (pos == path.npos)
         pos = 0;
     else
@@ -175,25 +169,38 @@ struct stat stat(const Path & path)
     return st;
 }
 
+#ifdef _WIN32
+# define STAT stat
+#else
+# define STAT lstat
+#endif
 
 struct stat lstat(const Path & path)
 {
     struct stat st;
-    if (lstat(path.c_str(), &st))
+    if (STAT(path.c_str(), &st))
         throw SysError("getting status of '%1%'", path);
+    return st;
+}
+
+
+std::optional<struct stat> maybeLstat(const Path & path)
+{
+    std::optional<struct stat> st{std::in_place};
+    if (STAT(path.c_str(), &*st))
+    {
+        if (errno == ENOENT || errno == ENOTDIR)
+            st.reset();
+        else
+            throw SysError("getting status of '%s'", path);
+    }
     return st;
 }
 
 
 bool pathExists(const Path & path)
 {
-    int res;
-    struct stat st;
-    res = lstat(path.c_str(), &st);
-    if (!res) return true;
-    if (errno != ENOENT && errno != ENOTDIR)
-        throw SysError("getting status of %1%", path);
-    return false;
+    return maybeLstat(path).has_value();
 }
 
 bool pathAccessible(const Path & path)
@@ -210,6 +217,7 @@ bool pathAccessible(const Path & path)
 
 Path readLink(const Path & path)
 {
+#ifndef _WIN32
     checkInterrupt();
     std::vector<char> buf;
     for (ssize_t bufSize = PATH_MAX/4; true; bufSize += bufSize/2) {
@@ -223,13 +231,16 @@ Path readLink(const Path & path)
         else if (rlSize < bufSize)
             return std::string(buf.data(), rlSize);
     }
+#else
+    // TODO modern Windows does in fact support symlinks
+    throw UnimplementedError("reading symbolic link '%1%'", path);
+#endif
 }
 
 
 bool isLink(const Path & path)
 {
-    struct stat st = lstat(path);
-    return S_ISLNK(st.st_mode);
+    return getFileType(path) == DT_LNK;
 }
 
 
@@ -277,7 +288,12 @@ unsigned char getFileType(const Path & path)
 
 std::string readFile(const Path & path)
 {
-    AutoCloseFD fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    AutoCloseFD fd = toDescriptor(open(path.c_str(), O_RDONLY
+// TODO
+#ifndef _WIN32
+       | O_CLOEXEC
+#endif
+       ));
     if (!fd)
         throw SysError("opening file '%1%'", path);
     return readFile(fd.get());
@@ -286,7 +302,12 @@ std::string readFile(const Path & path)
 
 void readFile(const Path & path, Sink & sink)
 {
-    AutoCloseFD fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    AutoCloseFD fd = toDescriptor(open(path.c_str(), O_RDONLY
+// TODO
+#ifndef _WIN32
+       | O_CLOEXEC
+#endif
+       ));
     if (!fd)
         throw SysError("opening file '%s'", path);
     drainFD(fd.get(), sink);
@@ -295,7 +316,12 @@ void readFile(const Path & path, Sink & sink)
 
 void writeFile(const Path & path, std::string_view s, mode_t mode, bool sync)
 {
-    AutoCloseFD fd = open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, mode);
+    AutoCloseFD fd = toDescriptor(open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT
+// TODO
+#ifndef _WIN32
+       | O_CLOEXEC
+#endif
+       , mode));
     if (!fd)
         throw SysError("opening file '%1%'", path);
     try {
@@ -315,7 +341,12 @@ void writeFile(const Path & path, std::string_view s, mode_t mode, bool sync)
 
 void writeFile(const Path & path, Source & source, mode_t mode, bool sync)
 {
-    AutoCloseFD fd = open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, mode);
+    AutoCloseFD fd = toDescriptor(open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT
+// TODO
+#ifndef _WIN32
+       | O_CLOEXEC
+#endif
+       , mode));
     if (!fd)
         throw SysError("opening file '%1%'", path);
 
@@ -342,21 +373,23 @@ void writeFile(const Path & path, Source & source, mode_t mode, bool sync)
 
 void syncParent(const Path & path)
 {
-    AutoCloseFD fd = open(dirOf(path).c_str(), O_RDONLY, 0);
+    AutoCloseFD fd = toDescriptor(open(dirOf(path).c_str(), O_RDONLY, 0));
     if (!fd)
         throw SysError("opening file '%1%'", path);
     fd.fsync();
 }
 
 
-static void _deletePath(int parentfd, const Path & path, uint64_t & bytesFreed)
+static void _deletePath(Descriptor parentfd, const Path & path, uint64_t & bytesFreed)
 {
+#ifndef _WIN32
     checkInterrupt();
 
     std::string name(baseNameOf(path));
 
     struct stat st;
-    if (fstatat(parentfd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if (fstatat(parentfd, name.c_str(), &st,
+            AT_SYMLINK_NOFOLLOW) == -1) {
         if (errno == ENOENT) return;
         throw SysError("getting status of '%1%'", path);
     }
@@ -408,6 +441,10 @@ static void _deletePath(int parentfd, const Path & path, uint64_t & bytesFreed)
         if (errno == ENOENT) return;
         throw SysError("cannot unlink '%1%'", path);
     }
+#else
+    // TODO implement
+    throw UnimplementedError("_deletePath");
+#endif
 }
 
 static void _deletePath(const Path & path, uint64_t & bytesFreed)
@@ -416,7 +453,7 @@ static void _deletePath(const Path & path, uint64_t & bytesFreed)
     if (dir == "")
         dir = "/";
 
-    AutoCloseFD dirfd{open(dir.c_str(), O_RDONLY)};
+    AutoCloseFD dirfd = toDescriptor(open(dir.c_str(), O_RDONLY));
     if (!dirfd) {
         if (errno == ENOENT) return;
         throw SysError("opening directory '%1%'", path);
@@ -439,11 +476,15 @@ Paths createDirs(const Path & path)
     if (path == "/") return created;
 
     struct stat st;
-    if (lstat(path.c_str(), &st) == -1) {
+    if (STAT(path.c_str(), &st) == -1) {
         created = createDirs(dirOf(path));
-        if (mkdir(path.c_str(), 0777) == -1 && errno != EEXIST)
+        if (mkdir(path.c_str()
+#ifndef _WIN32 // TODO abstract mkdir perms for Windows
+            , 0777
+#endif
+            ) == -1 && errno != EEXIST)
             throw SysError("creating directory '%1%'", path);
-        st = lstat(path);
+        st = STAT(path);
         created.push_back(path);
     }
 
@@ -505,10 +546,14 @@ void AutoDelete::reset(const Path & p, bool recursive) {
 
 //////////////////////////////////////////////////////////////////////
 
+std::string defaultTempDir() {
+    return getEnvNonEmpty("TMPDIR").value_or("/tmp");
+}
+
 static Path tempName(Path tmpRoot, const Path & prefix, bool includePid,
     std::atomic<unsigned int> & counter)
 {
-    tmpRoot = canonPath(tmpRoot.empty() ? getEnv("TMPDIR").value_or("/tmp") : tmpRoot, true);
+    tmpRoot = canonPath(tmpRoot.empty() ? defaultTempDir() : tmpRoot, true);
     if (includePid)
         return fmt("%1%/%2%-%3%-%4%", tmpRoot, prefix, getpid(), counter++);
     else
@@ -525,7 +570,11 @@ Path createTempDir(const Path & tmpRoot, const Path & prefix,
     while (1) {
         checkInterrupt();
         Path tmpDir = tempName(tmpRoot, prefix, includePid, counter);
-        if (mkdir(tmpDir.c_str(), mode) == 0) {
+        if (mkdir(tmpDir.c_str()
+#ifndef _WIN32 // TODO abstract mkdir perms for Windows
+                    , mode
+#endif
+                    ) == 0) {
 #if __FreeBSD__
             /* Explicitly set the group of the directory.  This is to
                work around around problems caused by BSD's group
@@ -548,20 +597,27 @@ Path createTempDir(const Path & tmpRoot, const Path & prefix,
 
 std::pair<AutoCloseFD, Path> createTempFile(const Path & prefix)
 {
-    Path tmpl(getEnv("TMPDIR").value_or("/tmp") + "/" + prefix + ".XXXXXX");
+    Path tmpl(defaultTempDir() + "/" + prefix + ".XXXXXX");
     // Strictly speaking, this is UB, but who cares...
     // FIXME: use O_TMPFILE.
-    AutoCloseFD fd(mkstemp((char *) tmpl.c_str()));
+    AutoCloseFD fd = toDescriptor(mkstemp((char *) tmpl.c_str()));
     if (!fd)
         throw SysError("creating temporary file '%s'", tmpl);
+#ifndef _WIN32
     closeOnExec(fd.get());
+#endif
     return {std::move(fd), tmpl};
 }
 
 void createSymlink(const Path & target, const Path & link)
 {
+#ifndef _WIN32
     if (symlink(target.c_str(), link.c_str()))
         throw SysError("creating symlink from '%1%' to '%2%'", link, target);
+#else
+    // TODO modern Windows does in fact support symlinks
+    throw UnimplementedError("createSymlink");
+#endif
 }
 
 void replaceSymlink(const Path & target, const Path & link)
@@ -582,7 +638,8 @@ void replaceSymlink(const Path & target, const Path & link)
     }
 }
 
-void setWriteTime(const fs::path & p, const struct stat & st)
+#ifndef _WIN32
+static void setWriteTime(const fs::path & p, const struct stat & st)
 {
     struct timeval times[2];
     times[0] = {
@@ -596,11 +653,14 @@ void setWriteTime(const fs::path & p, const struct stat & st)
     if (lutimes(p.c_str(), times) != 0)
         throw SysError("changing modification time of '%s'", p);
 }
+#endif
 
 void copy(const fs::directory_entry & from, const fs::path & to, bool andDelete)
 {
+#ifndef _WIN32
     // TODO: Rewrite the `is_*` to use `symlink_status()`
     auto statOfFrom = lstat(from.path().c_str());
+#endif
     auto fromStatus = from.symlink_status();
 
     // Mark the directory as writable so that we can delete its children
@@ -620,12 +680,19 @@ void copy(const fs::directory_entry & from, const fs::path & to, bool andDelete)
         throw Error("file '%s' has an unsupported type", from.path());
     }
 
+#ifndef _WIN32
     setWriteTime(to, statOfFrom);
+#endif
     if (andDelete) {
         if (!fs::is_symlink(fromStatus))
             fs::permissions(from.path(), fs::perms::owner_write, fs::perm_options::add | fs::perm_options::nofollow);
         fs::remove(from.path());
     }
+}
+
+void copyFile(const Path & oldPath, const Path & newPath, bool andDelete)
+{
+    return copy(fs::directory_entry(fs::path(oldPath)), fs::path(newPath), andDelete);
 }
 
 void renameFile(const Path & oldName, const Path & newName)
@@ -642,14 +709,18 @@ void moveFile(const Path & oldName, const Path & newName)
         auto newPath = fs::path(newName);
         // For the move to be as atomic as possible, copy to a temporary
         // directory
-        fs::path temp = createTempDir(newPath.parent_path(), "rename-tmp");
+        fs::path temp = createTempDir(
+            os_string_to_string(PathViewNG { newPath.parent_path() }),
+            "rename-tmp");
         Finally removeTemp = [&]() { fs::remove(temp); };
         auto tempCopyTarget = temp / "copy-target";
         if (e.code().value() == EXDEV) {
             fs::remove(newPath);
             warn("Can’t rename %s as %s, copying instead", oldName, newName);
             copy(fs::directory_entry(oldPath), tempCopyTarget, true);
-            renameFile(tempCopyTarget, newPath);
+            renameFile(
+                os_string_to_string(PathViewNG { tempCopyTarget }),
+                os_string_to_string(PathViewNG { newPath }));
         }
     }
 }

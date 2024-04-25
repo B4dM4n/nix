@@ -47,6 +47,10 @@ AC_DEFINE_UNQUOTED(SYSTEM, ["$system"], [platform identifier ('cpu-os')])
 # State should be stored in /nix/var, unless the user overrides it explicitly.
 test "$localstatedir" = '${prefix}/var' && localstatedir=/nix/var
 
+# Assign a default value to C{,XX}FLAGS as the default configure script sets them
+# to -O2 otherwise, which we don't want to have hardcoded
+CFLAGS=${CFLAGS-""}
+CXXFLAGS=${CXXFLAGS-""}
 
 AC_PROG_CC
 AC_PROG_CXX
@@ -146,6 +150,11 @@ AC_ARG_ENABLE(unit-tests, AS_HELP_STRING([--disable-unit-tests],[Do not build th
   ENABLE_UNIT_TESTS=$enableval, ENABLE_UNIT_TESTS=$ENABLE_BUILD)
 AC_SUBST(ENABLE_UNIT_TESTS)
 
+# Build external API docs by default
+AC_ARG_ENABLE(external_api_docs, AS_HELP_STRING([--enable-external-api-docs],[Build API docs for Nix's C interface]),
+  external_api_docs=$enableval, external_api_docs=yes)
+AC_SUBST(external_api_docs)
+
 AS_IF(
   [test "$ENABLE_BUILD" == "no" && test "$ENABLE_UNIT_TESTS" == "yes"],
   [AC_MSG_ERROR([Cannot enable unit tests when building overall is disabled. Please do not pass '--enable-unit-tests' or do not pass '--disable-build'.])])
@@ -167,6 +176,10 @@ AS_IF(
 AC_ARG_ENABLE(internal-api-docs, AS_HELP_STRING([--enable-internal-api-docs],[Build API docs for Nix's internal unstable C++ interfaces]),
   ENABLE_INTERNAL_API_DOCS=$enableval, ENABLE_INTERNAL_API_DOCS=no)
 AC_SUBST(ENABLE_INTERNAL_API_DOCS)
+
+AC_ARG_ENABLE(external-api-docs, AS_HELP_STRING([--enable-external-api-docs],[Build API docs for Nix's external unstable C interfaces]),
+  ENABLE_EXTERNAL_API_DOCS=$enableval, ENABLE_EXTERNAL_API_DOCS=no)
+AC_SUBST(ENABLE_EXTERNAL_API_DOCS)
 
 AS_IF(
   [test "$ENABLE_FUNCTIONAL_TESTS" == "yes" || test "$ENABLE_DOC_GEN" == "yes"],
@@ -304,6 +317,17 @@ case "$host_os" in
                         [CXXFLAGS="$LIBSECCOMP_CFLAGS $CXXFLAGS"])
       have_seccomp=1
       AC_DEFINE([HAVE_SECCOMP], [1], [Whether seccomp is available and should be used for sandboxing.])
+      AC_COMPILE_IFELSE([
+        AC_LANG_SOURCE([[
+          #include <seccomp.h>
+          #ifndef __SNR_fchmodat2
+          # error "Missing support for fchmodat2"
+          #endif
+        ]])
+      ], [], [
+        echo "libseccomp is missing __SNR_fchmodat2. Please provide libseccomp 2.5.5 or later"
+        exit 1
+      ])
     else
       have_seccomp=
     fi

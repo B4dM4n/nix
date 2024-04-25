@@ -9,9 +9,20 @@ static void checkName(std::string_view path, std::string_view name)
     if (name.size() > StorePath::MaxPathLen)
         throw BadStorePath("store path '%s' has a name longer than %d characters",
             path, StorePath::MaxPathLen);
-    if (name[0] == '.')
-        throw BadStorePath("store path '%s' starts with illegal character '.'", path);
     // See nameRegexStr for the definition
+    if (name[0] == '.') {
+        // check against "." and "..", followed by end or dash
+        if (name.size() == 1)
+            throw BadStorePath("store path '%s' has invalid name '%s'", path, name);
+        if (name[1] == '-')
+            throw BadStorePath("store path '%s' has invalid name '%s': first dash-separated component must not be '%s'", path, name, ".");
+        if (name[1] == '.') {
+            if (name.size() == 2)
+                throw BadStorePath("store path '%s' has invalid name '%s'", path, name);
+            if (name[2] == '-')
+                throw BadStorePath("store path '%s' has invalid name '%s': first dash-separated component must not be '%s'", path, name, "..");
+        }
+    }
     for (auto c : name)
         if (!((c >= '0' && c <= '9')
                 || (c >= 'a' && c <= 'z')
@@ -52,7 +63,18 @@ StorePath StorePath::random(std::string_view name)
 
 StorePath StoreDirConfig::parseStorePath(std::string_view path) const
 {
-    auto p = canonPath(std::string(path));
+    // On Windows, `/nix/store` is not a canonical path. More broadly it
+    // is unclear whether this function should be using the native
+    // notion of a canonical path at all. For example, it makes to
+    // support remote stores whose store dir is a non-native path (e.g.
+    // Windows <-> Unix ssh-ing).
+    auto p =
+#ifdef _WIN32
+        path
+#else
+        canonPath(std::string(path))
+#endif
+        ;
     if (dirOf(p) != storeDir)
         throw BadStorePath("path '%s' is not in the Nix store", p);
     return StorePath(baseNameOf(p));

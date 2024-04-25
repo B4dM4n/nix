@@ -2,6 +2,7 @@
 ///@file
 
 #include "attr-set.hh"
+#include "eval-error.hh"
 #include "types.hh"
 #include "value.hh"
 #include "nixexpr.hh"
@@ -10,11 +11,13 @@
 #include "experimental-features.hh"
 #include "input-accessor.hh"
 #include "search-path.hh"
+#include "repl-exit-status.hh"
 
 #include <map>
 #include <optional>
 #include <unordered_map>
 #include <mutex>
+#include <functional>
 
 namespace nix {
 
@@ -68,9 +71,16 @@ struct PrimOp
     const char * doc = nullptr;
 
     /**
+     * Add a trace item, `while calling the '<name>' builtin`
+     *
+     * This is used to remove the redundant item for `builtins.addErrorContext`.
+     */
+    bool addTrace = true;
+
+    /**
      * Implementation of the primop.
      */
-    PrimOpFun fun;
+    std::function<std::remove_pointer<PrimOpFun>::type> fun;
 
     /**
      * Optional experimental for this to be gated on.
@@ -84,7 +94,7 @@ struct PrimOp
     void check();
 };
 
-std::ostream & operator<<(std::ostream & output, PrimOp & primOp);
+std::ostream & operator<<(std::ostream & output, const PrimOp & primOp);
 
 /**
  * Info about a constant
@@ -147,48 +157,9 @@ struct DebugTrace {
     std::shared_ptr<Pos> pos;
     const Expr & expr;
     const Env & env;
-    hintformat hint;
+    HintFmt hint;
     bool isError;
 };
-
-void debugError(Error * e, Env & env, Expr & expr);
-
-class ErrorBuilder
-{
-    private:
-        EvalState & state;
-        ErrorInfo info;
-
-        ErrorBuilder(EvalState & s, ErrorInfo && i): state(s), info(i) { }
-
-    public:
-        template<typename... Args>
-        [[nodiscard, gnu::noinline]]
-        static ErrorBuilder * create(EvalState & s, const Args & ... args)
-        {
-            return new ErrorBuilder(s, ErrorInfo { .msg = hintfmt(args...) });
-        }
-
-        [[nodiscard, gnu::noinline]]
-        ErrorBuilder & atPos(PosIdx pos);
-
-        [[nodiscard, gnu::noinline]]
-        ErrorBuilder & withTrace(PosIdx pos, const std::string_view text);
-
-        [[nodiscard, gnu::noinline]]
-        ErrorBuilder & withFrameTrace(PosIdx pos, const std::string_view text);
-
-        [[nodiscard, gnu::noinline]]
-        ErrorBuilder & withSuggestions(Suggestions & s);
-
-        [[nodiscard, gnu::noinline]]
-        ErrorBuilder & withFrame(const Env & e, const Expr & ex);
-
-        template<class ErrorType>
-        [[gnu::noinline, gnu::noreturn]]
-        void debugThrow();
-};
-
 
 class EvalState : public std::enable_shared_from_this<EvalState>
 {
@@ -221,6 +192,36 @@ public:
      * Empty list constant.
      */
     Value vEmptyList;
+
+    /**
+     * `null` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    Value vNull;
+
+    /**
+     * `true` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    Value vTrue;
+
+    /**
+     * `true` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    Value vFalse;
+
+    /** `"regular"` */
+    Value vStringRegular;
+    /** `"directory"` */
+    Value vStringDirectory;
+    /** `"symlink"` */
+    Value vStringSymlink;
+    /** `"unknown"` */
+    Value vStringUnknown;
 
     /**
      * The accessor for the root filesystem.
@@ -257,9 +258,9 @@ public:
     /**
      * Debugger
      */
-    void (* debugRepl)(ref<EvalState> es, const ValMap & extraEnv);
+    ReplExitStatus (* debugRepl)(ref<EvalState> es, const ValMap & extraEnv);
     bool debugStop;
-    bool debugQuit;
+    bool inDebugger = false;
     int trylevel;
     std::list<DebugTrace> debugTraces;
     std::map<const Expr*, const std::shared_ptr<const StaticEnv>> exprEnvs;
@@ -274,39 +275,11 @@ public:
 
     void runDebugRepl(const Error * error, const Env & env, const Expr & expr);
 
-    template<class E>
-    [[gnu::noinline, gnu::noreturn]]
-    void debugThrowLastTrace(E && error)
-    {
-        debugThrow(error, nullptr, nullptr);
-    }
-
-    template<class E>
-    [[gnu::noinline, gnu::noreturn]]
-    void debugThrow(E && error, const Env * env, const Expr * expr)
-    {
-        if (debugRepl && ((env && expr) || !debugTraces.empty())) {
-            if (!env || !expr) {
-                const DebugTrace & last = debugTraces.front();
-                env = &last.env;
-                expr = &last.expr;
-            }
-            runDebugRepl(&error, *env, *expr);
-        }
-
-        throw std::move(error);
-    }
-
-    // This is dangerous, but gets in line with the idea that error creation and
-    // throwing should not allocate on the stack of hot functions.
-    // as long as errors are immediately thrown, it works.
-    ErrorBuilder * errorBuilder;
-
-    template<typename... Args>
+    template<class T, typename... Args>
     [[nodiscard, gnu::noinline]]
-    ErrorBuilder & error(const Args & ... args) {
-        errorBuilder = ErrorBuilder::create(*this, args...);
-        return *errorBuilder;
+    EvalErrorBuilder<T> & error(const Args & ... args) {
+        // `EvalErrorBuilder::debugThrow` performs the corresponding `delete`.
+        return *new EvalErrorBuilder<T>(*this, args...);
     }
 
 private:
@@ -335,9 +308,9 @@ private:
 #endif
     FileEvalCache fileEvalCache;
 
-    SearchPath searchPath;
+    LookupPath lookupPath;
 
-    std::map<std::string, std::optional<std::string>> searchPathResolved;
+    std::map<std::string, std::optional<std::string>> lookupPathResolved;
 
     /**
      * Cache used by prim_match().
@@ -359,18 +332,23 @@ private:
 public:
 
     EvalState(
-        const SearchPath & _searchPath,
+        const LookupPath & _lookupPath,
         ref<Store> store,
         std::shared_ptr<Store> buildStore = nullptr);
     ~EvalState();
 
-    SearchPath getSearchPath() { return searchPath; }
+    LookupPath getLookupPath() { return lookupPath; }
 
     /**
      * Return a `SourcePath` that refers to `path` in the root
      * filesystem.
      */
     SourcePath rootPath(CanonPath path);
+
+    /**
+     * Variant which accepts relative paths too.
+     */
+    SourcePath rootPath(PathView path);
 
     /**
      * Allow access to a path.
@@ -428,7 +406,7 @@ public:
      * Look up a file in the search path.
      */
     SourcePath findFile(const std::string_view path);
-    SourcePath findFile(const SearchPath & searchPath, const std::string_view path, const PosIdx pos = noPos);
+    SourcePath findFile(const LookupPath & lookupPath, const std::string_view path, const PosIdx pos = noPos);
 
     /**
      * Try to resolve a search path value (not the optional key part).
@@ -437,8 +415,8 @@ public:
      *
      * If it is not found, return `std::nullopt`
      */
-    std::optional<std::string> resolveSearchPathPath(
-        const SearchPath::Path & elem,
+    std::optional<std::string> resolveLookupPathPath(
+        const LookupPath::Path & elem,
         bool initAccessControl = false);
 
     /**
@@ -493,10 +471,12 @@ public:
     std::string_view forceString(Value & v, NixStringContext & context, const PosIdx pos, std::string_view errorCtx);
     std::string_view forceStringNoCtx(Value & v, const PosIdx pos, std::string_view errorCtx);
 
+    template<typename... Args>
     [[gnu::noinline]]
-    void addErrorTrace(Error & e, const char * s, const std::string & s2) const;
+    void addErrorTrace(Error & e, const Args & ... formatArgs) const;
+    template<typename... Args>
     [[gnu::noinline]]
-    void addErrorTrace(Error & e, const PosIdx pos, const char * s, const std::string & s2, bool frame = false) const;
+    void addErrorTrace(Error & e, const PosIdx pos, const Args & ... formatArgs) const;
 
 public:
     /**
@@ -662,9 +642,6 @@ public:
     inline Value * allocValue();
     inline Env & allocEnv(size_t size);
 
-    Value * allocAttr(Value & vAttrs, Symbol name);
-    Value * allocAttr(Value & vAttrs, std::string_view name);
-
     Bindings * allocBindings(size_t capacity);
 
     BindingsBuilder buildBindings(size_t capacity)
@@ -672,7 +649,16 @@ public:
         return BindingsBuilder(*this, allocBindings(capacity));
     }
 
-    void mkList(Value & v, size_t length);
+    ListBuilder buildList(size_t size)
+    {
+        return ListBuilder(*this, size);
+    }
+
+    /**
+     * Return a boolean `Value *` without allocating.
+     */
+    Value *getBool(bool b);
+
     void mkThunk_(Value & v, Expr * expr);
     void mkPos(Value & v, PosIdx pos);
 
@@ -719,7 +705,7 @@ public:
         const SingleDerivedPath & p,
         Value & v);
 
-    void concatLists(Value & v, size_t nrLists, Value * * lists, const PosIdx pos, std::string_view errorCtx);
+    void concatLists(Value & v, size_t nrLists, Value * const * lists, const PosIdx pos, std::string_view errorCtx);
 
     /**
      * Print statistics, if enabled.
@@ -743,10 +729,12 @@ public:
     bool fullGC();
 
     /**
-     * Realise the given context, and return a mapping from the placeholders
-     * used to construct the associated value to their final store path
+     * Realise the given context
+     * @param[in] context the context to realise
+     * @param[out] maybePaths if not nullptr, all built or referenced store paths will be added to this set
+     * @return a mapping from the placeholders used to construct the associated value to their final store path.
      */
-    [[nodiscard]] StringMap realiseContext(const NixStringContext & context);
+    [[nodiscard]] StringMap realiseContext(const NixStringContext & context, StorePathSet * maybePaths = nullptr, bool isIFD = true);
 
     /* Call the binary path filter predicate used builtins.path etc. */
     bool callPathFilter(
@@ -813,13 +801,13 @@ private:
     friend void prim_split(EvalState & state, const PosIdx pos, Value * * args, Value & v);
 
     friend struct Value;
+    friend class ListBuilder;
 };
 
 struct DebugTraceStacker {
     DebugTraceStacker(EvalState & evalState, DebugTrace t);
     ~DebugTraceStacker()
     {
-        // assert(evalState.debugTraces.front() == trace);
         evalState.debugTraces.pop_front();
     }
     EvalState & evalState;
@@ -844,22 +832,6 @@ SourcePath resolveExprPath(SourcePath path);
  * Whether a URI is allowed, assuming restrictEval is enabled
  */
 bool isAllowedURI(std::string_view uri, const Strings & allowedPaths);
-
-struct InvalidPathError : EvalError
-{
-    Path path;
-    InvalidPathError(const Path & path);
-#ifdef EXCEPTION_NEEDS_THROW_SPEC
-    ~InvalidPathError() throw () { };
-#endif
-};
-
-template<class ErrorType>
-void ErrorBuilder::debugThrow()
-{
-    // NOTE: We always use the -LastTrace version as we push the new trace in withFrame()
-    state.debugThrowLastTrace(ErrorType(info));
-}
 
 }
 
