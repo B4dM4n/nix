@@ -866,9 +866,9 @@ struct CmdFlakeInitCommon : virtual Args, EvalCommand
         {
             createDirs(to);
 
-            for (auto & entry : readDirectory(from)) {
-                auto from2 = from + "/" + entry.name;
-                auto to2 = to + "/" + entry.name;
+            for (auto & entry : std::filesystem::directory_iterator{from}) {
+                auto from2 = entry.path().string();
+                auto to2 = to + "/" + entry.path().filename().string();
                 auto st = lstat(from2);
                 if (S_ISDIR(st.st_mode))
                     copyDir(from2, to2);
@@ -1176,7 +1176,7 @@ struct CmdFlakeShow : FlakeCommand, MixJSON
                 // If we don't recognize it, it's probably content
                 return true;
             } catch (EvalError & e) {
-                // Some attrs may contain errors, eg. legacyPackages of
+                // Some attrs may contain errors, e.g. legacyPackages of
                 // nixpkgs. We still want to recurse into it, instead of
                 // skipping it at all.
                 return true;

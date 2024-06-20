@@ -1,8 +1,8 @@
 nix_tests = \
   test-infra.sh \
-  init.sh \
   flakes/flakes.sh \
   flakes/develop.sh \
+  flakes/edit.sh \
   flakes/run.sh \
   flakes/mercurial.sh \
   flakes/circular.sh \
@@ -16,6 +16,8 @@ nix_tests = \
   flakes/absolute-attr-paths.sh \
   flakes/build-paths.sh \
   flakes/flake-in-submodule.sh \
+  flakes/prefetch.sh \
+  flakes/eval-cache.sh \
   gc.sh \
   nix-collect-garbage-d.sh \
   remote-store.sh \
@@ -130,6 +132,7 @@ nix_tests = \
   nested-sandboxing.sh \
   impure-env.sh \
   debugger.sh \
+  extra-sandbox-profile.sh \
   help.sh
 
 ifeq ($(HAVE_LIBCPUID), 1)
@@ -152,7 +155,7 @@ $(d)/plugins.sh.test $(d)/plugins.sh.test-debug: \
 install-tests += $(foreach x, $(nix_tests), $(d)/$(x))
 
 test-clean-files := \
-  $(d)/common/vars-and-functions.sh \
+  $(d)/common/subst-vars.sh \
   $(d)/config.nix
 
 clean-files += $(test-clean-files)

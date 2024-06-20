@@ -9,7 +9,7 @@
 #include "symbol-table.hh"
 #include "config.hh"
 #include "experimental-features.hh"
-#include "input-accessor.hh"
+#include "source-accessor.hh"
 #include "search-path.hh"
 #include "repl-exit-status.hh"
 
@@ -33,7 +33,10 @@ class EvalState;
 class StorePath;
 struct SingleDerivedPath;
 enum RepairFlag : bool;
-struct MemoryInputAccessor;
+struct MemorySourceAccessor;
+namespace eval_cache {
+    class EvalCache;
+}
 
 
 /**
@@ -226,18 +229,18 @@ public:
     /**
      * The accessor for the root filesystem.
      */
-    const ref<InputAccessor> rootFS;
+    const ref<SourceAccessor> rootFS;
 
     /**
      * The in-memory filesystem for <nix/...> paths.
      */
-    const ref<MemoryInputAccessor> corepkgsFS;
+    const ref<MemorySourceAccessor> corepkgsFS;
 
     /**
      * In-memory filesystem for internal, non-user-callable Nix
      * expressions like call-flake.nix.
      */
-    const ref<MemoryInputAccessor> internalFS;
+    const ref<MemorySourceAccessor> internalFS;
 
     const SourcePath derivationInternal;
 
@@ -273,6 +276,18 @@ public:
             return std::shared_ptr<const StaticEnv>();;
     }
 
+    /** Whether a debug repl can be started. If `false`, `runDebugRepl(error)` will return without starting a repl. */
+    bool canDebug();
+
+    /** Use front of `debugTraces`; see `runDebugRepl(error,env,expr)` */
+    void runDebugRepl(const Error * error);
+
+    /**
+     * Run a debug repl with the given error, environment and expression.
+     * @param error The error to debug, may be nullptr.
+     * @param env The environment to debug, matching the expression.
+     * @param expr The expression to debug, matching the environment.
+     */
     void runDebugRepl(const Error * error, const Env & env, const Expr & expr);
 
     template<class T, typename... Args>
@@ -281,6 +296,11 @@ public:
         // `EvalErrorBuilder::debugThrow` performs the corresponding `delete`.
         return *new EvalErrorBuilder<T>(*this, args...);
     }
+
+    /**
+     * A cache for evaluation caches, so as to reuse the same root value if possible
+     */
+    std::map<const Hash, ref<eval_cache::EvalCache>> evalCaches;
 
 private:
 
@@ -538,6 +558,11 @@ public:
      * we ensure the string corresponds to it.
      */
     SingleDerivedPath coerceToSingleDerivedPath(const PosIdx pos, Value & v, std::string_view errorCtx);
+
+#if HAVE_BOEHMGC
+    /** A GC root for the baseEnv reference. */
+    std::shared_ptr<Env *> baseEnvP;
+#endif
 
 public:
 

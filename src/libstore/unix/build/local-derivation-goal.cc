@@ -177,6 +177,10 @@ void LocalDerivationGoal::killSandbox(bool getStats)
 
 void LocalDerivationGoal::tryLocalBuild()
 {
+#if __APPLE__
+    additionalSandboxProfile = parsedDrv->getStringAttr("__sandboxProfile").value_or("");
+#endif
+
     unsigned int curBuilds = worker.getNrLocalBuilds();
     if (curBuilds >= settings.maxBuildJobs) {
         state = &DerivationGoal::tryToBuild;
@@ -281,7 +285,7 @@ static void movePath(const Path & src, const Path & dst)
     if (changePerm)
         chmod_(src, st.st_mode | S_IWUSR);
 
-    renameFile(src, dst);
+    std::filesystem::rename(src, dst);
 
     if (changePerm)
         chmod_(dst, st.st_mode);
@@ -368,7 +372,7 @@ bool LocalDerivationGoal::cleanupDecideWhetherDiskFull()
             if (buildMode != bmCheck && status.known->isValid()) continue;
             auto p = worker.store.toRealPath(status.known->path);
             if (pathExists(chrootRootDir + p))
-                renameFile((chrootRootDir + p), p);
+                std::filesystem::rename((chrootRootDir + p), p);
         }
 
     return diskFull;
@@ -417,7 +421,9 @@ static void doBind(const Path & source, const Path & target, bool optional = fal
     } else if (S_ISLNK(st.st_mode)) {
         // Symlinks can (apparently) not be bind-mounted, so just copy it
         createDirs(dirOf(target));
-        copyFile(source, target, /* andDelete */ false);
+        copyFile(
+            std::filesystem::path(source),
+            std::filesystem::path(target), false);
     } else {
         createDirs(dirOf(target));
         writeFile(target, "");
@@ -494,10 +500,6 @@ void LocalDerivationGoal::startBuilder()
             worker.store.printStorePath(drvPath),
             settings.thisSystem,
             concatStringsSep<StringSet>(", ", worker.store.systemFeatures));
-
-#if __APPLE__
-    additionalSandboxProfile = parsedDrv->getStringAttr("__sandboxProfile").value_or("");
-#endif
 
     /* Create a temporary directory where the build will take
        place. */
@@ -1306,8 +1308,7 @@ struct RestrictedStore : public virtual RestrictedStoreConfig, public virtual In
 
     StorePath addToStore(
         std::string_view name,
-        SourceAccessor & accessor,
-        const CanonPath & srcPath,
+        const SourcePath & srcPath,
         ContentAddressMethod method,
         HashAlgorithm hashAlgo,
         const StorePathSet & references,
@@ -2485,7 +2486,6 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
             /* FIXME optimize and deduplicate with addToStore */
             std::string oldHashPart { scratchPath->hashPart() };
             auto got = [&]{
-                PosixSourceAccessor accessor;
                 auto fim = outputHash.method.getFileIngestionMethod();
                 switch (fim) {
                 case FileIngestionMethod::Flat:
@@ -2494,15 +2494,15 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                     HashModuloSink caSink { outputHash.hashAlgo, oldHashPart };
                     auto fim = outputHash.method.getFileIngestionMethod();
                     dumpPath(
-                        accessor, CanonPath { actualPath },
+                        {getFSSourceAccessor(), CanonPath(actualPath)},
                         caSink,
                         (FileSerialisationMethod) fim);
                     return caSink.finish().first;
                 }
                 case FileIngestionMethod::Git: {
                     return git::dumpHash(
-                        outputHash.hashAlgo, accessor,
-                        CanonPath { tmpDir + "/tmp" }).hash;
+                        outputHash.hashAlgo,
+                        {getFSSourceAccessor(), CanonPath(tmpDir + "/tmp")}).hash;
                 }
                 }
                 assert(false);
@@ -2529,9 +2529,8 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
             }
 
             {
-                PosixSourceAccessor accessor;
                 HashResult narHashAndSize = hashPath(
-                    accessor, CanonPath { actualPath },
+                    {getFSSourceAccessor(), CanonPath(actualPath)},
                     FileSerialisationMethod::Recursive, HashAlgorithm::SHA256);
                 newInfo0.narHash = narHashAndSize.first;
                 newInfo0.narSize = narHashAndSize.second;
@@ -2553,9 +2552,8 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                         std::string { scratchPath->hashPart() },
                         std::string { requiredFinalPath.hashPart() });
                 rewriteOutput(outputRewrites);
-                PosixSourceAccessor accessor;
                 HashResult narHashAndSize = hashPath(
-                    accessor, CanonPath { actualPath },
+                    {getFSSourceAccessor(), CanonPath(actualPath)},
                     FileSerialisationMethod::Recursive, HashAlgorithm::SHA256);
                 ValidPathInfo newInfo0 { requiredFinalPath, narHashAndSize.first };
                 newInfo0.narSize = narHashAndSize.second;
@@ -2572,8 +2570,11 @@ SingleDrvOutputs LocalDerivationGoal::registerOutputs()
                 // Replace the output by a fresh copy of itself to make sure
                 // that there's no stale file descriptor pointing to it
                 Path tmpOutput = actualPath + ".tmp";
-                copyFile(actualPath, tmpOutput, true);
-                renameFile(tmpOutput, actualPath);
+                copyFile(
+                    std::filesystem::path(actualPath),
+                    std::filesystem::path(tmpOutput), true);
+
+                std::filesystem::rename(tmpOutput, actualPath);
 
                 auto newInfo0 = newInfoFromCA(DerivationOutput::CAFloating {
                     .method = dof.ca.method,

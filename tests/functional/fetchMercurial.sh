@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 source common.sh
 
 [[ $(type -p hg) ]] || skipTest "Mercurial not installed"
@@ -101,6 +103,7 @@ path4=$(nix eval --impure --refresh --raw --expr "(builtins.fetchMercurial file:
 [[ $path2 = $path4 ]]
 
 echo paris > $repo/hello
+
 # Passing a `name` argument should be reflected in the output path
 path5=$(nix eval -vvvvv --impure --refresh --raw --expr "(builtins.fetchMercurial { url = \"file://$repo\"; name = \"foo\"; } ).outPath")
 [[ $path5 =~ -foo$ ]]

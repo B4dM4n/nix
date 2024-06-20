@@ -87,7 +87,7 @@ std::tuple<StorePath, Hash> prefetchFile(
     if (!storePath) {
 
         AutoDelete tmpDir(createTempDir(), true);
-        Path tmpFile = (Path) tmpDir + "/tmp";
+        std::filesystem::path tmpFile = tmpDir.path() / "tmp";
 
         /* Download the file. */
         {
@@ -95,7 +95,7 @@ std::tuple<StorePath, Hash> prefetchFile(
             if (executable)
                 mode = 0700;
 
-            AutoCloseFD fd = toDescriptor(open(tmpFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, mode));
+            AutoCloseFD fd = toDescriptor(open(tmpFile.string().c_str(), O_WRONLY | O_CREAT | O_EXCL, mode));
             if (!fd) throw SysError("creating temporary file '%s'", tmpFile);
 
             FdSink sink(fd.get());
@@ -109,15 +109,16 @@ std::tuple<StorePath, Hash> prefetchFile(
         if (unpack) {
             Activity act(*logger, lvlChatty, actUnknown,
                 fmt("unpacking '%s'", url));
-            Path unpacked = (Path) tmpDir + "/unpacked";
+            auto unpacked = (tmpDir.path() / "unpacked").string();
             createDirs(unpacked);
-            unpackTarfile(tmpFile, unpacked);
+            unpackTarfile(tmpFile.string(), unpacked);
 
             /* If the archive unpacks to a single file/directory, then use
                that as the top-level. */
-            auto entries = readDirectory(unpacked);
-            if (entries.size() == 1)
-                tmpFile = unpacked + "/" + entries[0].name;
+            auto entries = std::filesystem::directory_iterator{unpacked};
+            auto file_count = std::distance(entries, std::filesystem::directory_iterator{});
+            if (file_count == 1)
+                tmpFile = entries->path();
             else
                 tmpFile = unpacked;
         }
@@ -125,9 +126,8 @@ std::tuple<StorePath, Hash> prefetchFile(
         Activity act(*logger, lvlChatty, actUnknown,
             fmt("adding '%s' to the store", url));
 
-        auto [accessor, canonPath] = PosixSourceAccessor::createAtRoot(tmpFile);
         auto info = store->addToStoreSlow(
-            *name, accessor, canonPath,
+            *name, PosixSourceAccessor::createAtRoot(tmpFile),
             ingestionMethod, hashAlgo, {}, expectedHash);
         storePath = info.path;
         assert(info.ca);
