@@ -424,8 +424,10 @@ public:
     Setting<bool> useSQLiteWAL{this, !isWSL1(), "use-sqlite-wal",
         "Whether SQLite should use WAL mode."};
 
+#ifndef _WIN32
     Setting<bool> syncBeforeRegistering{this, false, "sync-before-registering",
         "Whether to call `sync()` before registering a path as valid."};
+#endif
 
     Setting<bool> useSubstitutes{
         this, true, "substitute",
@@ -782,6 +784,7 @@ public:
 
           - the store object has been signed using a key in the trusted keys list
           - the [`require-sigs`](#conf-require-sigs) option has been set to `false`
+          - the store URL is configured with `trusted=true`
           - the store object is [content-addressed](@docroot@/glossary.md#gloss-content-addressed-store-object)
         )",
         {"binary-cache-public-keys"}};
@@ -907,7 +910,7 @@ public:
         "substituters",
         R"(
           A list of [URLs of Nix stores](@docroot@/store/types/index.md#store-url-format) to be used as substituters, separated by whitespace.
-          A substituter is an additional [store](@docroot@/glossary.md#gloss-store) from which Nix can obtain [store objects](@docroot@/glossary.md#gloss-store-object) instead of building them.
+          A substituter is an additional [store](@docroot@/glossary.md#gloss-store) from which Nix can obtain [store objects](@docroot@/store/store-object.md) instead of building them.
 
           Substituters are tried based on their priority value, which each substituter can set independently.
           Lower value means higher priority.
@@ -1257,6 +1260,16 @@ public:
         R"(
           Used by `nix upgrade-nix`, the URL of the file that contains the
           store paths of the latest Nix release.
+        )"
+    };
+
+    Setting<uint64_t> warnLargePathThreshold{
+        this,
+        std::numeric_limits<uint64_t>::max(),
+        "warn-large-path-threshold",
+        R"(
+          Warn when copying a path larger than this number of bytes to the Nix store
+          (as determined by its NAR serialisation).
         )"
     };
 };

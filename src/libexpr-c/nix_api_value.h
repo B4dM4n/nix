@@ -79,6 +79,7 @@ typedef struct nix_realised_string nix_realised_string;
  * @{
  */
 /** @brief Function pointer for primops
+ *
  * When you want to return an error, call nix_set_err_msg(context, NIX_ERR_UNKNOWN, "your error message here").
  *
  * @param[in] user_data Arbitrary data that was initially supplied to nix_alloc_primop
@@ -147,7 +148,8 @@ Value * nix_alloc_value(nix_c_context * context, EvalState * state);
  * @brief Functions to inspect and change Nix language values, represented by Value.
  * @{
  */
-/** @name Getters
+/** @anchor getters
+ * @name Getters
  */
 /**@{*/
 /** @brief Get value type
@@ -422,7 +424,7 @@ nix_err nix_init_primop(nix_c_context * context, Value * value, PrimOp * op);
  * @param[in] source value to copy from
  * @return error code, NIX_OK on success.
  */
-nix_err nix_copy_value(nix_c_context * context, Value * value, Value * source);
+nix_err nix_copy_value(nix_c_context * context, Value * value, const Value * source);
 /**@}*/
 
 /** @brief Create a bindings builder
