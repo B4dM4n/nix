@@ -1,11 +1,9 @@
-#include "archive.hh"
 #include "derivations.hh"
 #include "downstream-placeholder.hh"
 #include "eval-inline.hh"
 #include "eval.hh"
 #include "eval-settings.hh"
 #include "gc-small-vector.hh"
-#include "globals.hh"
 #include "json-to-value.hh"
 #include "names.hh"
 #include "path-references.hh"
@@ -78,8 +76,8 @@ StringMap EvalState::realiseContext(const NixStringContext & context, StorePathS
 
     if (drvs.empty()) return {};
 
-    if (isIFD && !evalSettings.enableImportFromDerivation)
-        error<EvalError>(
+    if (isIFD && !settings.enableImportFromDerivation)
+        error<EvalBaseError>(
             "cannot build '%1%' during evaluation because the option 'allow-import-from-derivation' is disabled",
             drvs.begin()->to_string(*store)
         ).debugThrow();
@@ -428,7 +426,7 @@ static void prim_typeOf(EvalState & state, const PosIdx pos, Value * * args, Val
             t = args[0]->external()->typeOf();
             break;
         case nFloat: t = "float"; break;
-        case nThunk: abort();
+        case nThunk: unreachable();
     }
     v.mkString(t);
 }
@@ -721,7 +719,7 @@ static RegisterPrimOp primop_genericClosure(PrimOp {
     .doc = R"(
       `builtins.genericClosure` iteratively computes the transitive closure over an arbitrary relation defined by a function.
 
-      It takes *attrset* with two attributes named `startSet` and `operator`, and returns a list of attrbute sets:
+      It takes *attrset* with two attributes named `startSet` and `operator`, and returns a list of attribute sets:
 
       - `startSet`:
         The initial list of attribute sets.
@@ -733,11 +731,12 @@ static RegisterPrimOp primop_genericClosure(PrimOp {
       Each attribute set in the list `startSet` and the list returned by `operator` must have an attribute `key`, which must support equality comparison.
       The value of `key` can be one of the following types:
 
-      - [Number](@docroot@/language/values.md#type-number)
-      - [Boolean](@docroot@/language/values.md#type-boolean)
-      - [String](@docroot@/language/values.md#type-string)
-      - [Path](@docroot@/language/values.md#type-path)
-      - [List](@docroot@/language/values.md#list)
+      - [Int](@docroot@/language/types.md#type-int)
+      - [Float](@docroot@/language/types.md#type-float)
+      - [Boolean](@docroot@/language/types.md#type-boolean)
+      - [String](@docroot@/language/types.md#type-string)
+      - [Path](@docroot@/language/types.md#type-path)
+      - [List](@docroot@/language/types.md#list)
 
       The result is produced by calling the `operator` on each `item` that has not been called yet, including newly added items, until no new items are added.
       Items are compared by their `key` attribute.
@@ -901,7 +900,7 @@ static void prim_tryEval(EvalState & state, const PosIdx pos, Value * * args, Va
     MaintainCount trylevel(state.trylevel);
 
     ReplExitStatus (* savedDebugRepl)(ref<EvalState> es, const ValMap & extraEnv) = nullptr;
-    if (state.debugRepl && evalSettings.ignoreExceptionsDuringTry)
+    if (state.debugRepl && state.settings.ignoreExceptionsDuringTry)
     {
         /* to prevent starting the repl from exceptions withing a tryEval, null it. */
         savedDebugRepl = state.debugRepl;
@@ -950,7 +949,7 @@ static RegisterPrimOp primop_tryEval({
 static void prim_getEnv(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
     std::string name(state.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv"));
-    v.mkString(evalSettings.restrictEval || evalSettings.pureEval ? "" : getEnv(name).value_or(""));
+    v.mkString(state.settings.restrictEval || state.settings.pureEval ? "" : getEnv(name).value_or(""));
 }
 
 static RegisterPrimOp primop_getEnv({
@@ -1017,7 +1016,7 @@ static void prim_trace(EvalState & state, const PosIdx pos, Value * * args, Valu
         printError("trace: %1%", args[0]->string_view());
     else
         printError("trace: %1%", ValuePrinter(state, *args[0]));
-    if (evalSettings.builtinsTraceDebugger) {
+    if (state.settings.builtinsTraceDebugger) {
         state.runDebugRepl(nullptr);
     }
     state.forceValue(*args[1], pos);
@@ -1056,11 +1055,11 @@ static void prim_warn(EvalState & state, const PosIdx pos, Value * * args, Value
         logWarning(info);
     }
 
-    if (evalSettings.builtinsAbortOnWarn) {
+    if (state.settings.builtinsAbortOnWarn) {
         // Not an EvalError or subclass, which would cause the error to be stored in the eval cache.
         state.error<EvalBaseError>("aborting to reveal stack trace of warning, as abort-on-warn is set").setIsFromExpr().debugThrow();
     }
-    if (evalSettings.builtinsTraceDebugger || evalSettings.builtinsDebuggerOnWarn) {
+    if (state.settings.builtinsTraceDebugger || state.settings.builtinsDebuggerOnWarn) {
         state.runDebugRepl(nullptr);
     }
     state.forceValue(*args[1], pos);
@@ -1163,12 +1162,34 @@ static void prim_derivationStrict(EvalState & state, const PosIdx pos, Value * *
     }
 }
 
+/**
+ * Early validation for the derivation name, for better error message.
+ * It is checked again when constructing store paths.
+ *
+ * @todo Check that the `.drv` suffix also fits.
+ */
+static void checkDerivationName(EvalState & state, std::string_view drvName)
+{
+    try {
+        checkName(drvName);
+    } catch (BadStorePathName & e) {
+        // "Please pass a different name": Users may not be aware that they can
+        //     pass a different one, in functions like `fetchurl` where the name
+        //     is optional.
+        // Note that Nixpkgs generally won't trigger this, because `mkDerivation`
+        // sanitizes the name.
+        state.error<EvalError>("invalid derivation name: %s. Please pass a different '%s'.", Uncolored(e.message()), "name").debugThrow();
+    }
+}
+
 static void derivationStrictInternal(
     EvalState & state,
     const std::string & drvName,
     const Bindings * attrs,
     Value & v)
 {
+    checkDerivationName(state, drvName);
+
     /* Check whether attributes should be passed as a JSON file. */
     using nlohmann::json;
     std::optional<json> jsonObject;
@@ -1203,13 +1224,13 @@ static void derivationStrictInternal(
 
     for (auto & i : attrs->lexicographicOrder(state.symbols)) {
         if (i->name == state.sIgnoreNulls) continue;
-        const std::string & key = state.symbols[i->name];
+        auto key = state.symbols[i->name];
         vomit("processing attribute '%1%'", key);
 
         auto handleHashMode = [&](const std::string_view s) {
             if (s == "recursive") {
                 // back compat, new name is "nar"
-                ingestionMethod = FileIngestionMethod::Recursive;
+                ingestionMethod = ContentAddressMethod::Raw::NixArchive;
             } else try {
                 ingestionMethod = ContentAddressMethod::parse(s);
             } catch (UsageError &) {
@@ -1217,9 +1238,9 @@ static void derivationStrictInternal(
                     "invalid value '%s' for 'outputHashMode' attribute", s
                 ).atPos(v).debugThrow();
             }
-            if (ingestionMethod == TextIngestionMethod {})
+            if (ingestionMethod == ContentAddressMethod::Raw::Text)
                 experimentalFeatureSettings.require(Xp::DynamicDerivations);
-            if (ingestionMethod == FileIngestionMethod::Git)
+            if (ingestionMethod == ContentAddressMethod::Raw::Git)
                 experimentalFeatureSettings.require(Xp::GitHashing);
         };
 
@@ -1287,7 +1308,7 @@ static void derivationStrictInternal(
 
                     if (i->name == state.sStructuredAttrs) continue;
 
-                    (*jsonObject)[key] = printValueAsJSON(state, true, *i->value, pos, context);
+                    jsonObject->emplace(key, printValueAsJSON(state, true, *i->value, pos, context));
 
                     if (i->name == state.sBuilder)
                         drv.builder = state.forceString(*i->value, context, pos, context_below);
@@ -1307,6 +1328,20 @@ static void derivationStrictInternal(
                             ss.emplace_back(state.forceStringNoCtx(*elem, pos, context_below));
                         handleOutputs(ss);
                     }
+
+                    if (i->name == state.sAllowedReferences)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'allowedReferences'; use 'outputChecks.<output>.allowedReferences' instead", drvName);
+                    if (i->name == state.sAllowedRequisites)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'allowedRequisites'; use 'outputChecks.<output>.allowedRequisites' instead", drvName);
+                    if (i->name == state.sDisallowedReferences)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'disallowedReferences'; use 'outputChecks.<output>.disallowedReferences' instead", drvName);
+                    if (i->name == state.sDisallowedRequisites)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'disallowedRequisites'; use 'outputChecks.<output>.disallowedRequisites' instead", drvName);
+                    if (i->name == state.sMaxSize)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'maxSize'; use 'outputChecks.<output>.maxSize' instead", drvName);
+                    if (i->name == state.sMaxClosureSize)
+                        warn("In a derivation named '%s', 'structuredAttrs' disables the effect of the derivation attribute 'maxClosureSize'; use 'outputChecks.<output>.maxClosureSize' instead", drvName);
+
 
                 } else {
                     auto s = state.coerceToString(pos, *i->value, context, context_below, true).toOwned();
@@ -1377,7 +1412,7 @@ static void derivationStrictInternal(
 
     /* Check whether the derivation name is valid. */
     if (isDerivation(drvName) &&
-        !(ingestionMethod == ContentAddressMethod { TextIngestionMethod { } } &&
+        !(ingestionMethod == ContentAddressMethod::Raw::Text &&
           outputs.size() == 1 &&
           *(outputs.begin()) == "out"))
     {
@@ -1399,7 +1434,7 @@ static void derivationStrictInternal(
 
         auto h = newHashAllowEmpty(*outputHash, outputHashAlgo);
 
-        auto method = ingestionMethod.value_or(FileIngestionMethod::Flat);
+        auto method = ingestionMethod.value_or(ContentAddressMethod::Raw::Flat);
 
         DerivationOutput::CAFixed dof {
             .ca = ContentAddress {
@@ -1418,7 +1453,7 @@ static void derivationStrictInternal(
                 .atPos(v).debugThrow();
 
         auto ha = outputHashAlgo.value_or(HashAlgorithm::SHA256);
-        auto method = ingestionMethod.value_or(FileIngestionMethod::Recursive);
+        auto method = ingestionMethod.value_or(ContentAddressMethod::Raw::NixArchive);
 
         for (auto & i : outputs) {
             drv.env[i] = hashPlaceholder(i);
@@ -1564,7 +1599,7 @@ static RegisterPrimOp primop_toPath({
    corner cases. */
 static void prim_storePath(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
-    if (evalSettings.pureEval)
+    if (state.settings.pureEval)
         state.error<EvalError>(
             "'%s' is not allowed in pure evaluation mode",
             "builtins.storePath"
@@ -1674,7 +1709,7 @@ static RegisterPrimOp primop_baseNameOf({
     .name = "baseNameOf",
     .args = {"x"},
     .doc = R"(
-      Return the *base name* of either a [path value](@docroot@/language/values.md#type-path) *x* or a string *x*, depending on which type is passed, and according to the following rules.
+      Return the *base name* of either a [path value](@docroot@/language/types.md#type-path) *x* or a string *x*, depending on which type is passed, and according to the following rules.
 
       For a path value, the *base name* is considered to be the part of the path after the last directory separator, including any file extensions.
       This is the simple case, as path values don't have trailing slashes.
@@ -1808,35 +1843,7 @@ static RegisterPrimOp primop_findFile(PrimOp {
     .doc = R"(
       Find *lookup-path* in *search-path*.
 
-      A search path is represented list of [attribute sets](./values.md#attribute-set) with two attributes:
-      - `prefix` is a relative path.
-      - `path` denotes a file system location
-      The exact syntax depends on the command line interface.
-
-      Examples of search path attribute sets:
-
-      - ```
-        {
-          prefix = "nixos-config";
-          path = "/etc/nixos/configuration.nix";
-        }
-        ```
-
-      - ```
-        {
-          prefix = "";
-          path = "/nix/var/nix/profiles/per-user/root/channels";
-        }
-        ```
-
-      The lookup algorithm checks each entry until a match is found, returning a [path value](@docroot@/language/values.html#type-path) of the match:
-
-      - If *lookup-path* matches `prefix`, then the remainder of *lookup-path* (the "suffix") is searched for within the directory denoted by `path`.
-        Note that the `path` may need to be downloaded at this point to look inside.
-      - If the suffix is found inside that directory, then the entry is a match.
-        The combined absolute path of the directory (now downloaded if need be) and the suffix is returned.
-
-      [Lookup path](@docroot@/language/constructs/lookup-path.md) expressions are [desugared](https://en.wikipedia.org/wiki/Syntactic_sugar) using this and [`builtins.nixPath`](@docroot@/language/builtin-constants.md#builtins-nixPath):
+      [Lookup path](@docroot@/language/constructs/lookup-path.md) expressions are [desugared](https://en.wikipedia.org/wiki/Syntactic_sugar) using this and [`builtins.nixPath`](#builtins-nixPath):
 
       ```nix
       <nixpkgs>
@@ -1847,6 +1854,119 @@ static RegisterPrimOp primop_findFile(PrimOp {
       ```nix
       builtins.findFile builtins.nixPath "nixpkgs"
       ```
+
+      A search path is represented as a list of [attribute sets](./types.md#attribute-set) with two attributes:
+      - `prefix` is a relative path.
+      - `path` denotes a file system location
+
+      Examples of search path attribute sets:
+
+      - ```
+        {
+          prefix = "";
+          path = "/nix/var/nix/profiles/per-user/root/channels";
+        }
+        ```
+      - ```
+        {
+          prefix = "nixos-config";
+          path = "/etc/nixos/configuration.nix";
+        }
+        ```
+      - ```
+        {
+          prefix = "nixpkgs";
+          path = "https://github.com/NixOS/nixpkgs/tarballs/master";
+        }
+        ```
+      - ```
+        {
+          prefix = "nixpkgs";
+          path = "channel:nixpkgs-unstable";
+        }
+        ```
+      - ```
+        {
+          prefix = "flake-compat";
+          path = "flake:github:edolstra/flake-compat";
+        }
+        ```
+
+      The lookup algorithm checks each entry until a match is found, returning a [path value](@docroot@/language/types.md#type-path) of the match:
+
+      - If a prefix of `lookup-path` matches `prefix`, then the remainder of *lookup-path* (the "suffix") is searched for within the directory denoted by `path`.
+        The contents of `path` may need to be downloaded at this point to look inside.
+
+      - If the suffix is found inside that directory, then the entry is a match.
+        The combined absolute path of the directory (now downloaded if need be) and the suffix is returned.
+
+      > **Example**
+      >
+      > A *search-path* value
+      >
+      > ```
+      > [
+      >   {
+      >     prefix = "";
+      >     path = "/home/eelco/Dev";
+      >   }
+      >   {
+      >     prefix = "nixos-config";
+      >     path = "/etc/nixos";
+      >   }
+      > ]
+      > ```
+      >
+      > and a *lookup-path* value `"nixos-config"` will cause Nix to try `/home/eelco/Dev/nixos-config` and `/etc/nixos` in that order and return the first path that exists.
+
+      If `path` starts with `http://` or `https://`, it is interpreted as the URL of a tarball that will be downloaded and unpacked to a temporary location.
+      The tarball must consist of a single top-level directory.
+
+      The URLs of the tarballs from the official `nixos.org` channels can be abbreviated as `channel:<channel-name>`.
+      See [documentation on `nix-channel`](@docroot@/command-ref/nix-channel.md) for details about channels.
+
+      > **Example**
+      >
+      > These two search path entries are equivalent:
+      >
+      > - ```
+      >   {
+      >     prefix = "nixpkgs";
+      >     path = "channel:nixpkgs-unstable";
+      >   }
+      >   ```
+      > - ```
+      >   {
+      >     prefix = "nixpkgs";
+      >     path = "https://nixos.org/channels/nixos-unstable/nixexprs.tar.xz";
+      >   }
+      >   ```
+
+      Search paths can also point to source trees using [flake URLs](@docroot@/command-ref/new-cli/nix3-flake.md#url-like-syntax).
+
+
+      > **Example**
+      >
+      > The search path entry
+      >
+      > ```
+      > {
+      >   prefix = "nixpkgs";
+      >   path = "flake:nixpkgs";
+      > }
+      > ```
+      > specifies that the prefix `nixpkgs` shall refer to the source tree downloaded from the `nixpkgs` entry in the flake registry.
+      >
+      > Similarly
+      >
+      > ```
+      > {
+      >   prefix = "nixpkgs";
+      >   path = "flake:github:nixos/nixpkgs/nixos-22.05";
+      > }
+      > ```
+      >
+      > makes `<nixpkgs>` refer to a particular branch of the `NixOS/nixpkgs` repository on GitHub.
     )",
     .fun = prim_findFile,
 });
@@ -2194,7 +2314,7 @@ static void prim_toFile(EvalState & state, const PosIdx pos, Value * * args, Val
         })
         : ({
             StringSource s { contents };
-            state.store->addToStoreFromDump(s, name, FileSerialisationMethod::Flat, TextIngestionMethod {}, HashAlgorithm::SHA256, refs, state.repair);
+            state.store->addToStoreFromDump(s, name, FileSerialisationMethod::Flat, ContentAddressMethod::Raw::Text, HashAlgorithm::SHA256, refs, state.repair);
         });
 
     /* Note: we don't need to add `context' to the context of the
@@ -2257,7 +2377,7 @@ static RegisterPrimOp primop_toFile({
       ```
 
       Note that `${configFile}` is a
-      [string interpolation](@docroot@/language/values.md#type-string), so the result of the
+      [string interpolation](@docroot@/language/types.md#type-string), so the result of the
       expression `configFile`
       (i.e., a path like `/nix/store/m7p7jfny445k...-foo.conf`) will be
       spliced into the resulting string.
@@ -2377,7 +2497,7 @@ static void prim_filterSource(EvalState & state, const PosIdx pos, Value * * arg
         "while evaluating the second argument (the path to filter) passed to 'builtins.filterSource'");
     state.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.filterSource");
 
-    addPath(state, pos, path.baseName(), path, args[0], FileIngestionMethod::Recursive, std::nullopt, v, context);
+    addPath(state, pos, path.baseName(), path, args[0], ContentAddressMethod::Raw::NixArchive, std::nullopt, v, context);
 }
 
 static RegisterPrimOp primop_filterSource({
@@ -2440,7 +2560,7 @@ static void prim_path(EvalState & state, const PosIdx pos, Value * * args, Value
     std::optional<SourcePath> path;
     std::string name;
     Value * filterFun = nullptr;
-    ContentAddressMethod method = FileIngestionMethod::Recursive;
+    auto method = ContentAddressMethod::Raw::NixArchive;
     std::optional<Hash> expectedHash;
     NixStringContext context;
 
@@ -2456,8 +2576,8 @@ static void prim_path(EvalState & state, const PosIdx pos, Value * * args, Value
             state.forceFunction(*(filterFun = attr.value), attr.pos, "while evaluating the `filter` parameter passed to builtins.path");
         else if (n == "recursive")
             method = state.forceBool(*attr.value, attr.pos, "while evaluating the `recursive` attribute passed to builtins.path")
-                ? FileIngestionMethod::Recursive
-                : FileIngestionMethod::Flat;
+                ? ContentAddressMethod::Raw::NixArchive
+                : ContentAddressMethod::Raw::Flat;
         else if (n == "sha256")
             expectedHash = newHashAllowEmpty(state.forceStringNoCtx(*attr.value, attr.pos, "while evaluating the `sha256` attribute passed to builtins.path"), HashAlgorithm::SHA256);
         else
@@ -4062,17 +4182,23 @@ static RegisterPrimOp primop_convertHash({
 
 struct RegexCache
 {
-    // TODO use C++20 transparent comparison when available
-    std::unordered_map<std::string_view, std::regex> cache;
-    std::list<std::string> keys;
+    struct State
+    {
+        // TODO use C++20 transparent comparison when available
+        std::unordered_map<std::string_view, std::regex> cache;
+        std::list<std::string> keys;
+    };
+
+    Sync<State> state_;
 
     std::regex get(std::string_view re)
     {
-        auto it = cache.find(re);
-        if (it != cache.end())
+        auto state(state_.lock());
+        auto it = state->cache.find(re);
+        if (it != state->cache.end())
             return it->second;
-        keys.emplace_back(re);
-        return cache.emplace(keys.back(), std::regex(keys.back(), std::regex::extended)).first->second;
+        state->keys.emplace_back(re);
+        return state->cache.emplace(state->keys.back(), std::regex(state->keys.back(), std::regex::extended)).first->second;
     }
 };
 
@@ -4477,7 +4603,7 @@ void EvalState::createBaseEnv()
     addConstant("builtins", v, {
         .type = nAttrs,
         .doc = R"(
-          Contains all the [built-in functions](@docroot@/language/builtins.md) and values.
+          Contains all the built-in functions and values.
 
           Since built-in functions were added over time, [testing for attributes](./operators.md#has-attribute) in `builtins` can be used for graceful fallback on older Nix installations:
 
@@ -4497,7 +4623,7 @@ void EvalState::createBaseEnv()
           It can be returned by
           [comparison operators](@docroot@/language/operators.md#Comparison)
           and used in
-          [conditional expressions](@docroot@/language/constructs.md#Conditionals).
+          [conditional expressions](@docroot@/language/syntax.md#Conditionals).
 
           The name `true` is not special, and can be shadowed:
 
@@ -4517,7 +4643,7 @@ void EvalState::createBaseEnv()
           It can be returned by
           [comparison operators](@docroot@/language/operators.md#Comparison)
           and used in
-          [conditional expressions](@docroot@/language/constructs.md#Conditionals).
+          [conditional expressions](@docroot@/language/syntax.md#Conditionals).
 
           The name `false` is not special, and can be shadowed:
 
@@ -4542,7 +4668,7 @@ void EvalState::createBaseEnv()
         )",
     });
 
-    if (!evalSettings.pureEval) {
+    if (!settings.pureEval) {
         v.mkInt(time(0));
     }
     addConstant("__currentTime", v, {
@@ -4569,8 +4695,8 @@ void EvalState::createBaseEnv()
         .impureOnly = true,
     });
 
-    if (!evalSettings.pureEval)
-        v.mkString(evalSettings.getCurrentSystem());
+    if (!settings.pureEval)
+        v.mkString(settings.getCurrentSystem());
     addConstant("__currentSystem", v, {
         .type = nString,
         .doc = R"(
@@ -4650,7 +4776,7 @@ void EvalState::createBaseEnv()
 
 #ifndef _WIN32 // TODO implement on Windows
     // Miscellaneous
-    if (evalSettings.enableNativeCode) {
+    if (settings.enableNativeCode) {
         addPrimOp({
             .name = "__importNative",
             .arity = 2,
@@ -4673,7 +4799,7 @@ void EvalState::createBaseEnv()
           error if `--trace-verbose` is enabled. Then return *e2*. This function
           is useful for debugging.
         )",
-        .fun = evalSettings.traceVerbose ? prim_trace : prim_second,
+        .fun = settings.traceVerbose ? prim_trace : prim_second,
     });
 
     /* Add a value containing the current Nix expression search path. */
@@ -4689,6 +4815,13 @@ void EvalState::createBaseEnv()
         .type = nList,
         .doc = R"(
           The value of the [`nix-path` configuration setting](@docroot@/command-ref/conf-file.md#conf-nix-path): a list of search path entries used to resolve [lookup paths](@docroot@/language/constructs/lookup-path.md).
+
+          > **Example**
+          >
+          > ```bash
+          > $ NIX_PATH= nix-instantiate --eval --expr "builtins.nixPath" -I foo=bar --no-pure-eval
+          > [ { path = "bar"; prefix = "foo"; } ]
+          > ```
 
           Lookup path expressions are [desugared](https://en.wikipedia.org/wiki/Syntactic_sugar) using this and
           [`builtins.findFile`](./builtins.html#builtins-findFile):

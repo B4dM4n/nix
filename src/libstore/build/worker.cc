@@ -19,7 +19,6 @@ Worker::Worker(Store & store, Store & evalStore)
     , store(store)
     , evalStore(evalStore)
 {
-    /* Debugging: prevent recursive workers. */
     nrLocalBuilds = 0;
     nrSubstitutions = 0;
     lastWokenUp = steady_time_point::min();
@@ -217,7 +216,7 @@ void Worker::childStarted(GoalPtr goal, const std::set<MuxablePipePollState::Com
             nrLocalBuilds++;
             break;
         default:
-            abort();
+            unreachable();
         }
     }
 }
@@ -242,7 +241,7 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
             lastWokenUp = steady_time_point::min();
             break;
         default:
-            abort();
+            unreachable();
         }
     }
 
@@ -340,31 +339,27 @@ void Worker::run(const Goals & _topGoals)
         /* Wait for input. */
         if (!children.empty() || !waitingForAWhile.empty())
             waitForInput();
-        else {
-            if (awake.empty() && 0U == settings.maxBuildJobs)
-            {
-                if (getMachines().empty())
-                   throw Error(
-                        R"(
-                        Unable to start any build;
-                        either increase '--max-jobs' or enable remote builds.
+        else if (awake.empty() && 0U == settings.maxBuildJobs) {
+            if (getMachines().empty())
+               throw Error(
+                    R"(
+                    Unable to start any build;
+                    either increase '--max-jobs' or enable remote builds.
 
-                        For more information run 'man nix.conf' and search for '/machines'.
-                        )"
-                    );
-                else
-                   throw Error(
-                        R"(
-                        Unable to start any build;
-                        remote machines may not have all required system features.
+                    For more information run 'man nix.conf' and search for '/machines'.
+                    )"
+                );
+            else
+               throw Error(
+                    R"(
+                    Unable to start any build;
+                    remote machines may not have all required system features.
 
-                        For more information run 'man nix.conf' and search for '/machines'.
-                        )"
-                    );
+                    For more information run 'man nix.conf' and search for '/machines'.
+                    )"
+                );
 
-            }
-            assert(!awake.empty());
-        }
+        } else assert(!awake.empty());
     }
 
     /* If --keep-going is not set, it's possible that the main goal
@@ -532,7 +527,7 @@ bool Worker::pathContentsGood(const StorePath & path)
     else {
         auto current = hashPath(
             {store.getFSAccessor(), CanonPath(store.printStorePath(path))},
-            FileIngestionMethod::Recursive, info->narHash.algo).first;
+            FileIngestionMethod::NixArchive, info->narHash.algo).first;
         Hash nullHash(HashAlgorithm::SHA256);
         res = info->narHash == nullHash || info->narHash == current;
     }

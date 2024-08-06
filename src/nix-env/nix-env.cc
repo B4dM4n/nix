@@ -1159,7 +1159,7 @@ static void opQuery(Globals & globals, Strings opFlags, Strings opArgs)
                     case cvEqual: ch = '='; break;
                     case cvGreater: ch = '<'; break;
                     case cvUnavail: ch = '-'; break;
-                    default: abort();
+                    default: unreachable();
                 }
 
                 if (xmlOutput) {
@@ -1525,7 +1525,7 @@ static int main_nix_env(int argc, char * * argv)
 
         auto store = openStore();
 
-        globals.state = std::shared_ptr<EvalState>(new EvalState(myArgs.lookupPath, store));
+        globals.state = std::shared_ptr<EvalState>(new EvalState(myArgs.lookupPath, store, fetchSettings, evalSettings));
         globals.state->repair = myArgs.repair;
 
         globals.instSource.nixExprPath = std::make_shared<SourcePath>(

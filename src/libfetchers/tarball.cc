@@ -2,12 +2,10 @@
 #include "fetchers.hh"
 #include "cache.hh"
 #include "filetransfer.hh"
-#include "globals.hh"
 #include "store-api.hh"
 #include "archive.hh"
 #include "tarfile.hh"
 #include "types.hh"
-#include "split.hh"
 #include "store-path-accessor.hh"
 #include "store-api.hh"
 #include "git-utils.hh"
@@ -145,6 +143,9 @@ DownloadTarballResult downloadTarball(
 
     // TODO: fall back to cached value if download fails.
 
+    auto act = std::make_unique<Activity>(*logger, lvlInfo, actUnknown,
+        fmt("unpacking '%s' into the Git cache", url));
+
     AutoDelete cleanupTemp;
 
     /* Note: if the download is cached, `importTarball()` will receive
@@ -166,8 +167,11 @@ DownloadTarballResult downloadTarball(
                 TarArchive{path};
           })
         : TarArchive{*source};
-    auto parseSink = getTarballCache()->getFileSystemObjectSink();
+    auto tarballCache = getTarballCache();
+    auto parseSink = tarballCache->getFileSystemObjectSink();
     auto lastModified = unpackTarfileToSink(archive, *parseSink);
+
+    act.reset();
 
     auto res(_res->lock());
 
@@ -179,7 +183,8 @@ DownloadTarballResult downloadTarball(
         infoAttrs = cached->value;
     } else {
         infoAttrs.insert_or_assign("etag", res->etag);
-        infoAttrs.insert_or_assign("treeHash", parseSink->sync().gitRev());
+        infoAttrs.insert_or_assign("treeHash",
+            tarballCache->dereferenceSingletonDirectory(parseSink->sync()).gitRev());
         infoAttrs.insert_or_assign("lastModified", uint64_t(lastModified));
         if (res->immutableUrl)
             infoAttrs.insert_or_assign("immutableUrl", *res->immutableUrl);
@@ -214,12 +219,14 @@ struct CurlInputScheme : InputScheme
 
     static const std::set<std::string> specialParams;
 
-    std::optional<Input> inputFromURL(const ParsedURL & _url, bool requireTree) const override
+    std::optional<Input> inputFromURL(
+        const Settings & settings,
+        const ParsedURL & _url, bool requireTree) const override
     {
         if (!isValidURL(_url, requireTree))
             return std::nullopt;
 
-        Input input;
+        Input input{settings};
 
         auto url = _url;
 
@@ -267,9 +274,11 @@ struct CurlInputScheme : InputScheme
         };
     }
 
-    std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
+    std::optional<Input> inputFromAttrs(
+        const Settings & settings,
+        const Attrs & attrs) const override
     {
-        Input input;
+        Input input{settings};
         input.attrs = attrs;
 
         //input.locked = (bool) maybeGetStrAttr(input.attrs, "hash");
@@ -349,7 +358,7 @@ struct TarballInputScheme : CurlInputScheme
         result.accessor->setPathDisplay("«" + input.to_string() + "»");
 
         if (result.immutableUrl) {
-            auto immutableInput = Input::fromURL(*result.immutableUrl);
+            auto immutableInput = Input::fromURL(*input.settings, *result.immutableUrl);
             // FIXME: would be nice to support arbitrary flakerefs
             // here, e.g. git flakes.
             if (immutableInput.getType() != "tarball")
@@ -364,6 +373,16 @@ struct TarballInputScheme : CurlInputScheme
             getTarballCache()->treeHashToNarHash(result.treeHash).to_string(HashFormat::SRI, true));
 
         return {result.accessor, input};
+    }
+
+    std::optional<std::string> getFingerprint(ref<Store> store, const Input & input) const override
+    {
+        if (auto narHash = input.getNarHash())
+            return narHash->to_string(HashFormat::SRI, true);
+        else if (auto rev = input.getRev())
+            return rev->gitRev();
+        else
+            return std::nullopt;
     }
 };
 

@@ -1,9 +1,7 @@
 #pragma once
 ///@file
 
-#include <compare>
 #include <memory>
-#include <exception>
 #include <stdexcept>
 
 namespace nix {
@@ -25,14 +23,14 @@ public:
         : p(r.p)
     { }
 
-    explicit ref<T>(const std::shared_ptr<T> & p)
+    explicit ref(const std::shared_ptr<T> & p)
         : p(p)
     {
         if (!p)
             throw std::invalid_argument("null pointer cast to ref");
     }
 
-    explicit ref<T>(T * p)
+    explicit ref(T * p)
         : p(p)
     {
         if (!p)
@@ -89,9 +87,9 @@ public:
         return p != other.p;
     }
 
-    bool operator < (const ref<T> & other) const
+    auto operator <=> (const ref<T> & other) const
     {
-        return p < other.p;
+        return p <=> other.p;
     }
 
 private:

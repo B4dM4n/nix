@@ -17,6 +17,10 @@
 # define FS_ROOT FS_SEP
 #endif
 
+#ifndef PATH_MAX
+# define PATH_MAX 4096
+#endif
+
 namespace nix {
 
 /* ----------- tests for util.hh ------------------------------------------------*/
@@ -227,32 +231,32 @@ namespace nix {
     }
 
     /* ----------------------------------------------------------------------------
-     * concatStringsSep
+     * dropEmptyInitThenConcatStringsSep
      * --------------------------------------------------------------------------*/
 
-    TEST(concatStringsSep, buildCommaSeparatedString) {
+    TEST(dropEmptyInitThenConcatStringsSep, buildCommaSeparatedString) {
         Strings strings;
         strings.push_back("this");
         strings.push_back("is");
         strings.push_back("great");
 
-        ASSERT_EQ(concatStringsSep(",", strings), "this,is,great");
+        ASSERT_EQ(dropEmptyInitThenConcatStringsSep(",", strings), "this,is,great");
     }
 
-    TEST(concatStringsSep, buildStringWithEmptySeparator) {
+    TEST(dropEmptyInitThenConcatStringsSep, buildStringWithEmptySeparator) {
         Strings strings;
         strings.push_back("this");
         strings.push_back("is");
         strings.push_back("great");
 
-        ASSERT_EQ(concatStringsSep("", strings), "thisisgreat");
+        ASSERT_EQ(dropEmptyInitThenConcatStringsSep("", strings), "thisisgreat");
     }
 
-    TEST(concatStringsSep, buildSingleString) {
+    TEST(dropEmptyInitThenConcatStringsSep, buildSingleString) {
         Strings strings;
         strings.push_back("this");
 
-        ASSERT_EQ(concatStringsSep(",", strings), "this");
+        ASSERT_EQ(dropEmptyInitThenConcatStringsSep(",", strings), "this");
     }
 
     /* ----------------------------------------------------------------------------

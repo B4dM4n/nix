@@ -113,19 +113,18 @@ Derivations can declare some infrequently used optional attributes.
     > `nix-build`.
 
     If the [`configurable-impure-env` experimental
-    feature](@docroot@/contributing/experimental-features.md#xp-feature-configurable-impure-env)
+    feature](@docroot@/development/experimental-features.md#xp-feature-configurable-impure-env)
     is enabled, these environment variables can also be controlled
     through the
     [`impure-env`](@docroot@/command-ref/conf-file.md#conf-impure-env)
     configuration setting.
 
   - [`outputHash`]{#adv-attr-outputHash}; [`outputHashAlgo`]{#adv-attr-outputHashAlgo}; [`outputHashMode`]{#adv-attr-outputHashMode}\
-    These attributes declare that the derivation is a so-called
-    *fixed-output derivation*, which means that a cryptographic hash of
-    the output is already known in advance. When the build of a
-    fixed-output derivation finishes, Nix computes the cryptographic
-    hash of the output and compares it to the hash declared with these
-    attributes. If there is a mismatch, the build fails.
+    These attributes declare that the derivation is a so-called *fixed-output derivation* (FOD), which means that a cryptographic hash of the output is already known in advance.
+
+    As opposed to regular derivations, the [`builder`] executable of a fixed-output derivation has access to the network.
+    Nix computes a cryptographic hash of its output and compares that to the hash declared with these attributes.
+    If there is a mismatch, the derivation fails.
 
     The rationale for fixed-output derivations is derivations such as
     those produced by the `fetchurl` function. This function downloads a
@@ -227,7 +226,7 @@ Derivations can declare some infrequently used optional attributes.
   - [`__contentAddressed`]{#adv-attr-__contentAddressed}
 
     > **Warning**
-    > This attribute is part of an [experimental feature](@docroot@/contributing/experimental-features.md).
+    > This attribute is part of an [experimental feature](@docroot@/development/experimental-features.md).
     >
     > To use this attribute, you must enable the
     > [`ca-derivations`][xp-feature-ca-derivations] experimental feature.
@@ -279,7 +278,9 @@ Derivations can declare some infrequently used optional attributes.
 
     > **Note**
     >
-    > If set to `false`, the [`builder`](./derivations.md#attr-builder) should be able to run on the system type specified in the [`system` attribute](./derivations.md#attr-system), since the derivation cannot be substituted.
+    > If set to `false`, the [`builder`] should be able to run on the system type specified in the [`system` attribute](./derivations.md#attr-system), since the derivation cannot be substituted.
+
+    [`builder`]: ./derivations.md#attr-builder
 
   - [`__structuredAttrs`]{#adv-attr-structuredAttrs}\
     If the special attribute `__structuredAttrs` is set to `true`, the other derivation
@@ -300,6 +301,12 @@ Derivations can declare some infrequently used optional attributes.
     [`nix-shell`](../command-ref/nix-shell.md). This includes non-nested
     (associative) arrays. For example, the attribute `hardening.format = true`
     ends up as the Bash associative array element `${hardening[format]}`.
+
+    > **Warning**
+    >
+    > If set to `true`, other advanced attributes such as [`allowedReferences`](#adv-attr-allowedReferences), [`allowedReferences`](#adv-attr-allowedReferences), [`allowedRequisites`](#adv-attr-allowedRequisites),
+    [`disallowedReferences`](#adv-attr-disallowedReferences) and [`disallowedRequisites`](#adv-attr-disallowedRequisites), maxSize, and maxClosureSize.
+    will have no effect.
 
   - [`outputChecks`]{#adv-attr-outputChecks}\
     When using [structured attributes](#adv-attr-structuredAttrs), the `outputChecks`
@@ -363,6 +370,6 @@ Derivations can declare some infrequently used optional attributes.
 
   ensures that the derivation can only be built on a machine with the `kvm` feature.
 
-[xp-feature-ca-derivations]: @docroot@/contributing/experimental-features.md#xp-feature-ca-derivations
-[xp-feature-dynamic-derivations]: @docroot@/contributing/experimental-features.md#xp-feature-dynamic-derivations
-[xp-feature-git-hashing]: @docroot@/contributing/experimental-features.md#xp-feature-git-hashing
+[xp-feature-ca-derivations]: @docroot@/development/experimental-features.md#xp-feature-ca-derivations
+[xp-feature-dynamic-derivations]: @docroot@/development/experimental-features.md#xp-feature-dynamic-derivations
+[xp-feature-git-hashing]: @docroot@/development/experimental-features.md#xp-feature-git-hashing

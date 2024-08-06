@@ -1,4 +1,5 @@
 #include <regex>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 #include <gtest/gtest.h>
@@ -55,15 +56,15 @@ VERSIONED_CHARACTERIZATION_TEST(
     defaultVersion,
     (std::tuple<ContentAddress, ContentAddress, ContentAddress> {
         ContentAddress {
-            .method = TextIngestionMethod {},
+            .method = ContentAddressMethod::Raw::Text,
             .hash = hashString(HashAlgorithm::SHA256, "Derive(...)"),
         },
         ContentAddress {
-            .method = FileIngestionMethod::Flat,
+            .method = ContentAddressMethod::Raw::Flat,
             .hash = hashString(HashAlgorithm::SHA1, "blob blob..."),
         },
         ContentAddress {
-            .method = FileIngestionMethod::Recursive,
+            .method = ContentAddressMethod::Raw::NixArchive,
             .hash = hashString(HashAlgorithm::SHA256, "(...)"),
         },
     }))
@@ -511,7 +512,7 @@ VERSIONED_CHARACTERIZATION_TEST(
                 *LibStoreTest::store,
                 "foo",
                 FixedOutputInfo {
-                    .method = FileIngestionMethod::Recursive,
+                    .method = FileIngestionMethod::NixArchive,
                     .hash = hashString(HashAlgorithm::SHA256, "(...)"),
                     .references = {
                         .others = {
@@ -597,7 +598,7 @@ VERSIONED_CHARACTERIZATION_TEST(
         std::nullopt,
         std::optional {
             ContentAddress {
-                .method = FileIngestionMethod::Flat,
+                .method = ContentAddressMethod::Raw::Flat,
                 .hash = hashString(HashAlgorithm::SHA1, "blob blob..."),
             },
         },
@@ -657,21 +658,48 @@ TEST_F(WorkerProtoTest, handshake_log)
             FdSink out { toServer.writeSide.get() };
             FdSource in0 { toClient.readSide.get() };
             TeeSource in { in0, toClientLog };
-            clientResult = WorkerProto::BasicClientConnection::handshake(
-                out, in, defaultVersion);
+            clientResult = std::get<0>(WorkerProto::BasicClientConnection::handshake(
+                    out, in, defaultVersion, {}));
         });
 
         {
             FdSink out { toClient.writeSide.get() };
             FdSource in { toServer.readSide.get() };
             WorkerProto::BasicServerConnection::handshake(
-                out, in, defaultVersion);
+                out, in, defaultVersion, {});
         };
 
         thread.join();
 
         return std::move(toClientLog.s);
     });
+}
+
+TEST_F(WorkerProtoTest, handshake_features)
+{
+    Pipe toClient, toServer;
+    toClient.create();
+    toServer.create();
+
+    std::tuple<WorkerProto::Version, std::set<WorkerProto::Feature>> clientResult;
+
+    auto clientThread = std::thread([&]() {
+        FdSink out { toServer.writeSide.get() };
+        FdSource in { toClient.readSide.get() };
+        clientResult = WorkerProto::BasicClientConnection::handshake(
+            out, in, 123, {"bar", "aap", "mies", "xyzzy"});
+    });
+
+    FdSink out { toClient.writeSide.get() };
+    FdSource in { toServer.readSide.get() };
+    auto daemonResult = WorkerProto::BasicServerConnection::handshake(
+        out, in, 456, {"foo", "bar", "xyzzy"});
+
+    clientThread.join();
+
+    EXPECT_EQ(clientResult, daemonResult);
+    EXPECT_EQ(std::get<0>(clientResult), 123);
+    EXPECT_EQ(std::get<1>(clientResult), std::set<WorkerProto::Feature>({"bar", "xyzzy"}));
 }
 
 /// Has to be a `BufferedSink` for handshake.
@@ -685,8 +713,8 @@ TEST_F(WorkerProtoTest, handshake_client_replay)
         NullBufferedSink nullSink;
 
         StringSource in { toClientLog };
-        auto clientResult = WorkerProto::BasicClientConnection::handshake(
-            nullSink, in, defaultVersion);
+        auto clientResult = std::get<0>(WorkerProto::BasicClientConnection::handshake(
+                nullSink, in, defaultVersion, {}));
 
         EXPECT_EQ(clientResult, defaultVersion);
     });
@@ -704,13 +732,13 @@ TEST_F(WorkerProtoTest, handshake_client_truncated_replay_throws)
             if (len < 8) {
                 EXPECT_THROW(
                     WorkerProto::BasicClientConnection::handshake(
-                        nullSink, in, defaultVersion),
+                        nullSink, in, defaultVersion, {}),
                     EndOfFile);
             } else {
                 // Not sure why cannot keep on checking for `EndOfFile`.
                 EXPECT_THROW(
                     WorkerProto::BasicClientConnection::handshake(
-                        nullSink, in, defaultVersion),
+                        nullSink, in, defaultVersion, {}),
                     Error);
             }
         }
@@ -733,17 +761,17 @@ TEST_F(WorkerProtoTest, handshake_client_corrupted_throws)
                 // magic bytes don't match
                 EXPECT_THROW(
                     WorkerProto::BasicClientConnection::handshake(
-                        nullSink, in, defaultVersion),
+                        nullSink, in, defaultVersion, {}),
                     Error);
             } else if (idx < 8 || idx >= 12) {
                 // Number out of bounds
                 EXPECT_THROW(
                     WorkerProto::BasicClientConnection::handshake(
-                        nullSink, in, defaultVersion),
+                        nullSink, in, defaultVersion, {}),
                     SerialisationError);
             } else {
-                auto ver = WorkerProto::BasicClientConnection::handshake(
-                    nullSink, in, defaultVersion);
+                auto ver = std::get<0>(WorkerProto::BasicClientConnection::handshake(
+                        nullSink, in, defaultVersion, {}));
                 // `std::min` of this and the other version saves us
                 EXPECT_EQ(ver, defaultVersion);
             }

@@ -3,6 +3,7 @@
 #include "command-installable-value.hh"
 #include "common-args.hh"
 #include "shared.hh"
+#include "signals.hh"
 #include "store-api.hh"
 #include "derivations.hh"
 #include "local-fs-store.hh"
@@ -24,7 +25,7 @@ std::string chrootHelperName = "__run_in_chroot";
 
 namespace nix {
 
-void runProgramInStore(ref<Store> store,
+void execProgramInStore(ref<Store> store,
     UseLookupPath useLookupPath,
     const std::string & program,
     const Strings & args,
@@ -127,7 +128,11 @@ struct CmdRun : InstallableValueCommand
         Strings allArgs{app.program};
         for (auto & i : args) allArgs.push_back(i);
 
-        runProgramInStore(store, UseLookupPath::DontUse, app.program, allArgs);
+        // Release our references to eval caches to ensure they are persisted to disk, because
+        // we are about to exec out of this process without running C++ destructors.
+        state->evalCaches.clear();
+
+        execProgramInStore(store, UseLookupPath::DontUse, app.program, allArgs);
     }
 };
 
@@ -172,6 +177,7 @@ void chrootHelper(int argc, char * * argv)
             throw SysError("mounting '%s' on '%s'", realStoreDir, storeDir);
 
         for (auto entry : std::filesystem::directory_iterator{"/"}) {
+            checkInterrupt();
             auto src = entry.path().string();
             Path dst = tmpDir + "/" + entry.path().filename().string();
             if (pathExists(dst)) continue;
