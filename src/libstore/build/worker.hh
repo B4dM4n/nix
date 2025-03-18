@@ -2,11 +2,10 @@
 ///@file
 
 #include "types.hh"
-#include "lock.hh"
 #include "store-api.hh"
-#include "derived-path-map.hh"
 #include "goal.hh"
 #include "realisation.hh"
+#include "muxable-pipe.hh"
 
 #include <future>
 #include <thread>
@@ -14,7 +13,6 @@
 namespace nix {
 
 /* Forward definition. */
-struct CreateDerivationAndRealiseGoal;
 struct DerivationGoal;
 struct PathSubstitutionGoal;
 class DrvOutputSubstitutionGoal;
@@ -33,35 +31,19 @@ class DrvOutputSubstitutionGoal;
  */
 GoalPtr upcast_goal(std::shared_ptr<PathSubstitutionGoal> subGoal);
 GoalPtr upcast_goal(std::shared_ptr<DrvOutputSubstitutionGoal> subGoal);
-GoalPtr upcast_goal(std::shared_ptr<DerivationGoal> subGoal);
 
 typedef std::chrono::time_point<std::chrono::steady_clock> steady_time_point;
 
 /**
- * The current implementation of impure derivations has
- * `DerivationGoal`s accumulate realisations from their waitees.
- * Unfortunately, `DerivationGoal`s don't directly depend on other
- * goals, but instead depend on `CreateDerivationAndRealiseGoal`s.
- *
- * We try not to share any of the details of any goal type with any
- * other, for sake of modularity and quicker rebuilds. This means we
- * cannot "just" downcast and fish out the field. So as an escape hatch,
- * we have made the function, written in `worker.cc` where all the goal
- * types are visible, and use it instead.
- */
-
-std::optional<std::pair<std::reference_wrapper<const DerivationGoal>, std::reference_wrapper<const SingleDerivedPath>>> tryGetConcreteDrvGoal(GoalPtr waitee);
-
-/**
  * A mapping used to remember for each child process to what goal it
- * belongs, and file descriptors for receiving log data and output
+ * belongs, and comm channels for receiving log data and output
  * path creation commands.
  */
 struct Child
 {
     WeakGoalPtr goal;
     Goal * goal2; // ugly hackery
-    std::set<int> fds;
+    std::set<MuxablePipePollState::CommChannel> channels;
     bool respectTimeouts;
     bool inBuildSlot;
     /**
@@ -71,11 +53,13 @@ struct Child
     steady_time_point timeStarted;
 };
 
+#ifndef _WIN32 // TODO Enable building on Windows
 /* Forward definition. */
 struct HookInstance;
+#endif
 
 /**
- * The worker class.
+ * Coordinates one or more realisations and their interdependencies.
  */
 class Worker
 {
@@ -108,20 +92,17 @@ private:
      * Number of build slots occupied.  This includes local builds but does not
      * include substitutions or remote builds via the build hook.
      */
-    unsigned int nrLocalBuilds;
+    size_t nrLocalBuilds;
 
     /**
      * Number of substitution slots occupied.
      */
-    unsigned int nrSubstitutions;
+    size_t nrSubstitutions;
 
     /**
      * Maps used to prevent multiple instantiations of a goal for the
      * same derivation / path.
      */
-
-    DerivedPathMap<std::weak_ptr<CreateDerivationAndRealiseGoal>> outerDerivationGoals;
-
     std::map<StorePath, std::weak_ptr<DerivationGoal>> derivationGoals;
     std::map<StorePath, std::weak_ptr<PathSubstitutionGoal>> substitutionGoals;
     std::map<DrvOutput, std::weak_ptr<DrvOutputSubstitutionGoal>> drvOutputSubstitutionGoals;
@@ -137,7 +118,7 @@ private:
     WeakGoals waitingForAWhile;
 
     /**
-     * Last time the goals in `waitingForAWhile` where woken up.
+     * Last time the goals in `waitingForAWhile` were woken up.
      */
     steady_time_point lastWokenUp;
 
@@ -173,10 +154,16 @@ public:
      */
     bool checkMismatch;
 
+#ifdef _WIN32
+    AutoCloseFD ioport;
+#endif
+
     Store & store;
     Store & evalStore;
 
+#ifndef _WIN32 // TODO Enable building on Windows
     std::unique_ptr<HookInstance> hook;
+#endif
 
     uint64_t expectedBuilds = 0;
     uint64_t doneBuilds = 0;
@@ -209,9 +196,6 @@ public:
      * @ref DerivationGoal "derivation goal"
      */
 private:
-    std::shared_ptr<CreateDerivationAndRealiseGoal> makeCreateDerivationAndRealiseGoal(
-        ref<SingleDerivedPath> drvPath,
-        const OutputsSpec & wantedOutputs, BuildMode buildMode = bmNormal);
     std::shared_ptr<DerivationGoal> makeDerivationGoalCommon(
         const StorePath & drvPath, const OutputsSpec & wantedOutputs,
         std::function<std::shared_ptr<DerivationGoal>()> mkDrvGoal);
@@ -224,7 +208,7 @@ public:
         const OutputsSpec & wantedOutputs, BuildMode buildMode = bmNormal);
 
     /**
-     * @ref SubstitutionGoal "substitution goal"
+     * @ref PathSubstitutionGoal "substitution goal"
      */
     std::shared_ptr<PathSubstitutionGoal> makePathSubstitutionGoal(const StorePath & storePath, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
     std::shared_ptr<DrvOutputSubstitutionGoal> makeDrvOutputSubstitutionGoal(const DrvOutput & id, RepairFlag repair = NoRepair, std::optional<ContentAddress> ca = std::nullopt);
@@ -251,18 +235,18 @@ public:
      * Return the number of local build processes currently running (but not
      * remote builds via the build hook).
      */
-    unsigned int getNrLocalBuilds();
+    size_t getNrLocalBuilds();
 
     /**
      * Return the number of substitution processes currently running.
      */
-    unsigned int getNrSubstitutions();
+    size_t getNrSubstitutions();
 
     /**
      * Registers a running child process.  `inBuildSlot` means that
      * the process counts towards the jobs limit.
      */
-    void childStarted(GoalPtr goal, const std::set<int> & fds,
+    void childStarted(GoalPtr goal, const std::set<MuxablePipePollState::CommChannel> & channels,
         bool inBuildSlot, bool respectTimeouts);
 
     /**

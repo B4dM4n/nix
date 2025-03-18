@@ -3,11 +3,6 @@
 
 #include "eval.hh"
 
-#if HAVE_BOEHMGC
-#define GC_INCLUDE_NEW
-#include <gc/gc_cpp.h>
-#endif
-
 namespace nix {
 
 struct AbstractNixRepl
@@ -24,17 +19,27 @@ struct AbstractNixRepl
 
     typedef std::vector<std::pair<Value*,std::string>> AnnotatedValues;
 
-    static std::unique_ptr<AbstractNixRepl> create(
-        const SearchPath & searchPath, nix::ref<Store> store, ref<EvalState> state,
-        std::function<AnnotatedValues()> getValues);
+    using RunNix = void(Path program, const Strings & args, const std::optional<std::string> & input);
 
-    static void runSimple(
+    /**
+     * @param runNix Function to run the nix CLI to support various
+     * `:<something>` commands. Optional; if not provided,
+     * everything else will still work fine, but those commands won't.
+     */
+    static std::unique_ptr<AbstractNixRepl> create(
+        const LookupPath & lookupPath,
+        nix::ref<Store> store,
+        ref<EvalState> state,
+        std::function<AnnotatedValues()> getValues,
+        RunNix * runNix = nullptr);
+
+    static ReplExitStatus runSimple(
         ref<EvalState> evalState,
         const ValMap & extraEnv);
 
     virtual void initEnv() = 0;
 
-    virtual void mainLoop() = 0;
+    virtual ReplExitStatus mainLoop() = 0;
 };
 
 }

@@ -1,4 +1,5 @@
 #pragma once
+///@file
 
 #include "types.hh"
 #include "derived-path.hh"
@@ -20,11 +21,8 @@ namespace nix {
  *
  * @param V A type to instantiate for each output. It should probably
  * should be an "optional" type so not every interior node has to have a
- * value. For example, the scheduler uses
- * `DerivedPathMap<std::weak_ptr<CreateDerivationAndRealiseGoal>>` to
- * remember which goals correspond to which outputs. `* const Something`
- * or `std::optional<Something>` would also be good choices for
- * "optional" types.
+ * value. `* const Something` or `std::optional<Something>` would be
+ * good choices for "optional" types.
  */
 template<typename V>
 struct DerivedPathMap {
@@ -49,7 +47,11 @@ struct DerivedPathMap {
          */
         Map childMap;
 
-        DECLARE_CMP(ChildNode);
+        bool operator == (const ChildNode &) const noexcept;
+
+        // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+        // decltype(std::declval<V>() <=> std::declval<V>())
+        // operator <=> (const ChildNode &) const noexcept;
     };
 
     /**
@@ -62,7 +64,10 @@ struct DerivedPathMap {
      */
     Map map;
 
-    DECLARE_CMP(DerivedPathMap);
+    bool operator == (const DerivedPathMap &) const = default;
+
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    // auto operator <=> (const DerivedPathMap &) const noexcept;
 
     /**
      * Find the node for `k`, creating it if needed.
@@ -85,14 +90,21 @@ struct DerivedPathMap {
     ChildNode * findSlot(const SingleDerivedPath & k);
 };
 
+template<>
+bool DerivedPathMap<std::set<std::string>>::ChildNode::operator == (
+    const DerivedPathMap<std::set<std::string>>::ChildNode &) const noexcept;
 
-DECLARE_CMP_EXT(
-    template<>,
-    DerivedPathMap<std::set<std::string>>::,
-    DerivedPathMap<std::set<std::string>>);
-DECLARE_CMP_EXT(
-    template<>,
-    DerivedPathMap<std::set<std::string>>::ChildNode::,
-    DerivedPathMap<std::set<std::string>>::ChildNode);
+// TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+#if 0
+template<>
+std::strong_ordering DerivedPathMap<std::set<std::string>>::ChildNode::operator <=> (
+    const DerivedPathMap<std::set<std::string>>::ChildNode &) const noexcept;
+
+template<>
+inline auto DerivedPathMap<std::set<std::string>>::operator <=> (const DerivedPathMap<std::set<std::string>> &) const noexcept = default;
+#endif
+
+extern template struct DerivedPathMap<std::set<std::string>>::ChildNode;
+extern template struct DerivedPathMap<std::set<std::string>>;
 
 }

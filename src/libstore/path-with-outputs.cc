@@ -1,11 +1,13 @@
+#include <regex>
+
 #include "path-with-outputs.hh"
 #include "store-api.hh"
+#include "strings.hh"
 
-#include <regex>
 
 namespace nix {
 
-std::string StorePathWithOutputs::to_string(const Store & store) const
+std::string StorePathWithOutputs::to_string(const StoreDirConfig & store) const
 {
     return outputs.empty()
         ? store.printStorePath(path)
@@ -35,6 +37,7 @@ DerivedPath StorePathWithOutputs::toDerivedPath() const
 std::vector<DerivedPath> toDerivedPaths(const std::vector<StorePathWithOutputs> ss)
 {
     std::vector<DerivedPath> reqs;
+    reqs.reserve(ss.size());
     for (auto & s : ss) reqs.push_back(s.toDerivedPath());
     return reqs;
 }
@@ -85,7 +88,7 @@ std::pair<std::string_view, StringSet> parsePathWithOutputs(std::string_view s)
 }
 
 
-StorePathWithOutputs parsePathWithOutputs(const Store & store, std::string_view pathWithOutputs)
+StorePathWithOutputs parsePathWithOutputs(const StoreDirConfig & store, std::string_view pathWithOutputs)
 {
     auto [path, outputs] = parsePathWithOutputs(pathWithOutputs);
     return StorePathWithOutputs { store.parseStorePath(path), std::move(outputs) };

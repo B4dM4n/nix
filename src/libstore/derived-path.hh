@@ -1,10 +1,10 @@
 #pragma once
 ///@file
 
-#include "util.hh"
 #include "path.hh"
 #include "outputs-spec.hh"
-#include "comparator.hh"
+#include "config.hh"
+#include "ref.hh"
 
 #include <variant>
 
@@ -12,6 +12,9 @@
 
 namespace nix {
 
+struct StoreDirConfig;
+
+// TODO stop needing this, `toJSON` below should be pure
 class Store;
 
 /**
@@ -24,11 +27,12 @@ class Store;
 struct DerivedPathOpaque {
     StorePath path;
 
-    std::string to_string(const Store & store) const;
-    static DerivedPathOpaque parse(const Store & store, std::string_view);
-    nlohmann::json toJSON(const Store & store) const;
+    std::string to_string(const StoreDirConfig & store) const;
+    static DerivedPathOpaque parse(const StoreDirConfig & store, std::string_view);
+    nlohmann::json toJSON(const StoreDirConfig & store) const;
 
-    GENERATE_CMP(DerivedPathOpaque, me->path);
+    bool operator == (const DerivedPathOpaque &) const = default;
+    auto operator <=> (const DerivedPathOpaque &) const = default;
 };
 
 struct SingleDerivedPath;
@@ -59,23 +63,24 @@ struct SingleDerivedPathBuilt {
     /**
      * Uses `^` as the separator
      */
-    std::string to_string(const Store & store) const;
+    std::string to_string(const StoreDirConfig & store) const;
     /**
      * Uses `!` as the separator
      */
-    std::string to_string_legacy(const Store & store) const;
+    std::string to_string_legacy(const StoreDirConfig & store) const;
     /**
      * The caller splits on the separator, so it works for both variants.
      *
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static SingleDerivedPathBuilt parse(
-        const Store & store, ref<SingleDerivedPath> drvPath,
+        const StoreDirConfig & store, ref<SingleDerivedPath> drvPath,
         OutputNameView outputs,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
     nlohmann::json toJSON(Store & store) const;
 
-    DECLARE_CMP(SingleDerivedPathBuilt);
+    bool operator == (const SingleDerivedPathBuilt &) const noexcept;
+    std::strong_ordering operator <=> (const SingleDerivedPathBuilt &) const noexcept;
 };
 
 using _SingleDerivedPathRaw = std::variant<
@@ -105,6 +110,9 @@ struct SingleDerivedPath : _SingleDerivedPathRaw {
         return static_cast<const Raw &>(*this);
     }
 
+    bool operator == (const SingleDerivedPath &) const = default;
+    auto operator <=> (const SingleDerivedPath &) const = default;
+
     /**
      * Get the store path this is ultimately derived from (by realising
      * and projecting outputs).
@@ -120,18 +128,18 @@ struct SingleDerivedPath : _SingleDerivedPathRaw {
     /**
      * Uses `^` as the separator
      */
-    std::string to_string(const Store & store) const;
+    std::string to_string(const StoreDirConfig & store) const;
     /**
      * Uses `!` as the separator
      */
-    std::string to_string_legacy(const Store & store) const;
+    std::string to_string_legacy(const StoreDirConfig & store) const;
     /**
      * Uses `^` as the separator
      *
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static SingleDerivedPath parse(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
     /**
@@ -140,7 +148,7 @@ struct SingleDerivedPath : _SingleDerivedPathRaw {
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static SingleDerivedPath parseLegacy(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
     nlohmann::json toJSON(Store & store) const;
@@ -182,23 +190,25 @@ struct DerivedPathBuilt {
     /**
      * Uses `^` as the separator
      */
-    std::string to_string(const Store & store) const;
+    std::string to_string(const StoreDirConfig & store) const;
     /**
      * Uses `!` as the separator
      */
-    std::string to_string_legacy(const Store & store) const;
+    std::string to_string_legacy(const StoreDirConfig & store) const;
     /**
      * The caller splits on the separator, so it works for both variants.
      *
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static DerivedPathBuilt parse(
-        const Store & store, ref<SingleDerivedPath>,
+        const StoreDirConfig & store, ref<SingleDerivedPath>,
         std::string_view,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
     nlohmann::json toJSON(Store & store) const;
 
-    DECLARE_CMP(DerivedPathBuilt);
+    bool operator == (const DerivedPathBuilt &) const noexcept;
+    // TODO libc++ 16 (used by darwin) missing `std::set::operator <=>`, can't do yet.
+    bool operator < (const DerivedPathBuilt &) const noexcept;
 };
 
 using _DerivedPathRaw = std::variant<
@@ -227,6 +237,10 @@ struct DerivedPath : _DerivedPathRaw {
         return static_cast<const Raw &>(*this);
     }
 
+    bool operator == (const DerivedPath &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::set::operator <=>`, can't do yet.
+    //auto operator <=> (const DerivedPath &) const = default;
+
     /**
      * Get the store path this is ultimately derived from (by realising
      * and projecting outputs).
@@ -242,18 +256,18 @@ struct DerivedPath : _DerivedPathRaw {
     /**
      * Uses `^` as the separator
      */
-    std::string to_string(const Store & store) const;
+    std::string to_string(const StoreDirConfig & store) const;
     /**
      * Uses `!` as the separator
      */
-    std::string to_string_legacy(const Store & store) const;
+    std::string to_string_legacy(const StoreDirConfig & store) const;
     /**
      * Uses `^` as the separator
      *
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static DerivedPath parse(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
     /**
@@ -262,7 +276,7 @@ struct DerivedPath : _DerivedPathRaw {
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static DerivedPath parseLegacy(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 

@@ -50,7 +50,7 @@ manual](https://nixos.org/manual/nix/stable/).
 
 > **Warning** \
 > Installables are part of the unstable
-> [`nix-command` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-nix-command),
+> [`nix-command` experimental feature](@docroot@/development/experimental-features.md#xp-feature-nix-command),
 > and subject to change without notice.
 
 Many `nix` subcommands operate on one or more *installables*.
@@ -59,9 +59,13 @@ These are command line arguments that represent something that can be realised i
 The following types of installable are supported by most commands:
 
 - [Flake output attribute](#flake-output-attribute) (experimental)
+  - This is the default
 - [Store path](#store-path)
+  - This is assumed if the argument is a Nix store path or a symlink to a Nix store path
 - [Nix file](#nix-file), optionally qualified by an attribute path
+  - Specified with `--file`/`-f`
 - [Nix expression](#nix-expression), optionally qualified by an attribute path
+  - Specified with `--expr`
 
 For most commands, if no installable is specified, `.` is assumed.
 That is, Nix will operate on the default flake output attribute of the flake in the current directory.
@@ -70,9 +74,9 @@ That is, Nix will operate on the default flake output attribute of the flake in 
 
 > **Warning** \
 > Flake output attribute installables depend on both the
-> [`flakes`](@docroot@/contributing/experimental-features.md#xp-feature-flakes)
+> [`flakes`](@docroot@/development/experimental-features.md#xp-feature-flakes)
 > and
-> [`nix-command`](@docroot@/contributing/experimental-features.md#xp-feature-nix-command)
+> [`nix-command`](@docroot@/development/experimental-features.md#xp-feature-nix-command)
 > experimental features, and subject to change without notice.
 
 Example: `nixpkgs#hello`
@@ -132,6 +136,8 @@ subcommands, these are `packages.`*system*,
 attributes `packages.x86_64-linux.hello`,
 `legacyPackages.x86_64-linux.hello` and `hello`.
 
+If *attrpath* begins with `.` then no prefixes or defaults are attempted. This allows the form *flakeref*[`#.`*attrpath*], such as `github:NixOS/nixpkgs#.lib.fakeSha256` to avoid a search of `packages.*system*.lib.fakeSha256`
+
 ### Store path
 
 Example: `/nix/store/v5sv61sszx301i0x6xysaqzla09nksnd-hello-2.10`
@@ -176,9 +182,10 @@ that contains programs, and a `dev` output that provides development
 artifacts like C/C++ header files. The outputs on which `nix` commands
 operate are determined as follows:
 
-* You can explicitly specify the desired outputs using the syntax
-  *installable*`^`*output1*`,`*...*`,`*outputN*. For example, you can
-  obtain the `dev` and `static` outputs of the `glibc` package:
+* You can explicitly specify the desired outputs using the syntax *installable*`^`*output1*`,`*...*`,`*outputN* — that is, a caret followed immediately by a comma-separated list of derivation outputs to select.
+  For installables specified as [Flake output attributes](#flake-output-attribute) or [Store paths](#store-path), the output is specified in the same argument:
+
+  For example, you can obtain the `dev` and `static` outputs of the `glibc` package:
 
   ```console
   # nix build 'nixpkgs#glibc^dev,static'
@@ -191,6 +198,19 @@ operate are determined as follows:
   ```console
   # nix build '/nix/store/gzaflydcr6sb3567hap9q6srzx8ggdgg-glibc-2.33-78.drv^dev,static'
   …
+  ```
+
+  For `--expr` and `-f`/`--file`, the derivation output is specified as part of the attribute path:
+
+  ```console
+  $ nix build -f '<nixpkgs>' 'glibc^dev,static'
+  $ nix build --impure --expr 'import <nixpkgs> { }' 'glibc^dev,static'
+  ```
+
+  This syntax is the same even if the actual attribute path is empty:
+
+  ```console
+  $ nix build --impure --expr 'let pkgs = import <nixpkgs> { }; in pkgs.glibc' '^dev,static'
   ```
 
 * You can also specify that *all* outputs should be used using the
@@ -227,13 +247,80 @@ operate are determined as follows:
   Note that a [store derivation] (given by its `.drv` file store path) doesn't have
   any attributes like `meta`, and thus this case doesn't apply to it.
 
-  [store derivation]: ../../glossary.md#gloss-store-derivation
+  [store derivation]: @docroot@/glossary.md#gloss-store-derivation
 
 * Otherwise, Nix will use all outputs of the derivation.
 
 # Nix stores
 
-Most `nix` subcommands operate on a *Nix store*. These are documented
-in [`nix help-stores`](./nix3-help-stores.md).
+Most `nix` subcommands operate on a *Nix store*.
+The various store types are documented in the
+[Store Types](@docroot@/store/types/index.md)
+section of the manual.
+
+The same information is also available from the [`nix help-stores`](./nix3-help-stores.md) command.
+
+# Shebang interpreter
+
+The `nix` command can be used as a `#!` interpreter.
+Arguments to Nix can be passed on subsequent lines in the script.
+
+Verbatim strings may be passed in double backtick (```` `` ````) quotes. <!-- that's markdown for two backticks in inline code. -->
+Sequences of _n_ backticks of 3 or longer are parsed as _n-1_ literal backticks.
+A single space before the closing ```` `` ```` is ignored if present.
+
+`--file` and `--expr` resolve relative paths based on the script location.
+
+Examples:
+
+```
+#!/usr/bin/env nix
+#! nix shell --file ``<nixpkgs>`` hello cowsay --command bash
+
+hello | cowsay
+```
+
+or with **flakes**:
+
+```
+#!/usr/bin/env nix
+#! nix shell nixpkgs#bash nixpkgs#hello nixpkgs#cowsay --command bash
+
+hello | cowsay
+```
+
+or with an **expression**:
+
+```bash
+#! /usr/bin/env nix
+#! nix shell --impure --expr ``
+#! nix with (import (builtins.getFlake "nixpkgs") {});
+#! nix terraform.withPlugins (plugins: [ plugins.openstack ])
+#! nix ``
+#! nix --command bash
+
+terraform "$@"
+```
+
+or with cascading interpreters. Note that the `#! nix` lines don't need to follow after the first line, to accommodate other interpreters.
+
+```
+#!/usr/bin/env nix
+//! ```cargo
+//! [dependencies]
+//! time = "0.1.25"
+//! ```
+/*
+#!nix shell nixpkgs#rustc nixpkgs#rust-script nixpkgs#cargo --command rust-script
+*/
+fn main() {
+    for argument in std::env::args().skip(1) {
+        println!("{}", argument);
+    };
+    println!("{}", std::env::var("HOME").expect(""));
+    println!("{}", time::now().rfc822z());
+}
+// vim: ft=rust
+```
 
 )""

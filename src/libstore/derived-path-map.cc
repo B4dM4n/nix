@@ -1,4 +1,5 @@
 #include "derived-path-map.hh"
+#include "util.hh"
 
 namespace nix {
 
@@ -51,22 +52,20 @@ typename DerivedPathMap<V>::ChildNode * DerivedPathMap<V>::findSlot(const Single
 
 // instantiations
 
-#include "create-derivation-and-realise-goal.hh"
 namespace nix {
 
-template struct DerivedPathMap<std::weak_ptr<CreateDerivationAndRealiseGoal>>;
+template<>
+bool DerivedPathMap<std::set<std::string>>::ChildNode::operator == (
+    const DerivedPathMap<std::set<std::string>>::ChildNode &) const noexcept = default;
 
-GENERATE_CMP_EXT(
-    template<>,
-    DerivedPathMap<std::set<std::string>>::ChildNode,
-    me->value,
-    me->childMap);
+// TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+#if 0
+template<>
+std::strong_ordering DerivedPathMap<std::set<std::string>>::ChildNode::operator <=> (
+    const DerivedPathMap<std::set<std::string>>::ChildNode &) const noexcept = default;
+#endif
 
-GENERATE_CMP_EXT(
-    template<>,
-    DerivedPathMap<std::set<std::string>>,
-    me->map);
-
+template struct DerivedPathMap<std::set<std::string>>::ChildNode;
 template struct DerivedPathMap<std::set<std::string>>;
 
 };

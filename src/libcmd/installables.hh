@@ -1,7 +1,6 @@
 #pragma once
 ///@file
 
-#include "util.hh"
 #include "path.hh"
 #include "outputs-spec.hh"
 #include "derived-path.hh"
@@ -13,7 +12,7 @@
 
 namespace nix {
 
-struct DrvInfo;
+struct PackageInfo;
 
 enum class Realise {
     /**
@@ -86,6 +85,8 @@ struct BuiltPathWithResult
     ref<ExtraPathInfo> info;
     std::optional<BuildResult> result;
 };
+
+BuiltPaths toBuiltPaths(const std::vector<BuiltPathWithResult> & builtPathsWithResult);
 
 /**
  * Shorthand, for less typing and helping us keep the choice of
@@ -166,7 +167,14 @@ struct Installable
         const Installables & installables,
         BuildMode bMode = bmNormal);
 
-    static std::set<StorePath> toStorePaths(
+    static std::set<StorePath> toStorePathSet(
+        ref<Store> evalStore,
+        ref<Store> store,
+        Realise mode,
+        OperateOn operateOn,
+        const Installables & installables);
+
+    static std::vector<StorePath> toStorePaths(
         ref<Store> evalStore,
         ref<Store> store,
         Realise mode,

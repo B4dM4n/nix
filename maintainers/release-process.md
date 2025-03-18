@@ -15,7 +15,7 @@ release:
 
 * (Optionally) Updated `fallback-paths.nix` in Nixpkgs
 
-* An updated manual on https://nixos.org/manual/nix/stable/
+* An updated manual on https://nix.dev/manual/nix/latest/
 
 ## Creating a new release from the `master` branch
 
@@ -24,34 +24,28 @@ release:
 * In a checkout of the Nix repo, make sure you're on `master` and run
   `git pull`.
 
-* Move the contents of `doc/manual/src/release-notes/rl-next.md`
-  (except the first line) to
-  `doc/manual/src/release-notes/rl-$VERSION.md` (where `$VERSION` is
-  the contents of `.version` *without* the patch level, e.g. `2.12`
-  rather than `2.12.0`).
-
-* Add a header to `doc/manual/src/release-notes/rl-$VERSION.md` like
-
-  ```
-  # Release 2.12 (2022-12-06)
-  ```
-
-* Proof-read / edit / rearrange the release notes. Breaking changes
-  and highlights should go to the top.
-
-* Add a link to the release notes to `doc/manual/src/SUMMARY.md.in`
-  (*not* `SUMMARY.md`), e.g.
-
-  ```
-  - [Release 2.12 (2022-12-06)](release-notes/rl-2.12.md)
-  ```
-
-* Run
+* Compile the release notes by running
 
   ```console
+  $ export VERSION=X.YY
   $ git checkout -b release-notes
-  $ git add doc/manual/src/release-notes/rl-$VERSION.md
-  $ git commit -a -m 'Release notes'
+  $ ./maintainers/release-notes
+  ```
+
+  where `X.YY` is *without* the patch level, e.g. `2.12` rather than ~~`2.12.0`~~.
+
+  A commit is created.
+
+* Proof-read / edit / rearrange the release notes if needed. Breaking changes
+  and highlights should go to the top.
+
+* Run `maintainers/release-credits` to make sure the credits script works
+  and produces a sensible output. Some emails might not automatically map to
+  a GitHub handle.
+
+* Push.
+
+  ```console
   $ git push --set-upstream $REMOTE release-notes
   ```
 
@@ -67,14 +61,16 @@ release:
   $ git checkout -b $VERSION-maintenance
   ```
 
-* Mark the release as stable:
+* Mark the release as official:
 
   ```console
-  $ git cherry-pick f673551e71942a52b6d7ae66af8b67140904a76a
+  $ sed -e 's/officialRelease = false;/officialRelease = true;/' -i flake.nix
   ```
 
   This removes the link to `rl-next.md` from the manual and sets
   `officialRelease = true` in `flake.nix`.
+
+* Commit
 
 * Push the release branch:
 
@@ -159,6 +155,30 @@ release:
 
 ## Creating a point release
 
+* Checkout.
+
+  ```console
+  $ git checkout XX.YY-maintenance
+  ```
+
+* Determine the next patch version.
+
+  ```console
+  $ export VERSION=XX.YY.ZZ
+  ```
+
+* Update release notes.
+
+  ```console
+  $ ./maintainers/release-notes
+  ```
+
+* Push.
+
+  ```console
+  $ git push
+  ```
+
 * Wait for the desired evaluation of the maintenance jobset to finish
   building.
 
@@ -174,8 +194,58 @@ release:
 
 * Bump the version number of the release branch as above (e.g. to
   `2.12.2`).
-  
+
 ## Recovering from mistakes
 
 `upload-release.pl` should be idempotent. For instance a wrong `IS_LATEST` value can be fixed that way, by running the script on the actual latest release.
 
+## Security releases
+
+> See also the instructions for [handling security reports](./security-reports.md).
+
+Once a security fix is ready for merging:
+
+1. Summarize *all* past communication in the report.
+
+1. Request a CVE in the [GitHub security advisory](https://github.com/NixOS/nix/security/advisories) for the security fix.
+
+1. Notify all collaborators on the advisory with a timeline for the release.
+
+1. Merge the fix. Publish the advisory.
+
+1. [Make point releases](#creating-point-releases) for all affected versions.
+
+1. Update the affected Nix releases in Nixpkgs to the patched version.
+
+   For each Nix release, change the `version = ` strings and run
+
+   ```shell-session
+   nix-build -A nixVersions.nix_<major>_<minor>
+   ```
+
+   to get the correct hash for the `hash =` field.
+
+1. Once the release is built by Hydra, update fallback paths.
+
+   For the Nix release `${version}` shipped with Nixpkgs, run:
+
+   ```shell-session
+   curl https://releases.nixos.org/nix/nix-${version}/fallback-paths.nix > nixos/modules/installer/tools/nix-fallback-paths.nix
+   ```
+
+   Starting with Nixpkgs 24.11, there is an automatic check that fallback paths with Nix binaries match the Nix release shipped with Nixpkgs.
+
+1. Backport the updates to the two most recent stable releases of Nixpkgs.
+
+   Add `backport release-<version>` labels, which will trigger GitHub Actions to attempt automatic backports.
+
+1. Once the pull request against `master` lands on `nixpkgs-unstable`, post a Discourse announcement with
+
+   - Links to the CVE and GitHub security advisory
+   - A description of the vulnerability and its fix
+   - Credits to the reporters of the vulnerability and contributors of the fix
+   - A list of affected and patched Nix releases
+   - Instructions for updating
+   - A link to the [pull request tracker](https://nixpk.gs/pr-tracker.html) to follow when the patched Nix versions will appear on the various release channels
+
+   Check [past announcements](https://discourse.nixos.org/search?expanded=true&q=Security%20fix%20in%3Atitle%20order%3Alatest_topic) for reference.

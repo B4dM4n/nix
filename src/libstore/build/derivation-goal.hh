@@ -2,7 +2,9 @@
 ///@file
 
 #include "parsed-derivations.hh"
-#include "lock.hh"
+#ifndef _WIN32
+#  include "user-lock.hh"
+#endif
 #include "outputs-spec.hh"
 #include "store-api.hh"
 #include "pathlocks.hh"
@@ -12,7 +14,9 @@ namespace nix {
 
 using std::map;
 
+#ifndef _WIN32 // TODO enable build hook on Windows
 struct HookInstance;
+#endif
 
 typedef enum {rpAccept, rpDecline, rpPostpone} HookReply;
 
@@ -52,10 +56,6 @@ struct InitialOutput {
 
 /**
  * A goal for building some or all of the outputs of a derivation.
- *
- * The derivation must already be present, either in the store in a drv
- * or in memory. If the derivation itself needs to be gotten first, a
- * `CreateDerivationAndRealiseGoal` goal must be used instead.
  */
 struct DerivationGoal : public Goal
 {
@@ -182,18 +182,17 @@ struct DerivationGoal : public Goal
 
     std::string currentHookLine;
 
+#ifndef _WIN32 // TODO enable build hook on Windows
     /**
      * The build hook.
      */
     std::unique_ptr<HookInstance> hook;
+#endif
 
     /**
      * The sort of derivation we are building.
      */
     std::optional<DerivationType> derivationType;
-
-    typedef void (DerivationGoal::*GoalState)();
-    GoalState state;
 
     BuildMode buildMode;
 
@@ -225,8 +224,6 @@ struct DerivationGoal : public Goal
 
     std::string key() override;
 
-    void work() override;
-
     /**
      * Add wanted outputs to an already existing derivation goal.
      */
@@ -235,17 +232,19 @@ struct DerivationGoal : public Goal
     /**
      * The states.
      */
-    void loadDerivation();
-    void haveDerivation();
-    void outputsSubstitutionTried();
-    void gaveUpOnSubstitution();
-    void closureRepaired();
-    void inputsRealised();
-    void tryToBuild();
-    virtual void tryLocalBuild();
-    void buildDone();
+    Co init() override;
+    Co getDerivation();
+    Co loadDerivation();
+    Co haveDerivation();
+    Co outputsSubstitutionTried();
+    Co gaveUpOnSubstitution();
+    Co closureRepaired();
+    Co inputsRealised();
+    Co tryToBuild();
+    virtual Co tryLocalBuild();
+    Co buildDone();
 
-    void resolvedFinished();
+    Co resolvedFinished();
 
     /**
      * Is the build hook willing to perform the build?
@@ -290,13 +289,13 @@ struct DerivationGoal : public Goal
     virtual void cleanupPostOutputsRegisteredModeCheck();
     virtual void cleanupPostOutputsRegisteredModeNonCheck();
 
-    virtual bool isReadDesc(int fd);
+    virtual bool isReadDesc(Descriptor fd);
 
     /**
      * Callback used by the worker to write to the log.
      */
-    void handleChildOutput(int fd, std::string_view data) override;
-    void handleEOF(int fd) override;
+    void handleChildOutput(Descriptor fd, std::string_view data) override;
+    void handleEOF(Descriptor fd) override;
     void flushLine();
 
     /**
@@ -326,11 +325,11 @@ struct DerivationGoal : public Goal
      */
     virtual void killChild();
 
-    void repairClosure();
+    Co repairClosure();
 
     void started();
 
-    void done(
+    Done done(
         BuildResult::Status status,
         SingleDrvOutputs builtOutputs = {},
         std::optional<Error> ex = {});

@@ -1,6 +1,8 @@
 #pragma once
 /**
- * @file Implementation of Profiles.
+ * @file
+ *
+ * Implementation of Profiles.
  *
  * See the manual for additional information.
  */
@@ -8,6 +10,7 @@
 #include "types.hh"
 #include "pathlocks.hh"
 
+#include <optional>
 #include <time.h>
 
 

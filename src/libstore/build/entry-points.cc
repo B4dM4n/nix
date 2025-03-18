@@ -1,8 +1,10 @@
 #include "worker.hh"
 #include "substitution-goal.hh"
-#include "create-derivation-and-realise-goal.hh"
-#include "derivation-goal.hh"
+#ifndef _WIN32 // TODO Enable building on Windows
+#  include "derivation-goal.hh"
+#endif
 #include "local-store.hh"
+#include "strings.hh"
 
 namespace nix {
 
@@ -26,15 +28,18 @@ void Store::buildPaths(const std::vector<DerivedPath> & reqs, BuildMode buildMod
                 ex = std::move(i->ex);
         }
         if (i->exitCode != Goal::ecSuccess) {
-            if (auto i2 = dynamic_cast<CreateDerivationAndRealiseGoal *>(i.get()))
-                failed.insert(i2->drvReq->to_string(*this));
-            else if (auto i2 = dynamic_cast<PathSubstitutionGoal *>(i.get()))
+#ifndef _WIN32 // TODO Enable building on Windows
+            if (auto i2 = dynamic_cast<DerivationGoal *>(i.get()))
+                failed.insert(printStorePath(i2->drvPath));
+            else
+#endif
+            if (auto i2 = dynamic_cast<PathSubstitutionGoal *>(i.get()))
                 failed.insert(printStorePath(i2->storePath));
         }
     }
 
     if (failed.size() == 1 && ex) {
-        ex->status = worker.failingExitStatus();
+        ex->withExitStatus(worker.failingExitStatus());
         throw std::move(*ex);
     } else if (!failed.empty()) {
         if (ex) logError(ex->info());
@@ -61,6 +66,7 @@ std::vector<KeyedBuildResult> Store::buildPathsWithResults(
     worker.run(goals);
 
     std::vector<KeyedBuildResult> results;
+    results.reserve(state.size());
 
     for (auto & [req, goalPtr] : state)
         results.emplace_back(KeyedBuildResult {
@@ -75,7 +81,12 @@ BuildResult Store::buildDerivation(const StorePath & drvPath, const BasicDerivat
     BuildMode buildMode)
 {
     Worker worker(*this, *this);
+#ifndef _WIN32 // TODO Enable building on Windows
     auto goal = worker.makeBasicDerivationGoal(drvPath, drv, OutputsSpec::All {}, buildMode);
+#else
+    std::shared_ptr<Goal> goal;
+    throw UnimplementedError("Building derivations not yet implemented on windows.");
+#endif
 
     try {
         worker.run(Goals{goal});
@@ -105,7 +116,7 @@ void Store::ensurePath(const StorePath & path)
 
     if (goal->exitCode != Goal::ecSuccess) {
         if (goal->ex) {
-            goal->ex->status = worker.failingExitStatus();
+            goal->ex->withExitStatus(worker.failingExitStatus());
             throw std::move(*goal->ex);
         } else
             throw Error(worker.failingExitStatus(), "path '%s' does not exist and cannot be created", printStorePath(path));

@@ -1,9 +1,9 @@
 #include "primops.hh"
 #include "eval-inline.hh"
 
-#include "../../toml11/toml.hpp"
-
 #include <sstream>
+
+#include <toml.hpp>
 
 namespace nix {
 
@@ -28,8 +28,10 @@ static void prim_fromTOML(EvalState & state, const PosIdx pos, Value * * args, V
 
                     auto attrs = state.buildBindings(size);
 
-                    for(auto & elem : table)
+                    for(auto & elem : table) {
+                        forceNoNullByte(elem.first);
                         visit(attrs.alloc(elem.first), elem.second);
+                    }
 
                     v.mkAttrs(attrs);
                 }
@@ -38,10 +40,10 @@ static void prim_fromTOML(EvalState & state, const PosIdx pos, Value * * args, V
                 {
                     auto array = toml::get<std::vector<toml::value>>(t);
 
-                    size_t size = array.size();
-                    state.mkList(v, size);
-                    for (size_t i = 0; i < size; ++i)
-                        visit(*(v.listElems()[i] = state.allocValue()), array[i]);
+                    auto list = state.buildList(array.size());
+                    for (const auto & [n, v] : enumerate(list))
+                        visit(*(v = state.allocValue()), array[n]);
+                    v.mkList(list);
                 }
                 break;;
             case toml::value_t::boolean:
@@ -54,7 +56,11 @@ static void prim_fromTOML(EvalState & state, const PosIdx pos, Value * * args, V
                 v.mkFloat(toml::get<NixFloat>(t));
                 break;;
             case toml::value_t::string:
-                v.mkString(toml::get<std::string>(t));
+                {
+                    auto s = toml::get<std::string_view>(t);
+                    forceNoNullByte(s);
+                    v.mkString(s);
+                }
                 break;;
             case toml::value_t::local_datetime:
             case toml::value_t::offset_datetime:
@@ -66,7 +72,9 @@ static void prim_fromTOML(EvalState & state, const PosIdx pos, Value * * args, V
                         attrs.alloc("_type").mkString("timestamp");
                         std::ostringstream s;
                         s << t;
-                        attrs.alloc("value").mkString(s.str());
+                        auto str = toView(s);
+                        forceNoNullByte(str);
+                        attrs.alloc("value").mkString(str);
                         v.mkAttrs(attrs);
                     } else {
                         throw std::runtime_error("Dates and times are not supported");
@@ -83,10 +91,7 @@ static void prim_fromTOML(EvalState & state, const PosIdx pos, Value * * args, V
     try {
         visit(val, toml::parse(tomlStream, "fromTOML" /* the "filename" */));
     } catch (std::exception & e) { // TODO: toml::syntax_error
-        throw EvalError({
-            .msg = hintfmt("while parsing a TOML string: %s", e.what()),
-            .errPos = state.positions[pos]
-        });
+        state.error<EvalError>("while parsing TOML: %s", e.what()).atPos(pos).debugThrow();
     }
 }
 

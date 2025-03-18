@@ -1,7 +1,6 @@
 #pragma once
 ///@file
 
-#include "types.hh"
 #include "error.hh"
 #include "config.hh"
 
@@ -23,6 +22,7 @@ typedef enum {
     actQueryPathInfo = 109,
     actPostBuildHook = 110,
     actBuildWaiting = 111,
+    actFetchTree = 112,
 } ActivityType;
 
 typedef enum {
@@ -34,6 +34,7 @@ typedef enum {
     resProgress = 105,
     resSetExpected = 106,
     resPostBuildLogLine = 107,
+    resFetchStatus = 108,
 } ResultType;
 
 typedef uint64_t ActivityId;
@@ -118,6 +119,17 @@ public:
     { }
 };
 
+/**
+ * A variadic template that does nothing.
+ *
+ * Useful to call a function with each argument in a parameter pack.
+ */
+struct nop
+{
+    template<typename... T> nop(T...)
+    { }
+};
+
 ActivityId getCurActivity();
 void setCurActivity(const ActivityId activityId);
 
@@ -173,14 +185,25 @@ Logger * makeSimpleLogger(bool printBuildLogs = true);
 
 Logger * makeJSONLogger(Logger & prevLogger);
 
-std::optional<nlohmann::json> parseJSONMessage(const std::string & msg);
+/**
+ * @param source A noun phrase describing the source of the message, e.g. "the builder".
+ */
+std::optional<nlohmann::json> parseJSONMessage(const std::string & msg, std::string_view source);
 
+/**
+ * @param source A noun phrase describing the source of the message, e.g. "the builder".
+ */
 bool handleJSONLogMessage(nlohmann::json & json,
     const Activity & act, std::map<ActivityId, Activity> & activities,
+    std::string_view source,
     bool trusted);
 
+/**
+ * @param source A noun phrase describing the source of the message, e.g. "the builder".
+ */
 bool handleJSONLogMessage(const std::string & msg,
     const Activity & act, std::map<ActivityId, Activity> & activities,
+    std::string_view source,
     bool trusted);
 
 /**

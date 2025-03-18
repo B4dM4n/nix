@@ -42,7 +42,8 @@ struct SQLite
     SQLite(const Path & path, SQLiteOpenMode mode = SQLiteOpenMode::Normal);
     SQLite(const SQLite & from) = delete;
     SQLite& operator = (const SQLite & from) = delete;
-    SQLite& operator = (SQLite && from) { db = from.db; from.db = 0; return *this; }
+    // NOTE: This is noexcept since we are only copying and assigning raw pointers.
+    SQLite& operator = (SQLite && from) noexcept { db = from.db; from.db = 0; return *this; }
     ~SQLite();
     operator sqlite3 * () { return db; }
 
@@ -142,19 +143,19 @@ struct SQLiteError : Error
 
     template<typename... Args>
     [[noreturn]] static void throw_(sqlite3 * db, const std::string & fs, const Args & ... args) {
-        throw_(db, hintfmt(fs, args...));
+        throw_(db, HintFmt(fs, args...));
     }
 
-    SQLiteError(const char *path, const char *errMsg, int errNo, int extendedErrNo, int offset, hintformat && hf);
+    SQLiteError(const char *path, const char *errMsg, int errNo, int extendedErrNo, int offset, HintFmt && hf);
 
 protected:
 
     template<typename... Args>
     SQLiteError(const char *path, const char *errMsg, int errNo, int extendedErrNo, int offset, const std::string & fs, const Args & ... args)
-      : SQLiteError(path, errNo, extendedErrNo, offset, hintfmt(fs, args...))
+      : SQLiteError(path, errMsg, errNo, extendedErrNo, offset, HintFmt(fs, args...))
     { }
 
-    [[noreturn]] static void throw_(sqlite3 * db, hintformat && hf);
+    [[noreturn]] static void throw_(sqlite3 * db, HintFmt && hf);
 
 };
 

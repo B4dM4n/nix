@@ -1,8 +1,14 @@
 #include "logging.hh"
+#include "file-descriptor.hh"
+#include "environment-variables.hh"
+#include "terminal.hh"
 #include "util.hh"
-#include "config.hh"
+#include "config-global.hh"
+#include "source-path.hh"
+#include "position.hh"
 
 #include <atomic>
+#include <sstream>
 #include <nlohmann/json.hpp>
 #include <iostream>
 
@@ -32,8 +38,9 @@ void Logger::warn(const std::string & msg)
 
 void Logger::writeToStdout(std::string_view s)
 {
-    writeFull(STDOUT_FILENO, s);
-    writeFull(STDOUT_FILENO, "\n");
+    Descriptor standard_out = getStandardOutput();
+    writeFull(standard_out, s);
+    writeFull(standard_out, "\n");
 }
 
 class SimpleLogger : public Logger
@@ -47,7 +54,7 @@ public:
         : printBuildLogs(printBuildLogs)
     {
         systemd = getEnv("IN_SYSTEMD") == "1";
-        tty = shouldANSI();
+        tty = isTTY();
     }
 
     bool isVerbose() override {
@@ -78,10 +85,10 @@ public:
 
     void logEI(const ErrorInfo & ei) override
     {
-        std::stringstream oss;
+        std::ostringstream oss;
         showErrorInfo(oss, ei, loggerSettings.showTrace.get());
 
-        log(ei.level, oss.str());
+        log(ei.level, toView(oss));
     }
 
     void startActivity(ActivityId act, Verbosity lvl, ActivityType type,
@@ -110,8 +117,10 @@ Verbosity verbosity = lvlInfo;
 void writeToStderr(std::string_view s)
 {
     try {
-        writeFull(STDERR_FILENO, s, false);
-    } catch (SysError & e) {
+        writeFull(
+            getStandardError(),
+            s, false);
+    } catch (SystemError & e) {
         /* Ignore failing writes to stderr.  We need to ignore write
            errors to ensure that cleanup code that logs to stderr runs
            to completion if the other side of stderr has been closed
@@ -126,20 +135,29 @@ Logger * makeSimpleLogger(bool printBuildLogs)
 
 std::atomic<uint64_t> nextId{0};
 
+static uint64_t getPid()
+{
+#ifndef _WIN32
+    return getpid();
+#else
+    return GetCurrentProcessId();
+#endif
+}
+
 Activity::Activity(Logger & logger, Verbosity lvl, ActivityType type,
     const std::string & s, const Logger::Fields & fields, ActivityId parent)
-    : logger(logger), id(nextId++ + (((uint64_t) getpid()) << 32))
+    : logger(logger), id(nextId++ + (((uint64_t) getPid()) << 32))
 {
     logger.startActivity(id, lvl, type, s, fields, parent);
 }
 
-void to_json(nlohmann::json & json, std::shared_ptr<AbstractPos> pos)
+void to_json(nlohmann::json & json, std::shared_ptr<Pos> pos)
 {
     if (pos) {
         json["line"] = pos->line;
         json["column"] = pos->column;
         std::ostringstream str;
-        pos->print(str);
+        pos->print(str, true);
         json["file"] = str.str();
     } else {
         json["line"] = nullptr;
@@ -167,7 +185,7 @@ struct JSONLogger : Logger {
             else if (f.type == Logger::Field::tString)
                 arr.push_back(f.s);
             else
-                abort();
+                unreachable();
     }
 
     void write(const nlohmann::json & json)
@@ -194,7 +212,7 @@ struct JSONLogger : Logger {
         json["level"] = ei.level;
         json["msg"] = oss.str();
         json["raw_msg"] = ei.msg.str();
-        to_json(json, ei.errPos);
+        to_json(json, ei.pos);
 
         if (loggerSettings.showTrace.get() && !ei.traces.empty()) {
             nlohmann::json traces = nlohmann::json::array();
@@ -262,61 +280,72 @@ static Logger::Fields getFields(nlohmann::json & json)
     return fields;
 }
 
-std::optional<nlohmann::json> parseJSONMessage(const std::string & msg)
+std::optional<nlohmann::json> parseJSONMessage(const std::string & msg, std::string_view source)
 {
     if (!hasPrefix(msg, "@nix ")) return std::nullopt;
     try {
         return nlohmann::json::parse(std::string(msg, 5));
     } catch (std::exception & e) {
-        printError("bad JSON log message from builder: %s", e.what());
+        printError("bad JSON log message from %s: %s",
+            Uncolored(source),
+            e.what());
     }
     return std::nullopt;
 }
 
 bool handleJSONLogMessage(nlohmann::json & json,
     const Activity & act, std::map<ActivityId, Activity> & activities,
-    bool trusted)
+    std::string_view source, bool trusted)
 {
-    std::string action = json["action"];
+    try {
+        std::string action = json["action"];
 
-    if (action == "start") {
-        auto type = (ActivityType) json["type"];
-        if (trusted || type == actFileTransfer)
-            activities.emplace(std::piecewise_construct,
-                std::forward_as_tuple(json["id"]),
-                std::forward_as_tuple(*logger, (Verbosity) json["level"], type,
-                    json["text"], getFields(json["fields"]), act.id));
+        if (action == "start") {
+            auto type = (ActivityType) json["type"];
+            if (trusted || type == actFileTransfer)
+                activities.emplace(std::piecewise_construct,
+                    std::forward_as_tuple(json["id"]),
+                    std::forward_as_tuple(*logger, (Verbosity) json["level"], type,
+                        json["text"], getFields(json["fields"]), act.id));
+        }
+
+        else if (action == "stop")
+            activities.erase((ActivityId) json["id"]);
+
+        else if (action == "result") {
+            auto i = activities.find((ActivityId) json["id"]);
+            if (i != activities.end())
+                i->second.result((ResultType) json["type"], getFields(json["fields"]));
+        }
+
+        else if (action == "setPhase") {
+            std::string phase = json["phase"];
+            act.result(resSetPhase, phase);
+        }
+
+        else if (action == "msg") {
+            std::string msg = json["msg"];
+            logger->log((Verbosity) json["level"], msg);
+        }
+
+        return true;
+    } catch (const nlohmann::json::exception &e) {
+        warn(
+            "Unable to handle a JSON message from %s: %s",
+            Uncolored(source),
+            e.what()
+        );
+        return false;
     }
-
-    else if (action == "stop")
-        activities.erase((ActivityId) json["id"]);
-
-    else if (action == "result") {
-        auto i = activities.find((ActivityId) json["id"]);
-        if (i != activities.end())
-            i->second.result((ResultType) json["type"], getFields(json["fields"]));
-    }
-
-    else if (action == "setPhase") {
-        std::string phase = json["phase"];
-        act.result(resSetPhase, phase);
-    }
-
-    else if (action == "msg") {
-        std::string msg = json["msg"];
-        logger->log((Verbosity) json["level"], msg);
-    }
-
-    return true;
 }
 
 bool handleJSONLogMessage(const std::string & msg,
-    const Activity & act, std::map<ActivityId, Activity> & activities, bool trusted)
+    const Activity & act, std::map<ActivityId, Activity> & activities, std::string_view source, bool trusted)
 {
-    auto json = parseJSONMessage(msg);
+    auto json = parseJSONMessage(msg, source);
     if (!json) return false;
 
-    return handleJSONLogMessage(*json, act, activities, trusted);
+    return handleJSONLogMessage(*json, act, activities, source, trusted);
 }
 
 Activity::~Activity()
@@ -324,7 +353,7 @@ Activity::~Activity()
     try {
         logger.stopActivity(id);
     } catch (...) {
-        ignoreException();
+        ignoreExceptionInDestructor();
     }
 }
 
