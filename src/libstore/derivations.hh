@@ -8,16 +8,14 @@
 #include "repair-flag.hh"
 #include "derived-path-map.hh"
 #include "sync.hh"
-#include "comparator.hh"
 #include "variant-wrapper.hh"
 
 #include <map>
 #include <variant>
 
-
 namespace nix {
 
-class Store;
+struct StoreDirConfig;
 
 /* Abstract syntax of derivations. */
 
@@ -33,7 +31,8 @@ struct DerivationOutput
     {
         StorePath path;
 
-        GENERATE_CMP(InputAddressed, me->path);
+        bool operator == (const InputAddressed &) const = default;
+        auto operator <=> (const InputAddressed &) const = default;
     };
 
     /**
@@ -55,9 +54,10 @@ struct DerivationOutput
          * @param drvName The name of the derivation this is an output of, without the `.drv`.
          * @param outputName The name of this output.
          */
-        StorePath path(const Store & store, std::string_view drvName, OutputNameView outputName) const;
+        StorePath path(const StoreDirConfig & store, std::string_view drvName, OutputNameView outputName) const;
 
-        GENERATE_CMP(CAFixed, me->ca);
+        bool operator == (const CAFixed &) const = default;
+        auto operator <=> (const CAFixed &) const = default;
     };
 
     /**
@@ -75,9 +75,10 @@ struct DerivationOutput
         /**
          * How the serialization will be hashed
          */
-        HashType hashType;
+        HashAlgorithm hashAlgo;
 
-        GENERATE_CMP(CAFloating, me->method, me->hashType);
+        bool operator == (const CAFloating &) const = default;
+        auto operator <=> (const CAFloating &) const = default;
     };
 
     /**
@@ -85,7 +86,8 @@ struct DerivationOutput
      * isn't known yet.
      */
     struct Deferred {
-        GENERATE_CMP(Deferred);
+        bool operator == (const Deferred &) const = default;
+        auto operator <=> (const Deferred &) const = default;
     };
 
     /**
@@ -102,9 +104,10 @@ struct DerivationOutput
         /**
          * How the serialization will be hashed
          */
-        HashType hashType;
+        HashAlgorithm hashAlgo;
 
-        GENERATE_CMP(Impure, me->method, me->hashType);
+        bool operator == (const Impure &) const = default;
+        auto operator <=> (const Impure &) const = default;
     };
 
     typedef std::variant<
@@ -117,7 +120,8 @@ struct DerivationOutput
 
     Raw raw;
 
-    GENERATE_CMP(DerivationOutput, me->raw);
+    bool operator == (const DerivationOutput &) const = default;
+    auto operator <=> (const DerivationOutput &) const = default;
 
     MAKE_WRAPPER_CONSTRUCTOR(DerivationOutput);
 
@@ -132,17 +136,17 @@ struct DerivationOutput
      * the safer interface provided by
      * BasicDerivation::outputsAndOptPaths
      */
-    std::optional<StorePath> path(const Store & store, std::string_view drvName, OutputNameView outputName) const;
+    std::optional<StorePath> path(const StoreDirConfig & store, std::string_view drvName, OutputNameView outputName) const;
 
     nlohmann::json toJSON(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view drvName,
         OutputNameView outputName) const;
     /**
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */
     static DerivationOutput fromJSON(
-        const Store & store,
+        const StoreDirConfig & store,
         std::string_view drvName,
         OutputNameView outputName,
         const nlohmann::json & json,
@@ -178,7 +182,8 @@ struct DerivationType {
         */
         bool deferred;
 
-        GENERATE_CMP(InputAddressed, me->deferred);
+        bool operator == (const InputAddressed &) const = default;
+        auto operator <=> (const InputAddressed &) const = default;
     };
 
     /**
@@ -202,7 +207,8 @@ struct DerivationType {
          */
         bool fixed;
 
-        GENERATE_CMP(ContentAddressed, me->sandboxed, me->fixed);
+        bool operator == (const ContentAddressed &) const = default;
+        auto operator <=> (const ContentAddressed &) const = default;
     };
 
     /**
@@ -212,7 +218,8 @@ struct DerivationType {
      * type, but has some restrictions on its usage.
      */
     struct Impure {
-        GENERATE_CMP(Impure);
+        bool operator == (const Impure &) const = default;
+        auto operator <=> (const Impure &) const = default;
     };
 
     typedef std::variant<
@@ -223,7 +230,8 @@ struct DerivationType {
 
     Raw raw;
 
-    GENERATE_CMP(DerivationType, me->raw);
+    bool operator == (const DerivationType &) const = default;
+    auto operator <=> (const DerivationType &) const = default;
 
     MAKE_WRAPPER_CONSTRUCTOR(DerivationType);
 
@@ -253,12 +261,17 @@ struct DerivationType {
     bool isSandboxed() const;
 
     /**
-     * Whether the derivation is expected to produce the same result
-     * every time, and therefore it only needs to be built once. This is
-     * only false for derivations that have the attribute '__impure =
+     * Whether the derivation is expected to produce a different result
+     * every time, and therefore it needs to be rebuilt every time. This is
+     * only true for derivations that have the attribute '__impure =
      * true'.
+     *
+     * Non-impure derivations can still behave impurely, to the degree permitted
+     * by the sandbox. Hence why this method isn't `isPure`: impure derivations
+     * are not the negation of pure derivations. Purity can not be ascertained
+     * except by rather heavy tools.
      */
-    bool isPure() const;
+    bool isImpure() const;
 
     /**
      * Does the derivation knows its own output paths?
@@ -285,6 +298,10 @@ struct BasicDerivation
     std::string name;
 
     BasicDerivation() = default;
+    BasicDerivation(BasicDerivation &&) = default;
+    BasicDerivation(const BasicDerivation &) = default;
+    BasicDerivation& operator=(BasicDerivation &&) = default;
+    BasicDerivation& operator=(const BasicDerivation &) = default;
     virtual ~BasicDerivation() { };
 
     bool isBuiltin() const;
@@ -304,19 +321,22 @@ struct BasicDerivation
      * augmented with knowledge of the Store paths they would be written
      * into.
      */
-    DerivationOutputsAndOptPaths outputsAndOptPaths(const Store & store) const;
+    DerivationOutputsAndOptPaths outputsAndOptPaths(const StoreDirConfig & store) const;
 
     static std::string_view nameFromPath(const StorePath & storePath);
 
-    GENERATE_CMP(BasicDerivation,
-        me->outputs,
-        me->inputSrcs,
-        me->platform,
-        me->builder,
-        me->args,
-        me->env,
-        me->name);
+    /**
+     * Apply string rewrites to the `env`, `args` and `builder`
+     * fields.
+     */
+    void applyRewrites(const StringMap & rewrites);
+
+    bool operator == (const BasicDerivation &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=> (const BasicDerivation &) const = default;
 };
+
+class Store;
 
 struct Derivation : BasicDerivation
 {
@@ -328,7 +348,7 @@ struct Derivation : BasicDerivation
     /**
      * Print a derivation.
      */
-    std::string unparse(const Store & store, bool maskOutputs,
+    std::string unparse(const StoreDirConfig & store, bool maskOutputs,
         DerivedPathMap<StringSet>::ChildNode::Map * actualInputs = nullptr) const;
 
     /**
@@ -340,7 +360,7 @@ struct Derivation : BasicDerivation
      * 2. Input placeholders are replaced with realized input store
      *    paths.
      */
-    std::optional<BasicDerivation> tryResolve(Store & store) const;
+    std::optional<BasicDerivation> tryResolve(Store & store, Store * evalStore = nullptr) const;
 
     /**
      * Like the above, but instead of querying the Nix database for
@@ -365,15 +385,15 @@ struct Derivation : BasicDerivation
     Derivation(const BasicDerivation & bd) : BasicDerivation(bd) { }
     Derivation(BasicDerivation && bd) : BasicDerivation(std::move(bd)) { }
 
-    nlohmann::json toJSON(const Store & store) const;
+    nlohmann::json toJSON(const StoreDirConfig & store) const;
     static Derivation fromJSON(
-        const Store & store,
+        const StoreDirConfig & store,
         const nlohmann::json & json,
         const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
-    GENERATE_CMP(Derivation,
-        static_cast<const BasicDerivation &>(*me),
-        me->inputDrvs);
+    bool operator == (const Derivation &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=> (const Derivation &) const = default;
 };
 
 
@@ -391,7 +411,7 @@ StorePath writeDerivation(Store & store,
  * Read a derivation from a file.
  */
 Derivation parseDerivation(
-    const Store & store,
+    const StoreDirConfig & store,
     std::string && s,
     std::string_view name,
     const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
@@ -493,8 +513,8 @@ extern Sync<DrvHashes> drvHashes;
 struct Source;
 struct Sink;
 
-Source & readDerivation(Source & in, const Store & store, BasicDerivation & drv, std::string_view name);
-void writeDerivation(Sink & out, const Store & store, const BasicDerivation & drv);
+Source & readDerivation(Source & in, const StoreDirConfig & store, BasicDerivation & drv, std::string_view name);
+void writeDerivation(Sink & out, const StoreDirConfig & store, const BasicDerivation & drv);
 
 /**
  * This creates an opaque and almost certainly unique string

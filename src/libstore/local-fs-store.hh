@@ -11,6 +11,15 @@ struct LocalFSStoreConfig : virtual StoreConfig
 {
     using StoreConfig::StoreConfig;
 
+    /**
+     * Used to override the `root` settings. Can't be done via modifying
+     * `params` reliably because this parameter is unused except for
+     * passing to base class constructors.
+     *
+     * @todo Make this less error-prone with new store settings system.
+     */
+    LocalFSStoreConfig(PathView path, const Params & params);
+
     const OptionalPathSetting rootDir{this, std::nullopt,
         "root",
         "Directory prefixed to all other paths."};
@@ -43,7 +52,7 @@ public:
     LocalFSStore(const Params & params);
 
     void narFromPath(const StorePath & path, Sink & sink) override;
-    ref<SourceAccessor> getFSAccessor(bool requireValidPath) override;
+    ref<SourceAccessor> getFSAccessor(bool requireValidPath = true) override;
 
     /**
      * Creates symlink from the `gcRoot` to the `storePath` and

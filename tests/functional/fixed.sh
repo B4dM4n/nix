@@ -1,4 +1,8 @@
+#!/usr/bin/env bash
+
 source common.sh
+
+TODO_NixOS
 
 clearStore
 
@@ -25,6 +29,11 @@ nix-build fixed.nix -A good2 --no-out-link
 
 echo 'testing reallyBad...'
 nix-instantiate fixed.nix -A reallyBad && fail "should fail"
+
+if isDaemonNewer "2.20pre20240108"; then
+    echo 'testing fixed with references...'
+    expectStderr 1 nix-build fixed.nix -A badReferences | grepQuiet "not allowed to refer to other store paths"
+fi
 
 # While we're at it, check attribute selection a bit more.
 echo 'testing attribute selection...'
@@ -56,3 +65,7 @@ out3=$(nix-store --add-fixed --recursive sha256 $TEST_ROOT/fixed)
 
 out4=$(nix-store --print-fixed-path --recursive sha256 "1ixr6yd3297ciyp9im522dfxpqbkhcw0pylkb2aab915278fqaik" fixed)
 [ "$out" = "$out4" ]
+
+# Can use `outputHashMode = "nar";` instead of `"recursive"` now.
+clearStore
+nix-build fixed.nix -A nar-not-recursive --no-out-link

@@ -1,6 +1,10 @@
+#!/usr/bin/env bash
+
 source common.sh
 
 needLocalStore "“min-free” and “max-free” are daemon options"
+
+TODO_NixOS
 
 clearStore
 
@@ -19,7 +23,7 @@ fifoLock=$TEST_ROOT/fifoLock
 mkfifo "$fifoLock"
 
 expr=$(cat <<EOF
-with import ./config.nix; mkDerivation {
+with import ${config_nix}; mkDerivation {
   name = "gc-A";
   buildCommand = ''
     set -x
@@ -47,7 +51,7 @@ EOF
 )
 
 expr2=$(cat <<EOF
-with import ./config.nix; mkDerivation {
+with import ${config_nix}; mkDerivation {
   name = "gc-B";
   buildCommand = ''
     set -x
@@ -62,11 +66,11 @@ EOF
 )
 
 nix build --impure -v -o $TEST_ROOT/result-A -L --expr "$expr" \
-    --min-free 1000 --max-free 2000 --min-free-check-interval 1 &
+    --min-free 1K --max-free 2K --min-free-check-interval 1 &
 pid1=$!
 
 nix build --impure -v -o $TEST_ROOT/result-B -L --expr "$expr2" \
-    --min-free 1000 --max-free 2000 --min-free-check-interval 1 &
+    --min-free 1K --max-free 2K --min-free-check-interval 1 &
 pid2=$!
 
 # Once the first build is done, unblock the second one.

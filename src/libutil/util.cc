@@ -1,12 +1,20 @@
 #include "util.hh"
 #include "fmt.hh"
+#include "file-path.hh"
+#include "signals.hh"
 
 #include <array>
 #include <cctype>
 #include <iostream>
-#include <grp.h>
 #include <regex>
 
+#include <sodium.h>
+#include <boost/lexical_cast.hpp>
+#include <stdint.h>
+
+#ifdef NDEBUG
+#error "Nix may not be built with assertions disabled (i.e. with -DNDEBUG)."
+#endif
 
 namespace nix {
 
@@ -19,7 +27,7 @@ void initLibUtil() {
     // When exception handling fails, the message tends to be printed by the
     // C++ runtime, followed by an abort.
     // For example on macOS we might see an error such as
-    // libc++abi: terminating with uncaught exception of type nix::SysError: error: C++ exception handling is broken. This would appear to be a problem with the way Nix was compiled and/or linked and/or loaded.
+    // libc++abi: terminating with uncaught exception of type nix::SystemError: error: C++ exception handling is broken. This would appear to be a problem with the way Nix was compiled and/or linked and/or loaded.
     bool caught = false;
     try {
         throwExceptionSelfCheck();
@@ -28,6 +36,9 @@ void initLibUtil() {
     }
     // This is not actually the main point of this check, but let's make sure anyway:
     assert(caught);
+
+    if (sodium_init() == -1)
+        throw Error("could not initialise libsodium");
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -44,28 +55,10 @@ std::vector<char *> stringsToCharPtrs(const Strings & ss)
 //////////////////////////////////////////////////////////////////////
 
 
-template<class C> C tokenizeString(std::string_view s, std::string_view separators)
-{
-    C result;
-    auto pos = s.find_first_not_of(separators, 0);
-    while (pos != std::string_view::npos) {
-        auto end = s.find_first_of(separators, pos + 1);
-        if (end == std::string_view::npos) end = s.size();
-        result.insert(result.end(), std::string(s, pos, end - pos));
-        pos = s.find_first_not_of(separators, end);
-    }
-    return result;
-}
-
-template Strings tokenizeString(std::string_view s, std::string_view separators);
-template StringSet tokenizeString(std::string_view s, std::string_view separators);
-template std::vector<std::string> tokenizeString(std::string_view s, std::string_view separators);
-
-
 std::string chomp(std::string_view s)
 {
     size_t i = s.find_last_not_of(" \n\r\t");
-    return i == std::string_view::npos ? "" : std::string(s, 0, i + 1);
+    return i == s.npos ? "" : std::string(s, 0, i + 1);
 }
 
 
@@ -85,7 +78,7 @@ std::string replaceStrings(
 {
     if (from.empty()) return res;
     size_t pos = 0;
-    while ((pos = res.find(from, pos)) != std::string::npos) {
+    while ((pos = res.find(from, pos)) != res.npos) {
         res.replace(pos, from.size(), to);
         pos += to.size();
     }
@@ -98,10 +91,62 @@ std::string rewriteStrings(std::string s, const StringMap & rewrites)
     for (auto & i : rewrites) {
         if (i.first == i.second) continue;
         size_t j = 0;
-        while ((j = s.find(i.first, j)) != std::string::npos)
+        while ((j = s.find(i.first, j)) != s.npos)
             s.replace(j, i.first.size(), i.second);
     }
     return s;
+}
+
+template<class N>
+std::optional<N> string2Int(const std::string_view s)
+{
+    if (s.substr(0, 1) == "-" && !std::numeric_limits<N>::is_signed)
+        return std::nullopt;
+    try {
+        return boost::lexical_cast<N>(s.data(), s.size());
+    } catch (const boost::bad_lexical_cast &) {
+        return std::nullopt;
+    }
+}
+
+// Explicitly instantiated in one place for faster compilation
+template std::optional<unsigned char>  string2Int<unsigned char>(const std::string_view s);
+template std::optional<unsigned short> string2Int<unsigned short>(const std::string_view s);
+template std::optional<unsigned int> string2Int<unsigned int>(const std::string_view s);
+template std::optional<unsigned long> string2Int<unsigned long>(const std::string_view s);
+template std::optional<unsigned long long> string2Int<unsigned long long>(const std::string_view s);
+template std::optional<signed char> string2Int<signed char>(const std::string_view s);
+template std::optional<signed short> string2Int<signed short>(const std::string_view s);
+template std::optional<signed int> string2Int<signed int>(const std::string_view s);
+template std::optional<signed long> string2Int<signed long>(const std::string_view s);
+template std::optional<signed long long> string2Int<signed long long>(const std::string_view s);
+
+template<class N>
+std::optional<N> string2Float(const std::string_view s)
+{
+    try {
+        return boost::lexical_cast<N>(s.data(), s.size());
+    } catch (const boost::bad_lexical_cast &) {
+        return std::nullopt;
+    }
+}
+
+template std::optional<double> string2Float<double>(const std::string_view s);
+template std::optional<float> string2Float<float>(const std::string_view s);
+
+
+std::string renderSize(uint64_t value, bool align)
+{
+    static const std::array<char, 9> prefixes{{
+        'K', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'
+    }};
+    size_t power = 0;
+    double res = value;
+    while (res > 1024 && power < prefixes.size()) {
+        ++power;
+        res /= 1024;
+    }
+    return fmt(align ? "%6.1f %ciB" : "%.1f %ciB", power == 0 ? res / 1024 : res, prefixes.at(power));
 }
 
 
@@ -118,12 +163,11 @@ bool hasSuffix(std::string_view s, std::string_view suffix)
 }
 
 
-std::string toLower(const std::string & s)
+std::string toLower(std::string s)
 {
-    std::string r(s);
-    for (auto & c : r)
+    for (auto & c : s)
         c = std::tolower(c);
-    return r;
+    return s;
 }
 
 
@@ -131,7 +175,7 @@ std::string shellEscape(const std::string_view s)
 {
     std::string r;
     r.reserve(s.size() + 2);
-    r += "'";
+    r += '\'';
     for (auto & i : s)
         if (i == '\'') r += "'\\''"; else r += i;
     r += '\'';
@@ -139,7 +183,7 @@ std::string shellEscape(const std::string_view s)
 }
 
 
-void ignoreException(Verbosity lvl)
+void ignoreExceptionInDestructor(Verbosity lvl)
 {
     /* Make sure no exceptions leave this function.
        printError() also throws when remote is closed. */
@@ -150,6 +194,17 @@ void ignoreException(Verbosity lvl)
             printMsg(lvl, "error (ignored): %1%", e.what());
         }
     } catch (...) { }
+}
+
+void ignoreExceptionExceptInterrupt(Verbosity lvl)
+{
+    try {
+        throw;
+    } catch (const Interrupted & e) {
+        throw;
+    } catch (std::exception & e) {
+        printMsg(lvl, "error (ignored): %1%", e.what());
+    }
 }
 
 
@@ -180,7 +235,7 @@ std::string base64Encode(std::string_view s)
 std::string base64Decode(std::string_view s)
 {
     constexpr char npos = -1;
-    constexpr std::array<char, 256> base64DecodeChars = [&]() {
+    constexpr std::array<char, 256> base64DecodeChars = [&] {
         std::array<char, 256>  result{};
         for (auto& c : result)
             c = npos;
@@ -201,7 +256,7 @@ std::string base64Decode(std::string_view s)
 
         char digit = base64DecodeChars[(unsigned char) c];
         if (digit == npos)
-            throw Error("invalid character in Base64 string: '%c'", c);
+            throw FormatError("invalid character in Base64 string: '%c'", c);
 
         bits += 6;
         d = d << 6 | digit;

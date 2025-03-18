@@ -1,19 +1,22 @@
 #include "fetchers.hh"
 #include "store-api.hh"
 #include "archive.hh"
+#include "store-path-accessor.hh"
 
 namespace nix::fetchers {
 
 struct PathInputScheme : InputScheme
 {
-    std::optional<Input> inputFromURL(const ParsedURL & url, bool requireTree) const override
+    std::optional<Input> inputFromURL(
+        const Settings & settings,
+        const ParsedURL & url, bool requireTree) const override
     {
         if (url.scheme != "path") return {};
 
         if (url.authority && *url.authority != "")
-            throw Error("path URL '%s' should not have an authority ('%s')", url.url, *url.authority);
+            throw Error("path URL '%s' should not have an authority ('%s')", url, *url.authority);
 
-        Input input;
+        Input input{settings};
         input.attrs.insert_or_assign("type", "path");
         input.attrs.insert_or_assign("path", url.path);
 
@@ -24,10 +27,10 @@ struct PathInputScheme : InputScheme
                 if (auto n = string2Int<uint64_t>(value))
                     input.attrs.insert_or_assign(name, *n);
                 else
-                    throw Error("path URL '%s' has invalid parameter '%s'", url.to_string(), name);
+                    throw Error("path URL '%s' has invalid parameter '%s'", url, name);
             }
             else
-                throw Error("path URL '%s' has unsupported parameter '%s'", url.to_string(), name);
+                throw Error("path URL '%s' has unsupported parameter '%s'", url, name);
 
         return input;
     }
@@ -52,11 +55,14 @@ struct PathInputScheme : InputScheme
             "narHash",
         };
     }
-    std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
+
+    std::optional<Input> inputFromAttrs(
+        const Settings & settings,
+        const Attrs & attrs) const override
     {
         getStrAttr(attrs, "path");
 
-        Input input;
+        Input input{settings};
         input.attrs = attrs;
         return input;
     }
@@ -66,6 +72,7 @@ struct PathInputScheme : InputScheme
         auto query = attrsToQuery(input.attrs);
         query.erase("path");
         query.erase("type");
+        query.erase("__final");
         return ParsedURL {
             .scheme = "path",
             .path = getStrAttr(input.attrs, "path"),
@@ -73,9 +80,9 @@ struct PathInputScheme : InputScheme
         };
     }
 
-    std::optional<Path> getSourcePath(const Input & input) const override
+    std::optional<std::filesystem::path> getSourcePath(const Input & input) const override
     {
-        return getStrAttr(input.attrs, "path");
+        return getAbsPath(input);
     }
 
     void putFile(
@@ -84,47 +91,44 @@ struct PathInputScheme : InputScheme
         std::string_view contents,
         std::optional<std::string> commitMsg) const override
     {
-        writeFile((CanonPath(getAbsPath(input)) + path).abs(), contents);
+        writeFile(getAbsPath(input) / path.rel(), contents);
     }
 
-    CanonPath getAbsPath(const Input & input) const
+    std::optional<std::string> isRelative(const Input & input) const override
+    {
+        auto path = getStrAttr(input.attrs, "path");
+        if (isAbsolute(path))
+            return std::nullopt;
+        else
+            return path;
+    }
+
+    bool isLocked(const Input & input) const override
+    {
+        return (bool) input.getNarHash();
+    }
+
+    std::filesystem::path getAbsPath(const Input & input) const
     {
         auto path = getStrAttr(input.attrs, "path");
 
-        if (path[0] == '/')
-            return CanonPath(path);
+        if (isAbsolute(path))
+            return canonPath(path);
 
         throw Error("cannot fetch input '%s' because it uses a relative path", input.to_string());
     }
 
-    std::pair<StorePath, Input> fetch(ref<Store> store, const Input & _input) override
+    std::pair<ref<SourceAccessor>, Input> getAccessor(ref<Store> store, const Input & _input) const override
     {
         Input input(_input);
-        std::string absPath;
         auto path = getStrAttr(input.attrs, "path");
 
-        if (path[0] != '/') {
-            if (!input.parent)
-                throw Error("cannot fetch input '%s' because it uses a relative path", input.to_string());
+        auto absPath = getAbsPath(input);
 
-            auto parent = canonPath(*input.parent);
-
-            // the path isn't relative, prefix it
-            absPath = nix::absPath(path, parent);
-
-            // for security, ensure that if the parent is a store path, it's inside it
-            if (store->isInStore(parent)) {
-                auto storePath = store->printStorePath(store->toStorePath(parent).first);
-                if (!isDirOrInDir(absPath, storePath))
-                    throw BadStorePath("relative path '%s' points outside of its parent's store path '%s'", path, storePath);
-            }
-        } else
-            absPath = path;
-
-        Activity act(*logger, lvlTalkative, actUnknown, fmt("copying '%s'", absPath));
+        Activity act(*logger, lvlTalkative, actUnknown, fmt("copying '%s' to the store", absPath));
 
         // FIXME: check whether access to 'path' is allowed.
-        auto storePath = store->maybeParseStorePath(absPath);
+        auto storePath = store->maybeParseStorePath(absPath.string());
 
         if (storePath)
             store->addTempRoot(*storePath);
@@ -133,13 +137,34 @@ struct PathInputScheme : InputScheme
         if (!storePath || storePath->name() != "source" || !store->isValidPath(*storePath)) {
             // FIXME: try to substitute storePath.
             auto src = sinkToSource([&](Sink & sink) {
-                mtime = dumpPathAndGetMtime(absPath, sink, defaultPathFilter);
+                mtime = dumpPathAndGetMtime(absPath.string(), sink, defaultPathFilter);
             });
             storePath = store->addToStoreFromDump(*src, "source");
         }
-        input.attrs.insert_or_assign("lastModified", uint64_t(mtime));
 
-        return {std::move(*storePath), input};
+        /* Trust the lastModified value supplied by the user, if
+           any. It's not a "secure" attribute so we don't care. */
+        if (!input.getLastModified())
+            input.attrs.insert_or_assign("lastModified", uint64_t(mtime));
+
+        return {makeStorePathAccessor(store, *storePath), std::move(input)};
+    }
+
+    std::optional<std::string> getFingerprint(ref<Store> store, const Input & input) const override
+    {
+        if (isRelative(input))
+            return std::nullopt;
+
+        /* If this path is in the Nix store, use the hash of the
+           store object and the subpath. */
+        auto path = getAbsPath(input);
+        try {
+            auto [storePath, subPath] = store->toStorePath(path.string());
+            auto info = store->queryPathInfo(storePath);
+            return fmt("path:%s:%s", info->narHash.to_string(HashFormat::Base16, false), subPath);
+        } catch (Error &) {
+            return std::nullopt;
+        }
     }
 
     std::optional<ExperimentalFeature> experimentalFeature() const override

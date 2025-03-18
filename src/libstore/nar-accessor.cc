@@ -3,7 +3,6 @@
 
 #include <map>
 #include <stack>
-#include <algorithm>
 
 #include <nlohmann/json.hpp>
 
@@ -19,6 +18,35 @@ struct NarMember
     std::map<std::string, NarMember> children;
 };
 
+struct NarMemberConstructor : CreateRegularFileSink
+{
+private:
+
+    NarMember & narMember;
+
+    uint64_t & pos;
+
+public:
+
+    NarMemberConstructor(NarMember & nm, uint64_t & pos)
+        : narMember(nm), pos(pos)
+    { }
+
+    void isExecutable() override
+    {
+        narMember.stat.isExecutable = true;
+    }
+
+    void preallocateContents(uint64_t size) override
+    {
+        narMember.stat.fileSize = size;
+        narMember.stat.narOffset = pos;
+    }
+
+    void operator () (std::string_view data) override
+    { }
+};
+
 struct NarAccessor : public SourceAccessor
 {
     std::optional<const std::string> nar;
@@ -27,7 +55,7 @@ struct NarAccessor : public SourceAccessor
 
     NarMember root;
 
-    struct NarIndexer : ParseSink, Source
+    struct NarIndexer : FileSystemObjectSink, Source
     {
         NarAccessor & acc;
         Source & source;
@@ -42,23 +70,31 @@ struct NarAccessor : public SourceAccessor
             : acc(acc), source(source)
         { }
 
-        void createMember(const Path & path, NarMember member)
+        NarMember & createMember(const CanonPath & path, NarMember member)
         {
-            size_t level = std::count(path.begin(), path.end(), '/');
+            size_t level = 0;
+            for (auto _ : path) {
+                (void)_;
+                ++level;
+            }
+
             while (parents.size() > level) parents.pop();
 
             if (parents.empty()) {
                 acc.root = std::move(member);
                 parents.push(&acc.root);
+                return acc.root;
             } else {
                 if (parents.top()->stat.type != Type::tDirectory)
                     throw Error("NAR file missing parent directory of path '%s'", path);
-                auto result = parents.top()->children.emplace(baseNameOf(path), std::move(member));
-                parents.push(&result.first->second);
+                auto result = parents.top()->children.emplace(*path.baseName(), std::move(member));
+                auto & ref = result.first->second;
+                parents.push(&ref);
+                return ref;
             }
         }
 
-        void createDirectory(const Path & path) override
+        void createDirectory(const CanonPath & path) override
         {
             createMember(path, NarMember{ .stat = {
                 .type = Type::tDirectory,
@@ -68,35 +104,19 @@ struct NarAccessor : public SourceAccessor
             } });
         }
 
-        void createRegularFile(const Path & path) override
+        void createRegularFile(const CanonPath & path, std::function<void(CreateRegularFileSink &)> func) override
         {
-            createMember(path, NarMember{ .stat = {
+            auto & nm = createMember(path, NarMember{ .stat = {
                 .type = Type::tRegular,
                 .fileSize = 0,
                 .isExecutable = false,
                 .narOffset = 0
             } });
+            NarMemberConstructor nmc { nm, pos };
+            func(nmc);
         }
 
-        void closeRegularFile() override
-        { }
-
-        void isExecutable() override
-        {
-            parents.top()->stat.isExecutable = true;
-        }
-
-        void preallocateContents(uint64_t size) override
-        {
-            auto & st = parents.top()->stat;
-            st.fileSize = size;
-            st.narOffset = pos;
-        }
-
-        void receiveContents(std::string_view data) override
-        { }
-
-        void createSymlink(const Path & path, const std::string & target) override
+        void createSymlink(const CanonPath & path, const std::string & target) override
         {
             createMember(path,
                 NarMember{
@@ -261,7 +281,7 @@ json listNar(ref<SourceAccessor> accessor, const CanonPath & path, bool recurse)
             json &res2 = obj["entries"];
             for (const auto & [name, type] : accessor->readDirectory(path)) {
                 if (recurse) {
-                    res2[name] = listNar(accessor, path + name, true);
+                    res2[name] = listNar(accessor, path / name, true);
                 } else
                     res2[name] = json::object();
             }
@@ -271,7 +291,11 @@ json listNar(ref<SourceAccessor> accessor, const CanonPath & path, bool recurse)
         obj["type"] = "symlink";
         obj["target"] = accessor->readLink(path);
         break;
-    case SourceAccessor::Type::tMisc:
+    case SourceAccessor::Type::tBlock:
+    case SourceAccessor::Type::tChar:
+    case SourceAccessor::Type::tSocket:
+    case SourceAccessor::Type::tFifo:
+    case SourceAccessor::Type::tUnknown:
         assert(false); // cannot happen for NARs
     }
     return obj;

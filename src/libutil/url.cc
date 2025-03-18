@@ -2,6 +2,7 @@
 #include "url-parts.hh"
 #include "util.hh"
 #include "split.hh"
+#include "canon-path.hh"
 
 namespace nix {
 
@@ -12,16 +13,15 @@ std::regex revRegex(revRegexS, std::regex::ECMAScript);
 ParsedURL parseURL(const std::string & url)
 {
     static std::regex uriRegex(
-        "((" + schemeRegex + "):"
+        "((" + schemeNameRegex + "):"
         + "(?:(?://(" + authorityRegex + ")(" + absPathRegex + "))|(/?" + pathRegex + ")))"
         + "(?:\\?(" + queryRegex + "))?"
-        + "(?:#(" + queryRegex + "))?",
+        + "(?:#(" + fragmentRegex + "))?",
         std::regex::ECMAScript);
 
     std::smatch match;
 
     if (std::regex_match(url, match, uriRegex)) {
-        auto & base = match[1];
         std::string scheme = match[2];
         auto authority = match[3].matched
             ? std::optional<std::string>(match[3]) : std::nullopt;
@@ -39,8 +39,6 @@ ParsedURL parseURL(const std::string & url)
             path = "/";
 
         return ParsedURL{
-            .url = url,
-            .base = base,
             .scheme = scheme,
             .authority = authority,
             .path = percentDecode(path),
@@ -76,12 +74,16 @@ std::map<std::string, std::string> decodeQuery(const std::string & query)
 {
     std::map<std::string, std::string> result;
 
-    for (auto s : tokenizeString<Strings>(query, "&")) {
+    for (const auto & s : tokenizeString<Strings>(query, "&")) {
         auto e = s.find('=');
-        if (e != std::string::npos)
-            result.emplace(
-                s.substr(0, e),
-                percentDecode(std::string_view(s).substr(e + 1)));
+        if (e == std::string::npos) {
+            warn("dubious URI query '%s' is missing equal sign '%s', ignoring", s, "=");
+            continue;
+        }
+
+        result.emplace(
+            s.substr(0, e),
+            percentDecode(std::string_view(s).substr(e + 1)));
     }
 
     return result;
@@ -131,7 +133,13 @@ std::string ParsedURL::to_string() const
         + (fragment.empty() ? "" : "#" + percentEncode(fragment));
 }
 
-bool ParsedURL::operator ==(const ParsedURL & other) const
+std::ostream & operator << (std::ostream & os, const ParsedURL & url)
+{
+    os << url.to_string();
+    return os;
+}
+
+bool ParsedURL::operator ==(const ParsedURL & other) const noexcept
 {
     return
         scheme == other.scheme
@@ -139,6 +147,13 @@ bool ParsedURL::operator ==(const ParsedURL & other) const
         && path == other.path
         && query == other.query
         && fragment == other.fragment;
+}
+
+ParsedURL ParsedURL::canonicalise()
+{
+    ParsedURL res(*this);
+    res.path = CanonPath(res.path).abs();
+    return res;
 }
 
 /**
@@ -163,16 +178,24 @@ std::string fixGitURL(const std::string & url)
     std::regex scpRegex("([^/]*)@(.*):(.*)");
     if (!hasPrefix(url, "/") && std::regex_match(url, scpRegex))
         return std::regex_replace(url, scpRegex, "ssh://$1@$2/$3");
-    else {
-        if (url.find("://") == std::string::npos) {
-            return (ParsedURL {
-                .scheme = "file",
-                .authority = "",
-                .path = url
-            }).to_string();
-        } else
-            return url;
+    if (hasPrefix(url, "file:"))
+        return url;
+    if (url.find("://") == std::string::npos) {
+        return (ParsedURL {
+            .scheme = "file",
+            .authority = "",
+            .path = url
+        }).to_string();
     }
+    return url;
+}
+
+// https://www.rfc-editor.org/rfc/rfc3986#section-3.1
+bool isValidSchemeName(std::string_view s)
+{
+    static std::regex regex(schemeNameRegex, std::regex::ECMAScript);
+
+    return std::regex_match(s.begin(), s.end(), regex, std::regex_constants::match_default);
 }
 
 }

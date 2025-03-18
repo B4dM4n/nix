@@ -1,6 +1,7 @@
 #include "config.hh"
 #include "args.hh"
 #include "abstract-setting-to-json.hh"
+#include "environment-variables.hh"
 #include "experimental-features.hh"
 #include "util.hh"
 #include "file-system.hh"
@@ -8,6 +9,8 @@
 #include "config-impl.hh"
 
 #include <nlohmann/json.hpp>
+
+#include "strings.hh"
 
 namespace nix {
 
@@ -84,14 +87,22 @@ void AbstractConfig::reapplyUnknownSettings()
 void Config::getSettings(std::map<std::string, SettingInfo> & res, bool overriddenOnly)
 {
     for (const auto & opt : _settings)
-        if (!opt.second.isAlias && (!overriddenOnly || opt.second.setting->overridden))
+        if (!opt.second.isAlias
+            && (!overriddenOnly || opt.second.setting->overridden)
+            && experimentalFeatureSettings.isEnabled(opt.second.setting->experimentalFeature))
             res.emplace(opt.first, SettingInfo{opt.second.setting->to_string(), opt.second.setting->description});
 }
 
-void AbstractConfig::applyConfig(const std::string & contents, const std::string & path) {
-    unsigned int pos = 0;
 
-    std::vector<std::pair<std::string, std::string>> parsedContents;
+/**
+ * Parse configuration in `contents`, and also the configuration files included from there, with their location specified relative to `path`.
+ *
+ * `contents` and `path` represent the file that is being parsed.
+ * The result is only an intermediate list of key-value pairs of strings.
+ * More parsing according to the settings-specific semantics is being done by `loadConfFile` in `libstore/globals.cc`.
+*/
+static void parseConfigFiles(const std::string & contents, const std::string & path, std::vector<std::pair<std::string, std::string>> & parsedContents) {
+    unsigned int pos = 0;
 
     while (pos < contents.size()) {
         std::string line;
@@ -106,7 +117,7 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
         if (tokens.empty()) continue;
 
         if (tokens.size() < 2)
-            throw UsageError("illegal configuration line '%1%' in '%2%'", line, path);
+            throw UsageError("syntax error in configuration line '%1%' in '%2%'", line, path);
 
         auto include = false;
         auto ignoreMissing = false;
@@ -119,10 +130,15 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
 
         if (include) {
             if (tokens.size() != 2)
-                throw UsageError("illegal configuration line '%1%' in '%2%'", line, path);
+                throw UsageError("syntax error in configuration line '%1%' in '%2%'", line, path);
             auto p = absPath(tokens[1], dirOf(path));
             if (pathExists(p)) {
-                applyConfigFile(p);
+                try {
+                    std::string includedContents = readFile(p);
+                    parseConfigFiles(includedContents, p, parsedContents);
+                } catch (SystemError &) {
+                    // TODO: Do we actually want to ignore this? Or is it better to fail?
+                }
             } else if (!ignoreMissing) {
                 throw Error("file '%1%' included from '%2%' not found", p, path);
             }
@@ -130,7 +146,7 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
         }
 
         if (tokens[1] != "=")
-            throw UsageError("illegal configuration line '%1%' in '%2%'", line, path);
+            throw UsageError("syntax error in configuration line '%1%' in '%2%'", line, path);
 
         std::string name = std::move(tokens[0]);
 
@@ -142,6 +158,12 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
             concatStringsSep(" ", Strings(i, tokens.end())),
         });
     };
+}
+
+void AbstractConfig::applyConfig(const std::string & contents, const std::string & path) {
+    std::vector<std::pair<std::string, std::string>> parsedContents;
+
+    parseConfigFiles(contents, path, parsedContents);
 
     // First apply experimental-feature related settings
     for (const auto & [name, value] : parsedContents)
@@ -149,17 +171,18 @@ void AbstractConfig::applyConfig(const std::string & contents, const std::string
             set(name, value);
 
     // Then apply other settings
-    for (const auto & [name, value] : parsedContents)
-        if (name != "experimental-features" && name != "extra-experimental-features")
+    // XXX: NIX_PATH must override the regular setting! This is done in `initGC()`
+    // Environment variables overriding settings should probably be part of the Config mechanism,
+    // but at the time of writing it's not worth building that for just one thing
+    for (const auto & [name, value] : parsedContents) {
+        if (name != "experimental-features" && name != "extra-experimental-features") {
+            if ((name == "nix-path" || name == "extra-nix-path")
+                && getEnv("NIX_PATH").has_value()) {
+                continue;
+            }
             set(name, value);
-}
-
-void AbstractConfig::applyConfigFile(const Path & path)
-{
-    try {
-        std::string contents = readFile(path);
-        applyConfig(contents, path);
-    } catch (SysError &) { }
+        }
+    }
 }
 
 void Config::resetOverridden()
@@ -279,6 +302,7 @@ template<> void BaseSetting<bool>::convertToArg(Args & args, const std::string &
 {
     args.addFlag({
         .longName = name,
+        .aliases = aliases,
         .description = fmt("Enable the `%s` setting.", name),
         .category = category,
         .handler = {[this] { override(true); }},
@@ -286,6 +310,7 @@ template<> void BaseSetting<bool>::convertToArg(Args & args, const std::string &
     });
     args.addFlag({
         .longName = "no-" + name,
+        .aliases = aliases,
         .description = fmt("Disable the `%s` setting.", name),
         .category = category,
         .handler = {[this] { override(false); }},
@@ -438,67 +463,6 @@ void OptionalPathSetting::operator =(const std::optional<Path> & v)
 {
     this->assign(v);
 }
-
-bool GlobalConfig::set(const std::string & name, const std::string & value)
-{
-    for (auto & config : *configRegistrations)
-        if (config->set(name, value)) return true;
-
-    unknownSettings.emplace(name, value);
-
-    return false;
-}
-
-void GlobalConfig::getSettings(std::map<std::string, SettingInfo> & res, bool overriddenOnly)
-{
-    for (auto & config : *configRegistrations)
-        config->getSettings(res, overriddenOnly);
-}
-
-void GlobalConfig::resetOverridden()
-{
-    for (auto & config : *configRegistrations)
-        config->resetOverridden();
-}
-
-nlohmann::json GlobalConfig::toJSON()
-{
-    auto res = nlohmann::json::object();
-    for (const auto & config : *configRegistrations)
-        res.update(config->toJSON());
-    return res;
-}
-
-std::string GlobalConfig::toKeyValue()
-{
-    std::string res;
-    std::map<std::string, Config::SettingInfo> settings;
-    globalConfig.getSettings(settings);
-    for (const auto & s : settings)
-        res += fmt("%s = %s\n", s.first, s.second.value);
-    return res;
-}
-
-void GlobalConfig::convertToArgs(Args & args, const std::string & category)
-{
-    for (auto & config : *configRegistrations)
-        config->convertToArgs(args, category);
-}
-
-GlobalConfig globalConfig;
-
-GlobalConfig::ConfigRegistrations * GlobalConfig::configRegistrations;
-
-GlobalConfig::Register::Register(Config * config)
-{
-    if (!configRegistrations)
-        configRegistrations = new ConfigRegistrations;
-    configRegistrations->emplace_back(config);
-}
-
-ExperimentalFeatureSettings experimentalFeatureSettings;
-
-static GlobalConfig::Register rSettings(&experimentalFeatureSettings);
 
 bool ExperimentalFeatureSettings::isEnabled(const ExperimentalFeature & feature) const
 {

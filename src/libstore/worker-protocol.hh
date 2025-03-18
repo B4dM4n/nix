@@ -1,6 +1,8 @@
 #pragma once
 ///@file
 
+#include <chrono>
+
 #include "common-protocol.hh"
 
 namespace nix {
@@ -9,7 +11,9 @@ namespace nix {
 #define WORKER_MAGIC_1 0x6e697863
 #define WORKER_MAGIC_2 0x6478696f
 
-#define PROTOCOL_VERSION (1 << 8 | 35)
+/* Note: you generally shouldn't change the protocol version. Define a
+   new `WorkerProto::Feature` instead. */
+#define PROTOCOL_VERSION (1 << 8 | 38)
 #define GET_PROTOCOL_MAJOR(x) ((x) & 0xff00)
 #define GET_PROTOCOL_MINOR(x) ((x) & 0x00ff)
 
@@ -24,7 +28,7 @@ namespace nix {
 #define STDERR_RESULT         0x52534c54
 
 
-class Store;
+struct StoreDirConfig;
 struct Source;
 
 // items being serialised
@@ -33,6 +37,7 @@ struct BuildResult;
 struct KeyedBuildResult;
 struct ValidPathInfo;
 struct UnkeyedValidPathInfo;
+enum BuildMode : uint8_t;
 enum TrustedFlag : bool;
 
 
@@ -75,6 +80,20 @@ struct WorkerProto
     };
 
     /**
+     * Stripped down serialization logic suitable for sharing with Hydra.
+     *
+     * @todo remove once Hydra uses Store abstraction consistently.
+     */
+    struct BasicConnection;
+    struct BasicClientConnection;
+    struct BasicServerConnection;
+
+    /**
+     * Extra information provided as part of protocol negotation.
+     */
+    struct ClientHandshakeInfo;
+
+    /**
      * Data type for canonical pairs of serialisers for the worker protocol.
      *
      * See https://en.cppreference.com/w/cpp/language/adl for the broader
@@ -100,8 +119,8 @@ struct WorkerProto
     // This makes for a quicker debug cycle, as desired.
 #if 0
     {
-        static T read(const Store & store, ReadConn conn);
-        static void write(const Store & store, WriteConn conn, const T & t);
+        static T read(const StoreDirConfig & store, ReadConn conn);
+        static void write(const StoreDirConfig & store, WriteConn conn, const T & t);
     };
 #endif
 
@@ -110,10 +129,14 @@ struct WorkerProto
      * infer the type instead of having to write it down explicitly.
      */
     template<typename T>
-    static void write(const Store & store, WriteConn conn, const T & t)
+    static void write(const StoreDirConfig & store, WriteConn conn, const T & t)
     {
         WorkerProto::Serialise<T>::write(store, conn, t);
     }
+
+    using Feature = std::string;
+
+    static const std::set<Feature> allFeatures;
 };
 
 enum struct WorkerProto::Op : uint64_t
@@ -161,6 +184,33 @@ enum struct WorkerProto::Op : uint64_t
     AddMultipleToStore = 44,
     AddBuildLog = 45,
     BuildPathsWithResults = 46,
+    AddPermRoot = 47,
+};
+
+struct WorkerProto::ClientHandshakeInfo
+{
+    /**
+     * The version of the Nix daemon that is processing our requests.
+     *
+     * Do note, it may or may not communicating with another daemon,
+     * rather than being an "end" `LocalStore` or similar.
+     */
+    std::optional<std::string> daemonNixVersion;
+
+    /**
+     * Whether the remote side trusts us or not.
+     *
+     * 3 values: "yes", "no", or `std::nullopt` for "unknown".
+     *
+     * Note that the "remote side" might not be just the end daemon, but
+     * also an intermediary forwarder that can make its own trusting
+     * decisions. This would be the intersection of all their trust
+     * decisions, since it takes only one link in the chain to start
+     * denying operations.
+     */
+    std::optional<TrustedFlag> remoteTrustsUs;
+
+    bool operator == (const ClientHandshakeInfo &) const = default;
 };
 
 /**
@@ -197,8 +247,8 @@ inline std::ostream & operator << (std::ostream & s, WorkerProto::Op op)
 #define DECLARE_WORKER_SERIALISER(T) \
     struct WorkerProto::Serialise< T > \
     { \
-        static T read(const Store & store, WorkerProto::ReadConn conn); \
-        static void write(const Store & store, WorkerProto::WriteConn conn, const T & t); \
+        static T read(const StoreDirConfig & store, WorkerProto::ReadConn conn); \
+        static void write(const StoreDirConfig & store, WorkerProto::WriteConn conn, const T & t); \
     };
 
 template<>
@@ -212,7 +262,13 @@ DECLARE_WORKER_SERIALISER(ValidPathInfo);
 template<>
 DECLARE_WORKER_SERIALISER(UnkeyedValidPathInfo);
 template<>
+DECLARE_WORKER_SERIALISER(BuildMode);
+template<>
 DECLARE_WORKER_SERIALISER(std::optional<TrustedFlag>);
+template<>
+DECLARE_WORKER_SERIALISER(std::optional<std::chrono::microseconds>);
+template<>
+DECLARE_WORKER_SERIALISER(WorkerProto::ClientHandshakeInfo);
 
 template<typename T>
 DECLARE_WORKER_SERIALISER(std::vector<T>);

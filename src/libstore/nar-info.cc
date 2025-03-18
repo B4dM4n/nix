@@ -1,17 +1,10 @@
 #include "globals.hh"
 #include "nar-info.hh"
 #include "store-api.hh"
+#include "strings.hh"
+#include "json-utils.hh"
 
 namespace nix {
-
-GENERATE_CMP_EXT(
-    ,
-    NarInfo,
-    me->url,
-    me->compression,
-    me->fileHash,
-    me->fileSize,
-    static_cast<const ValidPathInfo &>(*me));
 
 NarInfo::NarInfo(const Store & store, const std::string & s, const std::string & whence)
     : ValidPathInfo(StorePath(StorePath::dummy), Hash(Hash::dummy)) // FIXME: hack
@@ -113,11 +106,11 @@ std::string NarInfo::to_string(const Store & store) const
     res += "URL: " + url + "\n";
     assert(compression != "");
     res += "Compression: " + compression + "\n";
-    assert(fileHash && fileHash->type == htSHA256);
-    res += "FileHash: " + fileHash->to_string(HashFormat::Base32, true) + "\n";
+    assert(fileHash && fileHash->algo == HashAlgorithm::SHA256);
+    res += "FileHash: " + fileHash->to_string(HashFormat::Nix32, true) + "\n";
     res += "FileSize: " + std::to_string(fileSize) + "\n";
-    assert(narHash.type == htSHA256);
-    res += "NarHash: " + narHash.to_string(HashFormat::Base32, true) + "\n";
+    assert(narHash.algo == HashAlgorithm::SHA256);
+    res += "NarHash: " + narHash.to_string(HashFormat::Nix32, true) + "\n";
     res += "NarSize: " + std::to_string(narSize) + "\n";
 
     res += "References: " + concatStringsSep(" ", shortRefs()) + "\n";
@@ -125,7 +118,7 @@ std::string NarInfo::to_string(const Store & store) const
     if (deriver)
         res += "Deriver: " + std::string(deriver->to_string()) + "\n";
 
-    for (auto sig : sigs)
+    for (const auto & sig : sigs)
         res += "Sig: " + sig + "\n";
 
     if (ca)
@@ -172,19 +165,18 @@ NarInfo NarInfo::fromJSON(
     };
 
     if (json.contains("url"))
-        res.url = ensureType(valueAt(json, "url"), value_t::string);
+        res.url = getString(valueAt(json, "url"));
 
     if (json.contains("compression"))
-        res.compression = ensureType(valueAt(json, "compression"), value_t::string);
+        res.compression = getString(valueAt(json, "compression"));
 
     if (json.contains("downloadHash"))
         res.fileHash = Hash::parseAny(
-            static_cast<const std::string &>(
-                ensureType(valueAt(json, "downloadHash"), value_t::string)),
+            getString(valueAt(json, "downloadHash")),
             std::nullopt);
 
     if (json.contains("downloadSize"))
-        res.fileSize = ensureType(valueAt(json, "downloadSize"), value_t::number_integer);
+        res.fileSize = getInteger(valueAt(json, "downloadSize"));
 
     return res;
 }

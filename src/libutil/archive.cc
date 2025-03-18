@@ -6,8 +6,9 @@
 #include <strings.h> // for strcasecmp
 
 #include "archive.hh"
-#include "config.hh"
+#include "config-global.hh"
 #include "posix-source-accessor.hh"
+#include "source-path.hh"
 #include "file-system.hh"
 #include "signals.hh"
 
@@ -22,7 +23,7 @@ struct ArchiveSettings : Config
             false,
         #endif
         "use-case-hack",
-        "Whether to enable a Darwin-specific hack for dealing with file name collisions."};
+        "Whether to enable a macOS-specific hack for dealing with file name case collisions."};
 };
 
 static ArchiveSettings archiveSettings;
@@ -77,20 +78,20 @@ void SourceAccessor::dumpPath(
                     std::string name(i.first);
                     size_t pos = i.first.find(caseHackSuffix);
                     if (pos != std::string::npos) {
-                        debug("removing case hack suffix from '%s'", path + i.first);
+                        debug("removing case hack suffix from '%s'", path / i.first);
                         name.erase(pos);
                     }
                     if (!unhacked.emplace(name, i.first).second)
-                        throw Error("file name collision in between '%s' and '%s'",
-                            (path + unhacked[name]),
-                            (path + i.first));
+                        throw Error("file name collision between '%s' and '%s'",
+                            (path / unhacked[name]),
+                            (path / i.first));
                 } else
                     unhacked.emplace(i.first, i.first);
 
             for (auto & i : unhacked)
-                if (filter((path + i.first).abs())) {
+                if (filter((path / i.first).abs())) {
                     sink << "entry" << "(" << "name" << i.first << "node";
-                    dump(path + i.second);
+                    dump(path / i.second);
                     sink << ")";
                 }
         }
@@ -110,9 +111,9 @@ void SourceAccessor::dumpPath(
 
 time_t dumpPathAndGetMtime(const Path & path, Sink & sink, PathFilter & filter)
 {
-    PosixSourceAccessor accessor;
-    accessor.dumpPath(CanonPath::fromCwd(path), sink, filter);
-    return accessor.mtime;
+    auto path2 = PosixSourceAccessor::createAtRoot(path);
+    path2.dumpPath(sink, filter);
+    return path2.accessor.dynamic_pointer_cast<PosixSourceAccessor>()->mtime;
 }
 
 void dumpPath(const Path & path, Sink & sink, PathFilter & filter)
@@ -127,27 +128,28 @@ void dumpString(std::string_view s, Sink & sink)
 }
 
 
-static SerialisationError badArchive(const std::string & s)
+template<typename... Args>
+static SerialisationError badArchive(std::string_view s, const Args & ... args)
 {
-    return SerialisationError("bad archive: " + s);
+    return SerialisationError("bad archive: " + s, args...);
 }
 
 
-static void parseContents(ParseSink & sink, Source & source, const Path & path)
+static void parseContents(CreateRegularFileSink & sink, Source & source)
 {
     uint64_t size = readLongLong(source);
 
     sink.preallocateContents(size);
 
     uint64_t left = size;
-    std::vector<char> buf(65536);
+    std::array<char, 65536> buf;
 
     while (left) {
         checkInterrupt();
         auto n = buf.size();
         if ((uint64_t)n > left) n = left;
         source(buf.data(), n);
-        sink.receiveContents({buf.data(), n});
+        sink({buf.data(), n});
         left -= n;
     }
 
@@ -164,109 +166,103 @@ struct CaseInsensitiveCompare
 };
 
 
-static void parse(ParseSink & sink, Source & source, const Path & path)
+static void parse(FileSystemObjectSink & sink, Source & source, const CanonPath & path)
 {
-    std::string s;
-
-    s = readString(source);
-    if (s != "(") throw badArchive("expected open tag");
-
-    enum { tpUnknown, tpRegular, tpDirectory, tpSymlink } type = tpUnknown;
-
-    std::map<Path, int, CaseInsensitiveCompare> names;
-
-    while (1) {
+    auto getString = [&]() {
         checkInterrupt();
+        return readString(source);
+    };
 
-        s = readString(source);
+    auto expectTag = [&](std::string_view expected) {
+        auto tag = getString();
+        if (tag != expected)
+            throw badArchive("expected tag '%s', got '%s'", expected, tag);
+    };
 
-        if (s == ")") {
-            break;
-        }
+    expectTag("(");
 
-        else if (s == "type") {
-            if (type != tpUnknown)
-                throw badArchive("multiple type fields");
-            std::string t = readString(source);
+    expectTag("type");
 
-            if (t == "regular") {
-                type = tpRegular;
-                sink.createRegularFile(path);
+    auto type = getString();
+
+    if (type == "regular") {
+        sink.createRegularFile(path, [&](auto & crf) {
+            auto tag = getString();
+
+            if (tag == "executable") {
+                auto s2 = getString();
+                if (s2 != "") throw badArchive("executable marker has non-empty value");
+                crf.isExecutable();
+                tag = getString();
             }
 
-            else if (t == "directory") {
-                sink.createDirectory(path);
-                type = tpDirectory;
-            }
+            if (tag == "contents")
+                parseContents(crf, source);
 
-            else if (t == "symlink") {
-                type = tpSymlink;
-            }
-
-            else throw badArchive("unknown file type " + t);
-
-        }
-
-        else if (s == "contents" && type == tpRegular) {
-            parseContents(sink, source, path);
-            sink.closeRegularFile();
-        }
-
-        else if (s == "executable" && type == tpRegular) {
-            auto s = readString(source);
-            if (s != "") throw badArchive("executable marker has non-empty value");
-            sink.isExecutable();
-        }
-
-        else if (s == "entry" && type == tpDirectory) {
-            std::string name, prevName;
-
-            s = readString(source);
-            if (s != "(") throw badArchive("expected open tag");
-
-            while (1) {
-                checkInterrupt();
-
-                s = readString(source);
-
-                if (s == ")") {
-                    break;
-                } else if (s == "name") {
-                    name = readString(source);
-                    if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos || name.find((char) 0) != std::string::npos)
-                        throw Error("NAR contains invalid file name '%1%'", name);
-                    if (name <= prevName)
-                        throw Error("NAR directory is not sorted");
-                    prevName = name;
-                    if (archiveSettings.useCaseHack) {
-                        auto i = names.find(name);
-                        if (i != names.end()) {
-                            debug("case collision between '%1%' and '%2%'", i->first, name);
-                            name += caseHackSuffix;
-                            name += std::to_string(++i->second);
-                        } else
-                            names[name] = 0;
-                    }
-                } else if (s == "node") {
-                    if (name.empty()) throw badArchive("entry name missing");
-                    parse(sink, source, path + "/" + name);
-                } else
-                    throw badArchive("unknown field " + s);
-            }
-        }
-
-        else if (s == "target" && type == tpSymlink) {
-            std::string target = readString(source);
-            sink.createSymlink(path, target);
-        }
-
-        else
-            throw badArchive("unknown field " + s);
+            expectTag(")");
+        });
     }
+
+    else if (type == "directory") {
+        sink.createDirectory(path);
+
+        std::map<Path, int, CaseInsensitiveCompare> names;
+
+        std::string prevName;
+
+        while (1) {
+            auto tag = getString();
+
+            if (tag == ")") break;
+
+            if (tag != "entry")
+                throw badArchive("expected tag 'entry' or ')', got '%s'", tag);
+
+            expectTag("(");
+
+            expectTag("name");
+
+            auto name = getString();
+            if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos || name.find((char) 0) != std::string::npos)
+                throw badArchive("NAR contains invalid file name '%1%'", name);
+            if (name <= prevName)
+                throw badArchive("NAR directory is not sorted");
+            prevName = name;
+            if (archiveSettings.useCaseHack) {
+                auto i = names.find(name);
+                if (i != names.end()) {
+                    debug("case collision between '%1%' and '%2%'", i->first, name);
+                    name += caseHackSuffix;
+                    name += std::to_string(++i->second);
+                    auto j = names.find(name);
+                    if (j != names.end())
+                        throw badArchive("NAR contains file name '%s' that collides with case-hacked file name '%s'", prevName, j->first);
+                } else
+                    names[name] = 0;
+            }
+
+            expectTag("node");
+
+            parse(sink, source, path / name);
+
+            expectTag(")");
+        }
+    }
+
+    else if (type == "symlink") {
+        expectTag("target");
+
+        auto target = getString();
+        sink.createSymlink(path, target);
+
+        expectTag(")");
+    }
+
+    else throw badArchive("unknown file type '%s'", type);
 }
 
 
-void parseDump(ParseSink & sink, Source & source)
+void parseDump(FileSystemObjectSink & sink, Source & source)
 {
     std::string version;
     try {
@@ -277,13 +273,13 @@ void parseDump(ParseSink & sink, Source & source)
     }
     if (version != narVersionMagic1)
         throw badArchive("input doesn't look like a Nix archive");
-    parse(sink, source, "");
+    parse(sink, source, CanonPath::root);
 }
 
 
-void restorePath(const Path & path, Source & source)
+void restorePath(const std::filesystem::path & path, Source & source, bool startFsync)
 {
-    RestoreSink sink;
+    RestoreSink sink{startFsync};
     sink.dstPath = path;
     parseDump(sink, source);
 }
@@ -294,20 +290,11 @@ void copyNAR(Source & source, Sink & sink)
     // FIXME: if 'source' is the output of dumpPath() followed by EOF,
     // we should just forward all data directly without parsing.
 
-    NullParseSink parseSink; /* just parse the NAR */
+    NullFileSystemObjectSink parseSink; /* just parse the NAR */
 
     TeeSource wrapper { source, sink };
 
     parseDump(parseSink, wrapper);
-}
-
-
-void copyPath(const Path & from, const Path & to)
-{
-    auto source = sinkToSource([&](Sink & sink) {
-        dumpPath(from, sink);
-    });
-    restorePath(to, *source);
 }
 
 

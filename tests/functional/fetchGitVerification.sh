@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 source common.sh
 
 requireGit
@@ -5,7 +7,7 @@ requireGit
 
 enableFeatures "verified-fetches"
 
-clearStore
+clearStoreIfPossible
 
 repo="$TEST_ROOT/git"
 
@@ -34,6 +36,12 @@ out=$(nix eval --impure --raw --expr "builtins.fetchGit { url = \"file://$repo\"
 [[ $(nix eval --impure --raw --expr "builtins.readFile (builtins.fetchGit { url = \"file://$repo\"; publicKey = \"$publicKey1\"; } + \"/text\")") = 'hello' ]]
 
 echo 'hello world' > $repo/text
+
+# Verification on a dirty repo should fail.
+out=$(nix eval --impure --raw --expr "builtins.fetchGit { url = \"file://$repo\"; keytype = \"ssh-rsa\"; publicKey = \"$publicKey2\"; }" 2>&1) || status=$?
+[[ $status == 1 ]]
+[[ $out =~ 'dirty' ]]
+
 git -C $repo add text
 git -C $repo -c "user.signingkey=$key2File" commit -S -m 'second commit'
 

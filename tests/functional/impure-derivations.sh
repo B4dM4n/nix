@@ -1,11 +1,15 @@
+#!/usr/bin/env bash
+
 source common.sh
 
 requireDaemonNewerThan "2.8pre20220311"
 
+TODO_NixOS
+
 enableFeatures "ca-derivations impure-derivations"
 restartDaemon
 
-clearStore
+clearStoreIfPossible
 
 # Basic test of impure derivations: building one a second time should not use the previous result.
 printf 0 > $TEST_ROOT/counter
@@ -63,3 +67,7 @@ path5=$(nix build -L --no-link --json --file ./impure-derivations.nix contentAdd
 path6=$(nix build -L --no-link --json --file ./impure-derivations.nix inputAddressedAfterCA | jq -r .[].outputs.out)
 [[ $(< $path6) = X ]]
 [[ $(< $TEST_ROOT/counter) = 5 ]]
+
+# Test nix/fetchurl.nix.
+path7=$(nix build -L --no-link --print-out-paths --expr "import <nix/fetchurl.nix> { impure = true; url = file://$PWD/impure-derivations.sh; }")
+cmp $path7 $PWD/impure-derivations.sh

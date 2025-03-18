@@ -1,7 +1,7 @@
 #pragma once
 ///@file
 
-#include "crypto.hh"
+#include "signature/local-keys.hh"
 #include "store-api.hh"
 #include "log-store.hh"
 
@@ -57,13 +57,14 @@ class BinaryCacheStore : public virtual BinaryCacheStoreConfig,
 {
 
 private:
-
-    std::unique_ptr<SecretKey> secretKey;
+    std::unique_ptr<Signer> signer;
 
 protected:
 
     // The prefix under which realisation infos will be stored
     const std::string realisationsPrefix = "realisations";
+
+    const std::string cacheInfoFile = "nix-cache-info";
 
     BinaryCacheStore(const Params & params);
 
@@ -84,6 +85,12 @@ public:
      * Dump the contents of the specified file to a sink.
      */
     virtual void getFile(const std::string & path, Sink & sink);
+
+    /**
+     * Get the contents of /nix-cache-info. Return std::nullopt if it
+     * doesn't exist.
+     */
+    virtual std::optional<std::string> getNixCacheInfo();
 
     /**
      * Fetch the specified file and call the specified callback with
@@ -123,22 +130,22 @@ public:
     void addToStore(const ValidPathInfo & info, Source & narSource,
         RepairFlag repair, CheckSigsFlag checkSigs) override;
 
-    StorePath addToStoreFromDump(Source & dump, std::string_view name,
-        FileIngestionMethod method, HashType hashAlgo, RepairFlag repair, const StorePathSet & references) override;
+    StorePath addToStoreFromDump(
+        Source & dump,
+        std::string_view name,
+        FileSerialisationMethod dumpMethod,
+        ContentAddressMethod hashMethod,
+        HashAlgorithm hashAlgo,
+        const StorePathSet & references,
+        RepairFlag repair) override;
 
     StorePath addToStore(
         std::string_view name,
-        const Path & srcPath,
-        FileIngestionMethod method,
-        HashType hashAlgo,
-        PathFilter & filter,
-        RepairFlag repair,
-        const StorePathSet & references) override;
-
-    StorePath addTextToStore(
-        std::string_view name,
-        std::string_view s,
+        const SourcePath & path,
+        ContentAddressMethod method,
+        HashAlgorithm hashAlgo,
         const StorePathSet & references,
+        PathFilter & filter,
         RepairFlag repair) override;
 
     void registerDrvOutput(const Realisation & info) override;
@@ -148,7 +155,7 @@ public:
 
     void narFromPath(const StorePath & path, Sink & sink) override;
 
-    ref<SourceAccessor> getFSAccessor(bool requireValidPath) override;
+    ref<SourceAccessor> getFSAccessor(bool requireValidPath = true) override;
 
     void addSignatures(const StorePath & storePath, const StringSet & sigs) override;
 

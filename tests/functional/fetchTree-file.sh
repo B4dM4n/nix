@@ -1,4 +1,8 @@
+#!/usr/bin/env bash
+
 source common.sh
+
+TODO_NixOS
 
 clearStore
 
@@ -14,6 +18,7 @@ test_fetch_file () {
         tree = builtins.fetchTree { type = "file"; url = "file://$PWD/test_input"; };
     in
     assert (tree.narHash == "$input_hash");
+    assert builtins.readFile tree == "foo\n";
     tree
 EOF
 }
@@ -87,7 +92,7 @@ EOF
 EOF
 
     # Test tarball URLs on the command line.
-    [[ $(nix flake metadata --json file://$PWD/test_input_no_ext | jq -r .resolved.type) = tarball ]]
+    [[ $(nix flake metadata --json "file://$PWD/test_input_no_ext" | jq -r .resolved.type) = tarball ]]
 
     popd
 

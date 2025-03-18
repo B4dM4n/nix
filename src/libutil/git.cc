@@ -8,7 +8,6 @@
 #include "signals.hh"
 #include "config.hh"
 #include "hash.hh"
-#include "posix-source-accessor.hh"
 
 #include "git.hh"
 #include "serialise.hh"
@@ -52,12 +51,111 @@ static std::string getString(Source & source, int n)
     return v;
 }
 
+void parseBlob(
+    FileSystemObjectSink & sink,
+    const CanonPath & sinkPath,
+    Source & source,
+    BlobMode blobMode,
+    const ExperimentalFeatureSettings & xpSettings)
+{
+    xpSettings.require(Xp::GitHashing);
 
-void parse(
-    ParseSink & sink,
-    const Path & sinkPath,
+    unsigned long long size = std::stoi(getStringUntil(source, 0));
+
+    auto doRegularFile = [&](bool executable) {
+        sink.createRegularFile(sinkPath, [&](auto & crf) {
+            if (executable)
+                crf.isExecutable();
+
+            crf.preallocateContents(size);
+
+            unsigned long long left = size;
+            std::string buf;
+            buf.reserve(65536);
+
+            while (left) {
+                checkInterrupt();
+                buf.resize(std::min((unsigned long long)buf.capacity(), left));
+                source(buf);
+                crf(buf);
+                left -= buf.size();
+            }
+        });
+    };
+
+    switch (blobMode) {
+
+    case BlobMode::Regular:
+        doRegularFile(false);
+        break;
+
+    case BlobMode::Executable:
+        doRegularFile(true);
+        break;
+
+    case BlobMode::Symlink:
+    {
+        std::string target;
+        target.resize(size, '0');
+        target.reserve(size);
+        for (size_t n = 0; n < target.size();) {
+            checkInterrupt();
+            n += source.read(
+                const_cast<char *>(target.c_str()) + n,
+                target.size() - n);
+        }
+
+        sink.createSymlink(sinkPath, target);
+        break;
+    }
+
+    default:
+        assert(false);
+    }
+}
+
+void parseTree(
+    FileSystemObjectSink & sink,
+    const CanonPath & sinkPath,
     Source & source,
     std::function<SinkHook> hook,
+    const ExperimentalFeatureSettings & xpSettings)
+{
+    unsigned long long size = std::stoi(getStringUntil(source, 0));
+    unsigned long long left = size;
+
+    sink.createDirectory(sinkPath);
+
+    while (left) {
+        std::string perms = getStringUntil(source, ' ');
+        left -= perms.size();
+        left -= 1;
+
+        RawMode rawMode = std::stoi(perms, 0, 8);
+        auto modeOpt = decodeMode(rawMode);
+        if (!modeOpt)
+            throw Error("Unknown Git permission: %o", perms);
+        auto mode = std::move(*modeOpt);
+
+        std::string name = getStringUntil(source, '\0');
+        left -= name.size();
+        left -= 1;
+
+        std::string hashs = getString(source, 20);
+        left -= 20;
+
+        Hash hash(HashAlgorithm::SHA1);
+        std::copy(hashs.begin(), hashs.end(), hash.hash);
+
+        hook(CanonPath{name}, TreeEntry {
+            .mode = mode,
+            .hash = hash,
+        });
+    }
+}
+
+ObjectType parseObjectType(
+    Source & source,
     const ExperimentalFeatureSettings & xpSettings)
 {
     xpSettings.require(Xp::GitHashing);
@@ -65,59 +163,34 @@ void parse(
     auto type = getString(source, 5);
 
     if (type == "blob ") {
-        sink.createRegularFile(sinkPath);
-
-        unsigned long long size = std::stoi(getStringUntil(source, 0));
-
-        sink.preallocateContents(size);
-
-        unsigned long long left = size;
-        std::string buf;
-        buf.reserve(65536);
-
-        while (left) {
-            checkInterrupt();
-            buf.resize(std::min((unsigned long long)buf.capacity(), left));
-            source(buf);
-            sink.receiveContents(buf);
-            left -= buf.size();
-        }
+        return ObjectType::Blob;
     } else if (type == "tree ") {
-        unsigned long long size = std::stoi(getStringUntil(source, 0));
-        unsigned long long left = size;
-
-        sink.createDirectory(sinkPath);
-
-        while (left) {
-            std::string perms = getStringUntil(source, ' ');
-            left -= perms.size();
-            left -= 1;
-
-            RawMode rawMode = std::stoi(perms, 0, 8);
-            auto modeOpt = decodeMode(rawMode);
-            if (!modeOpt)
-                throw Error("Unknown Git permission: %o", perms);
-            auto mode = std::move(*modeOpt);
-
-            std::string name = getStringUntil(source, '\0');
-            left -= name.size();
-            left -= 1;
-
-            std::string hashs = getString(source, 20);
-            left -= 20;
-
-            Hash hash(htSHA1);
-            std::copy(hashs.begin(), hashs.end(), hash.hash);
-
-            hook(name, TreeEntry {
-                .mode = mode,
-                .hash = hash,
-            });
-
-            if (mode == Mode::Executable)
-                sink.isExecutable();
-        }
+        return ObjectType::Tree;
     } else throw Error("input doesn't look like a Git object");
+}
+
+void parse(
+    FileSystemObjectSink & sink,
+    const CanonPath & sinkPath,
+    Source & source,
+    BlobMode rootModeIfBlob,
+    std::function<SinkHook> hook,
+    const ExperimentalFeatureSettings & xpSettings)
+{
+    xpSettings.require(Xp::GitHashing);
+
+    auto type = parseObjectType(source, xpSettings);
+
+    switch (type) {
+    case ObjectType::Blob:
+        parseBlob(sink, sinkPath, source, rootModeIfBlob, xpSettings);
+        break;
+    case ObjectType::Tree:
+        parseTree(sink, sinkPath, source, hook, xpSettings);
+        break;
+    default:
+        assert(false);
+    };
 }
 
 
@@ -127,15 +200,19 @@ std::optional<Mode> convertMode(SourceAccessor::Type type)
     case SourceAccessor::tSymlink:   return Mode::Symlink;
     case SourceAccessor::tRegular:   return Mode::Regular;
     case SourceAccessor::tDirectory: return Mode::Directory;
-    case SourceAccessor::tMisc:      return std::nullopt;
-    default: abort();
+    case SourceAccessor::tChar:
+    case SourceAccessor::tBlock:
+    case SourceAccessor::tSocket:
+    case SourceAccessor::tFifo:      return std::nullopt;
+    case SourceAccessor::tUnknown:
+    default: unreachable();
     }
 }
 
 
-void restore(ParseSink & sink, Source & source, std::function<RestoreHook> hook)
+void restore(FileSystemObjectSink & sink, Source & source, std::function<RestoreHook> hook)
 {
-    parse(sink, "", source, [&](Path name, TreeEntry entry) {
+    parse(sink, CanonPath::root, source, BlobMode::Regular, [&](CanonPath name, TreeEntry entry) {
         auto [accessor, from] = hook(entry.hash);
         auto stat = accessor->lstat(from);
         auto gotOpt = convertMode(stat.type);
@@ -177,6 +254,7 @@ void dumpTree(const Tree & entries, Sink & sink,
     for (auto & [name, entry] : entries) {
         auto name2 = name;
         if (entry.mode == Mode::Directory) {
+            assert(!name2.empty());
             assert(name2.back() == '/');
             name2.pop_back();
         }
@@ -194,18 +272,18 @@ void dumpTree(const Tree & entries, Sink & sink,
 
 
 Mode dump(
-    SourceAccessor & accessor, const CanonPath & path,
+    const SourcePath & path,
     Sink & sink,
     std::function<DumpHook> hook,
     PathFilter & filter,
     const ExperimentalFeatureSettings & xpSettings)
 {
-    auto st = accessor.lstat(path);
+    auto st = path.lstat();
 
     switch (st.type) {
     case SourceAccessor::tRegular:
     {
-        accessor.readFile(path, sink, [&](uint64_t size) {
+        path.readFile(sink, [&](uint64_t size) {
             dumpBlobPrefix(size, sink, xpSettings);
         });
         return st.isExecutable
@@ -216,9 +294,9 @@ Mode dump(
     case SourceAccessor::tDirectory:
     {
         Tree entries;
-        for (auto & [name, _] : accessor.readDirectory(path)) {
-            auto child = path + name;
-            if (!filter(child.abs())) continue;
+        for (auto & [name, _] : path.readDirectory()) {
+            auto child = path / name;
+            if (!filter(child.path.abs())) continue;
 
             auto entry = hook(child);
 
@@ -233,21 +311,33 @@ Mode dump(
     }
 
     case SourceAccessor::tSymlink:
-    case SourceAccessor::tMisc:
+    {
+        auto target = path.readLink();
+        dumpBlobPrefix(target.size(), sink, xpSettings);
+        sink(target);
+        return Mode::Symlink;
+    }
+
+    case SourceAccessor::tChar:
+    case SourceAccessor::tBlock:
+    case SourceAccessor::tSocket:
+    case SourceAccessor::tFifo:
+    case SourceAccessor::tUnknown:
     default:
-        throw Error("file '%1%' has an unsupported type", path);
+        throw Error("file '%1%' has an unsupported type of %2%", path, st.typeString());
     }
 }
 
 
 TreeEntry dumpHash(
-    HashType ht,
-    SourceAccessor & accessor, const CanonPath & path, PathFilter & filter)
+    HashAlgorithm ha,
+    const SourcePath & path,
+    PathFilter & filter)
 {
     std::function<DumpHook> hook;
-    hook = [&](const CanonPath & path) -> TreeEntry {
-        auto hashSink = HashSink(ht);
-        auto mode = dump(accessor, path, hashSink, hook, filter);
+    hook = [&](const SourcePath & path) -> TreeEntry {
+        auto hashSink = HashSink(ha);
+        auto mode = dump(path, hashSink, hook, filter);
         auto hash = hashSink.finish().first;
         return {
             .mode = mode,

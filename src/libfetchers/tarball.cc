@@ -2,12 +2,13 @@
 #include "fetchers.hh"
 #include "cache.hh"
 #include "filetransfer.hh"
-#include "globals.hh"
 #include "store-api.hh"
 #include "archive.hh"
 #include "tarfile.hh"
 #include "types.hh"
-#include "split.hh"
+#include "store-path-accessor.hh"
+#include "store-api.hh"
+#include "git-utils.hh"
 
 namespace nix::fetchers {
 
@@ -15,26 +16,24 @@ DownloadFileResult downloadFile(
     ref<Store> store,
     const std::string & url,
     const std::string & name,
-    bool locked,
     const Headers & headers)
 {
     // FIXME: check store
 
-    Attrs inAttrs({
-        {"type", "file"},
+    Cache::Key key{"file", {{
         {"url", url},
         {"name", name},
-    });
+    }}};
 
-    auto cached = getCache()->lookupExpired(store, inAttrs);
+    auto cached = getCache()->lookupStorePath(key, *store);
 
     auto useCached = [&]() -> DownloadFileResult
     {
         return {
             .storePath = std::move(cached->storePath),
-            .etag = getStrAttr(cached->infoAttrs, "etag"),
-            .effectiveUrl = getStrAttr(cached->infoAttrs, "url"),
-            .immutableUrl = maybeGetStrAttr(cached->infoAttrs, "immutableUrl"),
+            .etag = getStrAttr(cached->value, "etag"),
+            .effectiveUrl = getStrAttr(cached->value, "url"),
+            .immutableUrl = maybeGetStrAttr(cached->value, "immutableUrl"),
         };
     };
 
@@ -44,7 +43,7 @@ DownloadFileResult downloadFile(
     FileTransferRequest request(url);
     request.headers = headers;
     if (cached)
-        request.expectedETag = getStrAttr(cached->infoAttrs, "etag");
+        request.expectedETag = getStrAttr(cached->value, "etag");
     FileTransferResult res;
     try {
         res = getFileTransfer()->download(request);
@@ -56,10 +55,8 @@ DownloadFileResult downloadFile(
             throw;
     }
 
-    // FIXME: write to temporary file.
     Attrs infoAttrs({
         {"etag", res.etag},
-        {"url", res.effectiveUri},
     });
 
     if (res.immutableUrl)
@@ -73,7 +70,7 @@ DownloadFileResult downloadFile(
     } else {
         StringSink sink;
         dumpString(res.data, sink);
-        auto hash = hashString(htSHA256, res.data);
+        auto hash = hashString(HashAlgorithm::SHA256, res.data);
         ValidPathInfo info {
             *store,
             name,
@@ -82,7 +79,7 @@ DownloadFileResult downloadFile(
                 .hash = hash,
                 .references = {},
             },
-            hashString(htSHA256, sink.s),
+            hashString(HashAlgorithm::SHA256, sink.s),
         };
         info.narSize = sink.s.size();
         auto source = StringSource { sink.s };
@@ -90,95 +87,137 @@ DownloadFileResult downloadFile(
         storePath = std::move(info.path);
     }
 
-    getCache()->add(
-        store,
-        inAttrs,
-        infoAttrs,
-        *storePath,
-        locked);
-
-    if (url != res.effectiveUri)
-        getCache()->add(
-            store,
-            {
-                {"type", "file"},
-                {"url", res.effectiveUri},
-                {"name", name},
-            },
-            infoAttrs,
-            *storePath,
-            locked);
+    /* Cache metadata for all URLs in the redirect chain. */
+    for (auto & url : res.urls) {
+        key.second.insert_or_assign("url", url);
+        assert(!res.urls.empty());
+        infoAttrs.insert_or_assign("url", *res.urls.rbegin());
+        getCache()->upsert(key, *store, infoAttrs, *storePath);
+    }
 
     return {
         .storePath = std::move(*storePath),
         .etag = res.etag,
-        .effectiveUrl = res.effectiveUri,
+        .effectiveUrl = *res.urls.rbegin(),
         .immutableUrl = res.immutableUrl,
     };
 }
 
-DownloadTarballResult downloadTarball(
-    ref<Store> store,
+static DownloadTarballResult downloadTarball_(
     const std::string & url,
-    const std::string & name,
-    bool locked,
     const Headers & headers)
 {
-    Attrs inAttrs({
-        {"type", "tarball"},
-        {"url", url},
-        {"name", name},
-    });
+    Cache::Key cacheKey{"tarball", {{"url", url}}};
 
-    auto cached = getCache()->lookupExpired(store, inAttrs);
+    auto cached = getCache()->lookupExpired(cacheKey);
+
+    auto attrsToResult = [&](const Attrs & infoAttrs)
+    {
+        auto treeHash = getRevAttr(infoAttrs, "treeHash");
+        return DownloadTarballResult {
+            .treeHash = treeHash,
+            .lastModified = (time_t) getIntAttr(infoAttrs, "lastModified"),
+            .immutableUrl = maybeGetStrAttr(infoAttrs, "immutableUrl"),
+            .accessor = getTarballCache()->getAccessor(treeHash, false),
+        };
+    };
+
+    if (cached && !getTarballCache()->hasObject(getRevAttr(cached->value, "treeHash")))
+        cached.reset();
 
     if (cached && !cached->expired)
-        return {
-            .storePath = std::move(cached->storePath),
-            .lastModified = (time_t) getIntAttr(cached->infoAttrs, "lastModified"),
-            .immutableUrl = maybeGetStrAttr(cached->infoAttrs, "immutableUrl"),
-        };
+        /* We previously downloaded this tarball and it's younger than
+           `tarballTtl`, so no need to check the server. */
+        return attrsToResult(cached->value);
 
-    auto res = downloadFile(store, url, name, locked, headers);
+    auto _res = std::make_shared<Sync<FileTransferResult>>();
 
-    std::optional<StorePath> unpackedStorePath;
-    time_t lastModified;
-
-    if (cached && res.etag != "" && getStrAttr(cached->infoAttrs, "etag") == res.etag) {
-        unpackedStorePath = std::move(cached->storePath);
-        lastModified = getIntAttr(cached->infoAttrs, "lastModified");
-    } else {
-        Path tmpDir = createTempDir();
-        AutoDelete autoDelete(tmpDir, true);
-        unpackTarfile(store->toRealPath(res.storePath), tmpDir);
-        auto members = readDirectory(tmpDir);
-        if (members.size() != 1)
-            throw nix::Error("tarball '%s' contains an unexpected number of top-level files", url);
-        auto topDir = tmpDir + "/" + members.begin()->name;
-        lastModified = lstat(topDir).st_mtime;
-        unpackedStorePath = store->addToStore(name, topDir, FileIngestionMethod::Recursive, htSHA256, defaultPathFilter, NoRepair);
-    }
-
-    Attrs infoAttrs({
-        {"lastModified", uint64_t(lastModified)},
-        {"etag", res.etag},
+    auto source = sinkToSource([&](Sink & sink) {
+        FileTransferRequest req(url);
+        req.expectedETag = cached ? getStrAttr(cached->value, "etag") : "";
+        getFileTransfer()->download(std::move(req), sink,
+            [_res](FileTransferResult r)
+            {
+                *_res->lock() = r;
+            });
     });
 
-    if (res.immutableUrl)
-        infoAttrs.emplace("immutableUrl", *res.immutableUrl);
+    // TODO: fall back to cached value if download fails.
 
-    getCache()->add(
-        store,
-        inAttrs,
-        infoAttrs,
-        *unpackedStorePath,
-        locked);
+    auto act = std::make_unique<Activity>(*logger, lvlInfo, actUnknown,
+        fmt("unpacking '%s' into the Git cache", url));
 
-    return {
-        .storePath = std::move(*unpackedStorePath),
-        .lastModified = lastModified,
-        .immutableUrl = res.immutableUrl,
-    };
+    AutoDelete cleanupTemp;
+
+    /* Note: if the download is cached, `importTarball()` will receive
+       no data, which causes it to import an empty tarball. */
+    auto archive =
+        hasSuffix(toLower(parseURL(url).path), ".zip")
+        ? ({
+                /* In streaming mode, libarchive doesn't handle
+                   symlinks in zip files correctly (#10649). So write
+                   the entire file to disk so libarchive can access it
+                   in random-access mode. */
+                auto [fdTemp, path] = createTempFile("nix-zipfile");
+                cleanupTemp.reset(path);
+                debug("downloading '%s' into '%s'...", url, path);
+                {
+                    FdSink sink(fdTemp.get());
+                    source->drainInto(sink);
+                }
+                TarArchive{path};
+          })
+        : TarArchive{*source};
+    auto tarballCache = getTarballCache();
+    auto parseSink = tarballCache->getFileSystemObjectSink();
+    auto lastModified = unpackTarfileToSink(archive, *parseSink);
+    auto tree = parseSink->flush();
+
+    act.reset();
+
+    auto res(_res->lock());
+
+    Attrs infoAttrs;
+
+    if (res->cached) {
+        /* The server says that the previously downloaded version is
+           still current. */
+        infoAttrs = cached->value;
+    } else {
+        infoAttrs.insert_or_assign("etag", res->etag);
+        infoAttrs.insert_or_assign("treeHash",
+            tarballCache->dereferenceSingletonDirectory(tree).gitRev());
+        infoAttrs.insert_or_assign("lastModified", uint64_t(lastModified));
+        if (res->immutableUrl)
+            infoAttrs.insert_or_assign("immutableUrl", *res->immutableUrl);
+    }
+
+    /* Insert a cache entry for every URL in the redirect chain. */
+    for (auto & url : res->urls) {
+        cacheKey.second.insert_or_assign("url", url);
+        getCache()->upsert(cacheKey, infoAttrs);
+    }
+
+    // FIXME: add a cache entry for immutableUrl? That could allow
+    // cache poisoning.
+
+    return attrsToResult(infoAttrs);
+}
+
+ref<SourceAccessor> downloadTarball(
+    ref<Store> store,
+    const Settings & settings,
+    const std::string & url)
+{
+    /* Go through Input::getAccessor() to ensure that the resulting
+       accessor has a fingerprint. */
+    fetchers::Attrs attrs;
+    attrs.insert_or_assign("type", "tarball");
+    attrs.insert_or_assign("url", url);
+
+    auto input = Input::fromAttrs(settings, std::move(attrs));
+
+    return input.getAccessor(store).first;
 }
 
 // An input scheme corresponding to a curl-downloadable resource.
@@ -186,7 +225,7 @@ struct CurlInputScheme : InputScheme
 {
     const std::set<std::string> transportUrlSchemes = {"file", "http", "https"};
 
-    const bool hasTarballExtension(std::string_view path) const
+    bool hasTarballExtension(std::string_view path) const
     {
         return hasSuffix(path, ".zip") || hasSuffix(path, ".tar")
             || hasSuffix(path, ".tgz") || hasSuffix(path, ".tar.gz")
@@ -196,12 +235,16 @@ struct CurlInputScheme : InputScheme
 
     virtual bool isValidURL(const ParsedURL & url, bool requireTree) const = 0;
 
-    std::optional<Input> inputFromURL(const ParsedURL & _url, bool requireTree) const override
+    static const std::set<std::string> specialParams;
+
+    std::optional<Input> inputFromURL(
+        const Settings & settings,
+        const ParsedURL & _url, bool requireTree) const override
     {
         if (!isValidURL(_url, requireTree))
             return std::nullopt;
 
-        Input input;
+        Input input{settings};
 
         auto url = _url;
 
@@ -218,8 +261,17 @@ struct CurlInputScheme : InputScheme
             if (auto n = string2Int<uint64_t>(*i))
                 input.attrs.insert_or_assign("revCount", *n);
 
-        url.query.erase("rev");
-        url.query.erase("revCount");
+        if (auto i = get(url.query, "lastModified"))
+            if (auto n = string2Int<uint64_t>(*i))
+                input.attrs.insert_or_assign("lastModified", *n);
+
+        /* The URL query parameters serve two roles: specifying fetch
+           settings for Nix itself, and arbitrary data as part of the
+           HTTP request. Now that we've processed the Nix-specific
+           attributes above, remove them so we don't also send them as
+           part of the HTTP request. */
+        for (auto & param : allowedAttrs())
+            url.query.erase(param);
 
         input.attrs.insert_or_assign("type", std::string { schemeName() });
         input.attrs.insert_or_assign("url", url.to_string());
@@ -240,9 +292,11 @@ struct CurlInputScheme : InputScheme
         };
     }
 
-    std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
+    std::optional<Input> inputFromAttrs(
+        const Settings & settings,
+        const Attrs & attrs) const override
     {
-        Input input;
+        Input input{settings};
         input.attrs = attrs;
 
         //input.locked = (bool) maybeGetStrAttr(input.attrs, "hash");
@@ -257,6 +311,11 @@ struct CurlInputScheme : InputScheme
         if (auto narHash = input.getNarHash())
             url.query.insert_or_assign("narHash", narHash->to_string(HashFormat::SRI, true));
         return url;
+    }
+
+    bool isLocked(const Input & input) const override
+    {
+        return (bool) input.getNarHash();
     }
 };
 
@@ -273,10 +332,24 @@ struct FileInputScheme : CurlInputScheme
                 : (!requireTree && !hasTarballExtension(url.path)));
     }
 
-    std::pair<StorePath, Input> fetch(ref<Store> store, const Input & input) override
+    std::pair<ref<SourceAccessor>, Input> getAccessor(ref<Store> store, const Input & _input) const override
     {
-        auto file = downloadFile(store, getStrAttr(input.attrs, "url"), input.getName(), false);
-        return {std::move(file.storePath), input};
+        auto input(_input);
+
+        /* Unlike TarballInputScheme, this stores downloaded files in
+           the Nix store directly, since there is little deduplication
+           benefit in using the Git cache for single big files like
+           tarballs. */
+        auto file = downloadFile(store, getStrAttr(input.attrs, "url"), input.getName());
+
+        auto narHash = store->queryPathInfo(file.storePath)->narHash;
+        input.attrs.insert_or_assign("narHash", narHash.to_string(HashFormat::SRI, true));
+
+        auto accessor = makeStorePathAccessor(store, file.storePath);
+
+        accessor->setPathDisplay("«" + input.to_string() + "»");
+
+        return {accessor, input};
     }
 };
 
@@ -294,14 +367,16 @@ struct TarballInputScheme : CurlInputScheme
                 : (requireTree || hasTarballExtension(url.path)));
     }
 
-    std::pair<StorePath, Input> fetch(ref<Store> store, const Input & _input) override
+    std::pair<ref<SourceAccessor>, Input> getAccessor(ref<Store> store, const Input & _input) const override
     {
-        Input input(_input);
-        auto url = getStrAttr(input.attrs, "url");
-        auto result = downloadTarball(store, url, input.getName(), false);
+        auto input(_input);
+
+        auto result = downloadTarball_(getStrAttr(input.attrs, "url"), {});
+
+        result.accessor->setPathDisplay("«" + input.to_string() + "»");
 
         if (result.immutableUrl) {
-            auto immutableInput = Input::fromURL(*result.immutableUrl);
+            auto immutableInput = Input::fromURL(*input.settings, *result.immutableUrl);
             // FIXME: would be nice to support arbitrary flakerefs
             // here, e.g. git flakes.
             if (immutableInput.getType() != "tarball")
@@ -312,7 +387,20 @@ struct TarballInputScheme : CurlInputScheme
         if (result.lastModified && !input.attrs.contains("lastModified"))
             input.attrs.insert_or_assign("lastModified", uint64_t(result.lastModified));
 
-        return {result.storePath, std::move(input)};
+        input.attrs.insert_or_assign("narHash",
+            getTarballCache()->treeHashToNarHash(result.treeHash).to_string(HashFormat::SRI, true));
+
+        return {result.accessor, input};
+    }
+
+    std::optional<std::string> getFingerprint(ref<Store> store, const Input & input) const override
+    {
+        if (auto narHash = input.getNarHash())
+            return narHash->to_string(HashFormat::SRI, true);
+        else if (auto rev = input.getRev())
+            return rev->gitRev();
+        else
+            return std::nullopt;
     }
 };
 

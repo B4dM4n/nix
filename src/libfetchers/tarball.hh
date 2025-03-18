@@ -1,15 +1,20 @@
 #pragma once
 
-#include "types.hh"
-#include "path.hh"
-
 #include <optional>
+
+#include "hash.hh"
+#include "path.hh"
+#include "ref.hh"
+#include "types.hh"
 
 namespace nix {
 class Store;
+struct SourceAccessor;
 }
 
 namespace nix::fetchers {
+
+struct Settings;
 
 struct DownloadFileResult
 {
@@ -23,21 +28,23 @@ DownloadFileResult downloadFile(
     ref<Store> store,
     const std::string & url,
     const std::string & name,
-    bool locked,
     const Headers & headers = {});
 
 struct DownloadTarballResult
 {
-    StorePath storePath;
+    Hash treeHash;
     time_t lastModified;
     std::optional<std::string> immutableUrl;
+    ref<SourceAccessor> accessor;
 };
 
-DownloadTarballResult downloadTarball(
+/**
+ * Download and import a tarball into the Git cache. The result is the
+ * Git tree hash of the root directory.
+ */
+ref<SourceAccessor> downloadTarball(
     ref<Store> store,
-    const std::string & url,
-    const std::string & name,
-    bool locked,
-    const Headers & headers = {});
+    const Settings & settings,
+    const std::string & url);
 
 }

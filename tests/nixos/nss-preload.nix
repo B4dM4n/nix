@@ -32,6 +32,7 @@ let
 
         impureEnvVars = [
             "http_proxy" "https_proxy" "ftp_proxy" "all_proxy" "no_proxy"
+            "HTTP_PROXY" "HTTPS_PROXY" "FTP_PROXY" "ALL_PROXY" "NO_PROXY"
         ];
 
         urls = [ "http://example.com" ];
@@ -84,8 +85,8 @@ in
     client = { lib, nodes, pkgs, ... }: {
       networking.useDHCP = false;
       networking.nameservers = [
-        (lib.head nodes.http_dns.config.networking.interfaces.eth1.ipv6.addresses).address
-        (lib.head nodes.http_dns.config.networking.interfaces.eth1.ipv4.addresses).address
+        (lib.head nodes.http_dns.networking.interfaces.eth1.ipv6.addresses).address
+        (lib.head nodes.http_dns.networking.interfaces.eth1.ipv4.addresses).address
       ];
       networking.interfaces.eth1.ipv6.addresses = [
         { address = "fd21::10"; prefixLength = 64; }
@@ -101,6 +102,7 @@ in
   };
 
   testScript = { nodes, ... }: ''
+    http_dns.wait_for_unit("network-online.target")
     http_dns.wait_for_unit("nginx")
     http_dns.wait_for_open_port(80)
     http_dns.wait_for_unit("unbound")
@@ -108,6 +110,7 @@ in
 
     client.start()
     client.wait_for_unit('multi-user.target')
+    client.wait_for_unit('network-online.target')
 
     with subtest("can fetch data from a remote server outside sandbox"):
         client.succeed("nix --version >&2")

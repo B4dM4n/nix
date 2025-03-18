@@ -36,8 +36,9 @@ in {
       server =
         { config, pkgs, ... }:
         { services.openssh.enable = true;
-          services.openssh.permitRootLogin = "yes";
-					users.users.root.password = "foobar";
+          services.openssh.settings.PermitRootLogin = "yes";
+          users.users.root.hashedPasswordFile = null;
+          users.users.root.password = "foobar";
           virtualisation.writableStore = true;
           virtualisation.additionalPaths = [ pkgB pkgC ];
         };
@@ -55,7 +56,10 @@ in {
     start_all()
 
     server.wait_for_unit("sshd")
-    client.wait_for_unit("network.target")
+    server.wait_for_unit("multi-user.target")
+    server.wait_for_unit("network-online.target")
+
+    client.wait_for_unit("network-online.target")
     client.wait_for_unit("getty@tty1.service")
     # Either the prompt: ]#
     # or an OCR misreading of it: 1#
@@ -64,7 +68,7 @@ in {
     # Copy the closure of package A from the client to the server using password authentication,
     # and check that all prompts are visible
     server.fail("nix-store --check-validity ${pkgA}")
-    client.send_chars("nix copy --to ssh://server ${pkgA} >&2; echo done\n")
+    client.send_chars("nix copy --to ssh://server ${pkgA} >&2; echo -n do; echo ne\n")
     client.wait_for_text("continue connecting")
     client.send_chars("yes\n")
     client.wait_for_text("Password:")

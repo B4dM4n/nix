@@ -1,11 +1,31 @@
 #include "eval.hh"
 #include "eval-settings.hh"
+#include "config-global.hh"
 #include "globals.hh"
 #include "command.hh"
 #include "installable-value.hh"
 #include "repl.hh"
+#include "processes.hh"
+#include "self-exe.hh"
 
 namespace nix {
+
+void runNix(Path program, const Strings & args,
+    const std::optional<std::string> & input = {})
+{
+    auto subprocessEnv = getEnv();
+    subprocessEnv["NIX_CONFIG"] = globalConfig.toKeyValue();
+    //isInteractive avoid grabling interactive commands
+    runProgram2(RunOptions {
+        .program = getNixBin(program).string(),
+        .args = args,
+        .environment = subprocessEnv,
+        .input = input,
+        .isInteractive = true,
+    });
+
+    return;
+}
 
 struct CmdRepl : RawInstallablesCommand
 {
@@ -47,15 +67,6 @@ struct CmdRepl : RawInstallablesCommand
 
     void applyDefaultInstallables(std::vector<std::string> & rawInstallables) override
     {
-        if (!experimentalFeatureSettings.isEnabled(Xp::Flakes) && !(file) && rawInstallables.size() >= 1) {
-            warn("future versions of Nix will require using `--file` to load a file");
-            if (rawInstallables.size() > 1)
-                warn("more than one input file is not currently supported");
-            auto filePath = rawInstallables[0].data();
-            file = std::optional(filePath);
-            rawInstallables.front() = rawInstallables.back();
-            rawInstallables.pop_back();
-        }
         if (rawInstallables.empty() && (file.has_value() || expr.has_value())) {
             rawInstallables.push_back(".");
         }
@@ -87,10 +98,11 @@ struct CmdRepl : RawInstallablesCommand
             return values;
         };
         auto repl = AbstractNixRepl::create(
-            searchPath,
+            lookupPath,
             openStore(),
             state,
-            getValues
+            getValues,
+            runNix
         );
         repl->autoArgs = getAutoArgs(*repl->state);
         repl->initEnv();

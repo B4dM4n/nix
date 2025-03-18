@@ -9,7 +9,9 @@
 #include <fstream>
 #include <string>
 #include <regex>
-#include <glob.h>
+#ifndef _WIN32
+# include <glob.h>
+#endif
 
 namespace nix {
 
@@ -55,8 +57,7 @@ void Completions::add(std::string completion, std::string description)
     });
 }
 
-bool Completion::operator<(const Completion & other) const
-{ return completion < other.completion || (completion == other.completion && description < other.description); }
+auto Completion::operator<=>(const Completion & other) const noexcept = default;
 
 std::string completionMarker = "___COMPLETE___";
 
@@ -90,9 +91,6 @@ struct Parser {
 
     /**
      * @brief Parse the next character(s)
-     *
-     * @param r
-     * @return std::shared_ptr<Parser>
      */
     virtual void operator()(std::shared_ptr<Parser> & state, Strings & r) = 0;
 
@@ -266,8 +264,6 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
         verbosity = lvlError;
     }
 
-    bool argsSeen = false;
-
     // Heuristic to see if we're invoked as a shebang script, namely,
     // if we have at least one argument, it's the name of an
     // executable file, and it starts with "#!".
@@ -285,7 +281,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
 
                 std::string line;
                 std::getline(stream,line);
-                static const std::string commentChars("#/\\%@*-");
+                static const std::string commentChars("#/\\%@*-(");
                 std::string shebangContent;
                 while (std::getline(stream,line) && !line.empty() && commentChars.find(line[0]) != std::string::npos){
                     line = chomp(line);
@@ -294,7 +290,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
                     // We match one space after `nix` so that we preserve indentation.
                     // No space is necessary for an empty line. An empty line has basically no effect.
                     if (std::regex_match(line, match, std::regex("^#!\\s*nix(:? |$)(.*)$")))
-                        shebangContent += match[2].str() + "\n";
+                        shebangContent += std::string_view{match[2].first, match[2].second} + "\n";
                 }
                 for (const auto & word : parseShebangContent(shebangContent)) {
                     cmdline.push_back(word);
@@ -304,7 +300,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
                 for (auto pos = savedArgs.begin(); pos != savedArgs.end();pos++)
                     cmdline.push_back(*pos);
             }
-        } catch (SysError &) { }
+        } catch (SystemError &) { }
     }
     for (auto pos = cmdline.begin(); pos != cmdline.end(); ) {
 
@@ -334,10 +330,6 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
                 throw UsageError("unrecognised flag '%1%'", arg);
         }
         else {
-            if (!argsSeen) {
-                argsSeen = true;
-                initialFlagsProcessed();
-            }
             pos = rewriteArgs(cmdline, pos);
             pendingArgs.push_back(*pos++);
             if (processArgs(pendingArgs, false))
@@ -347,8 +339,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
 
     processArgs(pendingArgs, true);
 
-    if (!argsSeen)
-        initialFlagsProcessed();
+    initialFlagsProcessed();
 
     /* Now that we are done parsing, make sure that any experimental
      * feature required by the flags is enabled */
@@ -357,7 +348,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
 
     /* Now that all the other args are processed, run the deferred completions.
      */
-    for (auto d : deferredCompletions)
+    for (const auto & d : deferredCompletions)
         d.completer(*completions, d.n, d.prefix);
 }
 
@@ -483,7 +474,7 @@ bool Args::processArgs(const Strings & args, bool finish)
         if (!anyCompleted)
             exp.handler.fun(ss);
 
-        /* Move the list element to the processedArgs. This is almost the same as 
+        /* Move the list element to the processedArgs. This is almost the same as
            `processedArgs.push_back(expectedArgs.front()); expectedArgs.pop_front()`,
            except that it will only adjust the next and prev pointers of the list
            elements, meaning the actual contents don't move in memory. This is
@@ -544,42 +535,10 @@ nlohmann::json Args::toJSON()
     return res;
 }
 
-static void hashTypeCompleter(AddCompletions & completions, size_t index, std::string_view prefix)
-{
-    for (auto & type : hashTypes)
-        if (hasPrefix(type, prefix))
-            completions.add(type);
-}
-
-Args::Flag Args::Flag::mkHashTypeFlag(std::string && longName, HashType * ht)
-{
-    return Flag {
-        .longName = std::move(longName),
-        .description = "hash algorithm ('md5', 'sha1', 'sha256', or 'sha512')",
-        .labels = {"hash-algo"},
-        .handler = {[ht](std::string s) {
-            *ht = parseHashType(s);
-        }},
-        .completer = hashTypeCompleter,
-    };
-}
-
-Args::Flag Args::Flag::mkHashTypeOptFlag(std::string && longName, std::optional<HashType> * oht)
-{
-    return Flag {
-        .longName = std::move(longName),
-        .description = "hash algorithm ('md5', 'sha1', 'sha256', or 'sha512'). Optional as can also be gotten from SRI hash itself.",
-        .labels = {"hash-algo"},
-        .handler = {[oht](std::string s) {
-            *oht = std::optional<HashType> { parseHashType(s) };
-        }},
-        .completer = hashTypeCompleter,
-    };
-}
-
 static void _completePath(AddCompletions & completions, std::string_view prefix, bool onlyDirs)
 {
     completions.setType(Completions::Type::Filenames);
+    #ifndef _WIN32 // TODO implement globbing completions on Windows
     glob_t globbuf;
     int flags = GLOB_NOESCAPE;
     #ifdef GLOB_ONLYDIR
@@ -597,6 +556,7 @@ static void _completePath(AddCompletions & completions, std::string_view prefix,
         }
     }
     globfree(&globbuf);
+    #endif
 }
 
 void Args::completePath(AddCompletions & completions, size_t, std::string_view prefix)
@@ -622,8 +582,9 @@ std::optional<ExperimentalFeature> Command::experimentalFeature ()
     return { Xp::NixCommand };
 }
 
-MultiCommand::MultiCommand(const Commands & commands_)
+MultiCommand::MultiCommand(std::string_view commandName, const Commands & commands_)
     : commands(commands_)
+    , commandName(commandName)
 {
     expectArgs({
         .label = "subcommand",

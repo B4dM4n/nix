@@ -1,11 +1,36 @@
 #pragma once
 
+#include <filesystem>
+
 #include "canon-path.hh"
 #include "hash.hh"
+#include "ref.hh"
 
 namespace nix {
 
 struct Sink;
+
+/**
+ * Note there is a decent chance this type soon goes away because the problem is solved another way.
+ * See the discussion in https://github.com/NixOS/nix/pull/9985.
+ */
+enum class SymlinkResolution {
+    /**
+     * Resolve symlinks in the ancestors only.
+     *
+     * Only the last component of the result is possibly a symlink.
+     */
+    Ancestors,
+
+    /**
+     * Resolve symlinks fully, realpath(3)-style.
+     *
+     * No component of the result will be a symlink.
+     */
+    Full,
+};
+
+MakeError(FileNotFound, Error);
 
 /**
  * A read-only filesystem abstraction. This is used by the Nix
@@ -13,9 +38,11 @@ struct Sink;
  * filesystem-like entities (such as the real filesystem, tarballs or
  * Git repositories).
  */
-struct SourceAccessor
+struct SourceAccessor : std::enable_shared_from_this<SourceAccessor>
 {
     const size_t number;
+
+    std::string displayPrefix, displaySuffix;
 
     SourceAccessor();
 
@@ -24,6 +51,13 @@ struct SourceAccessor
 
     /**
      * Return the contents of a file as a string.
+     *
+     * @note Unlike Unix, this method should *not* follow symlinks. Nix
+     * by default wants to manipulate symlinks explicitly, and not
+     * implictly follow them, as they are frequently untrusted user data
+     * and thus may point to arbitrary locations. Acting on the targets
+     * targets of symlinks should only occasionally be done, and only
+     * with care.
      */
     virtual std::string readFile(const CanonPath & path);
 
@@ -32,7 +66,10 @@ struct SourceAccessor
      * called with the size of the file before any data is written to
      * the sink.
      *
-     * Note: subclasses of `SourceAccessor` need to implement at least
+     * @note Like the other `readFile`, this method should *not* follow
+     * symlinks.
+     *
+     * @note subclasses of `SourceAccessor` need to implement at least
      * one of the `readFile()` variants.
      */
     virtual void readFile(
@@ -51,12 +88,13 @@ struct SourceAccessor
 
         Unlike `DT_UNKNOWN`, this must not be used for deferring the lookup of types.
       */
-      tMisc
+      tChar, tBlock, tSocket, tFifo,
+      tUnknown
     };
 
     struct Stat
     {
-        Type type = tMisc;
+        Type type = tUnknown;
 
         /**
          * For regular files only: the size of the file. Not all
@@ -75,6 +113,9 @@ struct SourceAccessor
          * file in the NAR. Only returned by NAR accessors.
          */
         std::optional<uint64_t> narOffset;
+
+        bool isNotNARSerialisable();
+        std::string typeString();
     };
 
     Stat lstat(const CanonPath & path);
@@ -85,6 +126,9 @@ struct SourceAccessor
 
     typedef std::map<std::string, DirEntry> DirEntries;
 
+    /**
+     * @note Like `readFile`, this method should *not* follow symlinks.
+     */
     virtual DirEntries readDirectory(const CanonPath & path) = 0;
 
     virtual std::string readLink(const CanonPath & path) = 0;
@@ -97,14 +141,14 @@ struct SourceAccessor
     Hash hashPath(
         const CanonPath & path,
         PathFilter & filter = defaultPathFilter,
-        HashType ht = htSHA256);
+        HashAlgorithm ha = HashAlgorithm::SHA256);
 
     /**
      * Return a corresponding path in the root filesystem, if
      * possible. This is only possible for filesystems that are
      * materialized in the root filesystem.
      */
-    virtual std::optional<CanonPath> getPhysicalPath(const CanonPath & path)
+    virtual std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path)
     { return std::nullopt; }
 
     bool operator == (const SourceAccessor & x) const
@@ -112,12 +156,62 @@ struct SourceAccessor
         return number == x.number;
     }
 
-    bool operator < (const SourceAccessor & x) const
+    auto operator <=> (const SourceAccessor & x) const
     {
-        return number < x.number;
+        return number <=> x.number;
     }
 
+    void setPathDisplay(std::string displayPrefix, std::string displaySuffix = "");
+
     virtual std::string showPath(const CanonPath & path);
+
+    /**
+     * Resolve any symlinks in `path` according to the given
+     * resolution mode.
+     *
+     * @param mode might only be a temporary solution for this.
+     * See the discussion in https://github.com/NixOS/nix/pull/9985.
+     */
+    CanonPath resolveSymlinks(
+        const CanonPath & path,
+        SymlinkResolution mode = SymlinkResolution::Full);
+
+    /**
+     * A string that uniquely represents the contents of this
+     * accessor. This is used for caching lookups (see `fetchToStore()`).
+     */
+    std::optional<std::string> fingerprint;
+
+    /**
+     * Return the maximum last-modified time of the files in this
+     * tree, if available.
+     */
+    virtual std::optional<time_t> getLastModified()
+    { return std::nullopt; }
 };
+
+/**
+ * Return a source accessor that contains only an empty root directory.
+ */
+ref<SourceAccessor> makeEmptySourceAccessor();
+
+/**
+ * Exception thrown when accessing a filtered path (see
+ * `FilteringSourceAccessor`).
+ */
+MakeError(RestrictedPathError, Error);
+
+/**
+ * Return an accessor for the root filesystem.
+ */
+ref<SourceAccessor> getFSSourceAccessor();
+
+/**
+ * Construct an accessor for the filesystem rooted at `root`. Note
+ * that it is not possible to escape `root` by appending `..` path
+ * elements, and that absolute symlinks are resolved relative to
+ * `root`.
+ */
+ref<SourceAccessor> makeFSSourceAccessor(std::filesystem::path root);
 
 }

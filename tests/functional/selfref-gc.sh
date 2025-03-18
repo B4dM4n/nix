@@ -1,11 +1,13 @@
+#!/usr/bin/env bash
+
 source common.sh
 
 requireDaemonNewerThan "2.6.0pre20211215"
 
-clearStore
+clearStoreIfPossible
 
 nix-build --no-out-link -E '
-  with import ./config.nix;
+  with import '"${config_nix}"';
 
   let d1 = mkDerivation {
     name = "selfref-gc";

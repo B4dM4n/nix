@@ -1,10 +1,10 @@
 #pragma once
 ///@file
 
-#include "comparator.hh"
 #include "error.hh"
-#include "json-utils.hh"
 #include "types.hh"
+
+#include <nlohmann/json_fwd.hpp>
 
 namespace nix {
 
@@ -26,15 +26,17 @@ enum struct ExperimentalFeature
     RecursiveNix,
     NoUrlLiterals,
     FetchClosure,
-    ReplFlake,
     AutoAllocateUids,
     Cgroups,
     DaemonTrustOverride,
     DynamicDerivations,
     ParseTomlTimestamps,
     ReadOnlyLocalStore,
+    LocalOverlayStore,
     ConfigurableImpureEnv,
+    MountedSSHStore,
     VerifiedFetches,
+    PipeOperators,
 };
 
 /**
@@ -96,11 +98,5 @@ public:
  */
 void to_json(nlohmann::json &, const ExperimentalFeature &);
 void from_json(const nlohmann::json &, ExperimentalFeature &);
-
-/**
- * It is always rendered as a string
- */
-template<>
-struct json_avoids_null<ExperimentalFeature> : std::true_type {};
 
 }

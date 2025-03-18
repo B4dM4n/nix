@@ -1,8 +1,8 @@
 #pragma once
 ///@file
 
-#include <iostream>
 #include <functional>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -11,10 +11,12 @@
 
 #include "types.hh"
 #include "experimental-features.hh"
+#include "ref.hh"
 
 namespace nix {
 
-enum HashType : char;
+enum struct HashAlgorithm : char;
+enum struct HashFormat : int;
 
 class MultiCommand;
 
@@ -40,7 +42,7 @@ public:
     virtual std::string doc() { return ""; }
 
     /**
-     * @brief Get the base directory for the command.
+     * @brief Get the [base directory](https://nixos.org/manual/nix/unstable/glossary#gloss-base-directory) for the command.
      *
      * @return Generally the working directory, but in case of a shebang
      *         interpreter, returns the directory of the script.
@@ -112,6 +114,16 @@ protected:
             , arity(1)
         { }
 
+        Handler(std::filesystem::path * dest)
+            : fun([dest](std::vector<std::string> ss) { *dest = ss[0]; })
+            , arity(1)
+        { }
+
+        Handler(std::optional<std::filesystem::path> * dest)
+            : fun([dest](std::vector<std::string> ss) { *dest = ss[0]; })
+            , arity(1)
+        { }
+
         template<class T>
         Handler(T * dest, const T & val)
             : fun([dest, val](std::vector<std::string> ss) { *dest = val; })
@@ -154,6 +166,8 @@ protected:
      */
     using CompleterClosure = std::function<CompleterFun>;
 
+public:
+
     /**
      * Description of flags / options
      *
@@ -174,10 +188,9 @@ protected:
         CompleterClosure completer;
 
         std::optional<ExperimentalFeature> experimentalFeature;
-
-        static Flag mkHashTypeFlag(std::string && longName, HashType * ht);
-        static Flag mkHashTypeOptFlag(std::string && longName, std::optional<HashType> * oht);
     };
+
+protected:
 
     /**
      * Index of all registered "long" flag descriptions (flags like
@@ -197,6 +210,8 @@ protected:
      */
     virtual bool processFlag(Strings::iterator & pos, Strings::iterator end);
 
+public:
+
     /**
      * Description of positional arguments
      *
@@ -211,6 +226,8 @@ protected:
         CompleterClosure completer;
     };
 
+protected:
+
     /**
      * Queue of expected positional argument forms.
      *
@@ -223,11 +240,11 @@ protected:
     std::list<ExpectedArg> expectedArgs;
     /**
      * List of processed positional argument forms.
-     * 
+     *
      * All items removed from `expectedArgs` are added here. After all
      * arguments were processed, this list should be exactly the same as
      * `expectedArgs` was before.
-     * 
+     *
      * This list is used to extend the lifetime of the argument forms.
      * If this is not done, some closures that reference the command
      * itself will segfault.
@@ -269,6 +286,18 @@ public:
      * Expect a string argument.
      */
     void expectArg(const std::string & label, std::string * dest, bool optional = false)
+    {
+        expectArgs({
+            .label = label,
+            .optional = optional,
+            .handler = {dest}
+        });
+    }
+
+    /**
+     * Expect a path argument.
+     */
+    void expectArg(const std::string & label, std::filesystem::path * dest, bool optional = false)
     {
         expectArgs({
             .label = label,
@@ -342,7 +371,7 @@ using Commands = std::map<std::string, std::function<ref<Command>()>>;
 
 /**
  * An argument parser that supports multiple subcommands,
- * i.e. ‘<command> <subcommand>’.
+ * i.e. `<command> <subcommand>`.
  */
 class MultiCommand : virtual public Args
 {
@@ -356,13 +385,16 @@ public:
      */
     std::optional<std::pair<std::string, ref<Command>>> command;
 
-    MultiCommand(const Commands & commands);
+    MultiCommand(std::string_view commandName, const Commands & commands);
 
     bool processFlag(Strings::iterator & pos, Strings::iterator end) override;
 
     bool processArgs(const Strings & args, bool finish) override;
 
     nlohmann::json toJSON() override;
+
+protected:
+    std::string commandName = "";
 };
 
 Strings argvToStrings(int argc, char * * argv);
@@ -371,7 +403,7 @@ struct Completion {
     std::string completion;
     std::string description;
 
-    bool operator<(const Completion & other) const;
+    auto operator<=>(const Completion & other) const noexcept;
 };
 
 /**

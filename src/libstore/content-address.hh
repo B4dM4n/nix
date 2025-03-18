@@ -4,7 +4,7 @@
 #include <variant>
 #include "hash.hh"
 #include "path.hh"
-#include "comparator.hh"
+#include "file-content-address.hh"
 #include "variant-wrapper.hh"
 
 namespace nix {
@@ -13,48 +13,14 @@ namespace nix {
  * Content addressing method
  */
 
-/* We only have one way to hash text with references, so this is a single-value
-   type, mainly useful with std::variant.
-*/
-
-/**
- * The single way we can serialize "text" file system objects.
- *
- * Somewhat obscure, used by \ref Derivation derivations and
- * `builtins.toFile` currently.
- *
- * TextIngestionMethod is identical to FileIngestionMethod::Fixed except that
- * the former may not have self-references and is tagged `text:${algo}:${hash}`
- * rather than `fixed:${algo}:${hash}`.  The contents of the store path are
- * ingested and hashed identically, aside from the slightly different tag and
- * restriction on self-references.
- */
-struct TextIngestionMethod : std::monostate { };
-
-/**
- * An enumeration of the main ways we can serialize file system
- * objects.
- */
-enum struct FileIngestionMethod : uint8_t {
-    /**
-     * Flat-file hashing. Directly ingest the contents of a single file
-     */
-    Flat = false,
-    /**
-     * Recursive (or NAR) hashing. Serializes the file-system object in Nix
-     * Archive format and ingest that
-     */
-    Recursive = true
-};
-
 /**
  * Compute the prefix to the hash algorithm which indicates how the
  * files were ingested.
  */
-std::string makeFileIngestionPrefix(FileIngestionMethod m);
+std::string_view makeFileIngestionPrefix(FileIngestionMethod m);
 
 /**
- * An enumeration of all the ways we can serialize file system objects.
+ * An enumeration of all the ways we can content-address store objects.
  *
  * Just the type of a content address. Combine with the hash itself, and
  * we have a `ContentAddress` as defined below. Combine that, in turn,
@@ -63,24 +29,77 @@ std::string makeFileIngestionPrefix(FileIngestionMethod m);
  */
 struct ContentAddressMethod
 {
-    typedef std::variant<
-        TextIngestionMethod,
-        FileIngestionMethod
-    > Raw;
+    enum struct Raw {
+        /**
+         * Calculate a store path using the `FileIngestionMethod::Flat`
+         * hash of the file system objects, and references.
+         *
+         * See `store-object/content-address.md#method-flat` in the
+         * manual.
+         */
+        Flat,
+
+        /**
+         * Calculate a store path using the
+         * `FileIngestionMethod::NixArchive` hash of the file system
+         * objects, and references.
+         *
+         * See `store-object/content-address.md#method-flat` in the
+         * manual.
+         */
+        NixArchive,
+
+        /**
+         * Calculate a store path using the `FileIngestionMethod::Git`
+         * hash of the file system objects, and references.
+         *
+         * Part of `ExperimentalFeature::GitHashing`.
+         *
+         * See `store-object/content-address.md#method-git` in the
+         * manual.
+         */
+        Git,
+
+        /**
+         * Calculate a store path using the `FileIngestionMethod::Flat`
+         * hash of the file system objects, and references, but in a
+         * different way than `ContentAddressMethod::Raw::Flat`.
+         *
+         * See `store-object/content-address.md#method-text` in the
+         * manual.
+         */
+        Text,
+    };
 
     Raw raw;
 
-    GENERATE_CMP(ContentAddressMethod, me->raw);
+    bool operator ==(const ContentAddressMethod &) const = default;
+    auto operator <=>(const ContentAddressMethod &) const = default;
 
     MAKE_WRAPPER_CONSTRUCTOR(ContentAddressMethod);
+
+    /**
+     * Parse a content addressing method (name).
+     *
+     * The inverse of `render`.
+     */
+    static ContentAddressMethod parse(std::string_view rawCaMethod);
+
+    /**
+     * Render a content addressing method (name).
+     *
+     * The inverse of `parse`.
+     */
+    std::string_view render() const;
 
     /**
      * Parse the prefix tag which indicates how the files
      * were ingested, with the fixed output case not prefixed for back
      * compat.
      *
-     * @param [in] m A string that should begin with the prefix.
-     * @param [out] m The remainder of the string after the prefix.
+     * @param m A string that should begin with the
+     * prefix. On return, the remainder of the string after the
+     * prefix.
      */
     static ContentAddressMethod parsePrefix(std::string_view & m);
 
@@ -89,20 +108,28 @@ struct ContentAddressMethod
      *
      * The rough inverse of `parsePrefix()`.
      */
-    std::string renderPrefix() const;
+    std::string_view renderPrefix() const;
 
     /**
-     * Parse a content addressing method and hash type.
+     * Parse a content addressing method and hash algorithm.
      */
-    static std::pair<ContentAddressMethod, HashType> parse(std::string_view rawCaMethod);
+    static std::pair<ContentAddressMethod, HashAlgorithm> parseWithAlgo(std::string_view rawCaMethod);
 
     /**
-     * Render a content addressing method and hash type in a
+     * Render a content addressing method and hash algorithm in a
      * nicer way, prefixing both cases.
      *
      * The rough inverse of `parse()`.
      */
-    std::string render(HashType ht) const;
+    std::string renderWithAlgo(HashAlgorithm ha) const;
+
+    /**
+     * Get the underlying way to content-address file system objects.
+     *
+     * Different ways of hashing store objects may use the same method
+     * for hashing file systeme objects.
+     */
+    FileIngestionMethod getFileIngestionMethod() const;
 };
 
 
@@ -113,14 +140,14 @@ struct ContentAddressMethod
 /**
  * We've accumulated several types of content-addressed paths over the
  * years; fixed-output derivations support multiple hash algorithms and
- * serialisation methods (flat file vs NAR). Thus, ‘ca’ has one of the
+ * serialisation methods (flat file vs NAR). Thus, `ca` has one of the
  * following forms:
  *
- * - ‘text:sha256:<sha256 hash of file contents>’: For paths
- *   computed by Store::makeTextPath() / Store::addTextToStore().
+ * - `TextIngestionMethod`:
+ *   `text:sha256:<sha256 hash of file contents>`
  *
- * - ‘fixed:<r?>:<ht>:<h>’: For paths computed by
- *   Store::makeFixedOutputPath() / Store::addToStore().
+ * - `FixedIngestionMethod`:
+ *   `fixed:<r?>:<hash algorithm>:<hash of file contents>`
  */
 struct ContentAddress
 {
@@ -134,7 +161,8 @@ struct ContentAddress
      */
     Hash hash;
 
-    GENERATE_CMP(ContentAddress, me->method, me->hash);
+    bool operator ==(const ContentAddress &) const = default;
+    auto operator <=>(const ContentAddress &) const = default;
 
     /**
      * Compute the content-addressability assertion
@@ -193,7 +221,9 @@ struct StoreReferences
      */
     size_t size() const;
 
-    GENERATE_CMP(StoreReferences, me->self, me->others);
+    bool operator ==(const StoreReferences &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=>(const StoreReferences &) const = default;
 };
 
 // This matches the additional info that we need for makeTextPath
@@ -210,7 +240,9 @@ struct TextInfo
      */
     StorePathSet references;
 
-    GENERATE_CMP(TextInfo, me->hash, me->references);
+    bool operator ==(const TextInfo &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=>(const TextInfo &) const = default;
 };
 
 struct FixedOutputInfo
@@ -230,7 +262,9 @@ struct FixedOutputInfo
      */
     StoreReferences references;
 
-    GENERATE_CMP(FixedOutputInfo, me->hash, me->references);
+    bool operator ==(const FixedOutputInfo &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=>(const FixedOutputInfo &) const = default;
 };
 
 /**
@@ -247,7 +281,9 @@ struct ContentAddressWithReferences
 
     Raw raw;
 
-    GENERATE_CMP(ContentAddressWithReferences, me->raw);
+    bool operator ==(const ContentAddressWithReferences &) const = default;
+    // TODO libc++ 16 (used by darwin) missing `std::map::operator <=>`, can't do yet.
+    //auto operator <=>(const ContentAddressWithReferences &) const = default;
 
     MAKE_WRAPPER_CONSTRUCTOR(ContentAddressWithReferences);
 
@@ -266,11 +302,12 @@ struct ContentAddressWithReferences
      *
      * @param refs References to other store objects or oneself.
      *
-     * Do note that not all combinations are supported; `nullopt` is
-     * returns for invalid combinations.
+     * @note note that all combinations are supported. This is a
+     * *partial function* and exceptions will be thrown for invalid
+     * combinations.
      */
-    static std::optional<ContentAddressWithReferences> fromPartsOpt(
-        ContentAddressMethod method, Hash hash, StoreReferences refs) noexcept;
+    static ContentAddressWithReferences fromParts(
+        ContentAddressMethod method, Hash hash, StoreReferences refs);
 
     ContentAddressMethod getMethod() const;
 
