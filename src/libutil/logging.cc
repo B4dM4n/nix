@@ -1,11 +1,11 @@
-#include "logging.hh"
-#include "file-descriptor.hh"
-#include "environment-variables.hh"
-#include "terminal.hh"
-#include "util.hh"
-#include "config-global.hh"
-#include "source-path.hh"
-#include "position.hh"
+#include "nix/util/logging.hh"
+#include "nix/util/file-descriptor.hh"
+#include "nix/util/environment-variables.hh"
+#include "nix/util/terminal.hh"
+#include "nix/util/util.hh"
+#include "nix/util/config-global.hh"
+#include "nix/util/source-path.hh"
+#include "nix/util/position.hh"
 
 #include <atomic>
 #include <sstream>
@@ -41,6 +41,19 @@ void Logger::writeToStdout(std::string_view s)
     Descriptor standard_out = getStandardOutput();
     writeFull(standard_out, s);
     writeFull(standard_out, "\n");
+}
+
+Logger::Suspension Logger::suspend()
+{
+    pause();
+    return Suspension { ._finalize = {[this](){this->resume();}} };
+}
+
+std::optional<Logger::Suspension> Logger::suspendIf(bool cond)
+{
+    if (cond)
+        return suspend();
+    return {};
 }
 
 class SimpleLogger : public Logger

@@ -1,10 +1,10 @@
-#include "fetchers.hh"
-#include "store-api.hh"
-#include "source-path.hh"
-#include "fetch-to-store.hh"
-#include "json-utils.hh"
-#include "store-path-accessor.hh"
-#include "fetch-settings.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/source-path.hh"
+#include "nix/fetchers/fetch-to-store.hh"
+#include "nix/util/json-utils.hh"
+#include "nix/fetchers/store-path-accessor.hh"
+#include "nix/fetchers/fetch-settings.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -322,6 +322,8 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(ref<Store> sto
             auto accessor = makeStorePathAccessor(store, storePath);
 
             accessor->fingerprint = getFingerprint(store);
+
+            accessor->setPathDisplay("«" + to_string() + "»");
 
             return {accessor, *this};
         } catch (Error & e) {

@@ -1,22 +1,22 @@
-#include "derivation-goal.hh"
+#include "nix/store/build/derivation-goal.hh"
 #ifndef _WIN32 // TODO enable build hook on Windows
-#  include "hook-instance.hh"
+#  include "nix/store/build/hook-instance.hh"
 #endif
-#include "processes.hh"
-#include "config-global.hh"
-#include "worker.hh"
-#include "builtins.hh"
-#include "builtins/buildenv.hh"
-#include "references.hh"
-#include "finally.hh"
-#include "util.hh"
-#include "archive.hh"
-#include "compression.hh"
-#include "common-protocol.hh"
-#include "common-protocol-impl.hh"
-#include "topo-sort.hh"
-#include "callback.hh"
-#include "local-store.hh" // TODO remove, along with remaining downcasts
+#include "nix/util/processes.hh"
+#include "nix/util/config-global.hh"
+#include "nix/store/build/worker.hh"
+#include "nix/store/builtins.hh"
+#include "nix/store/builtins/buildenv.hh"
+#include "nix/util/references.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/util.hh"
+#include "nix/util/archive.hh"
+#include "nix/util/compression.hh"
+#include "nix/store/common-protocol.hh"
+#include "nix/store/common-protocol-impl.hh"
+#include "nix/util/topo-sort.hh"
+#include "nix/util/callback.hh"
+#include "nix/store/local-store.hh" // TODO remove, along with remaining downcasts
 
 #include <regex>
 #include <queue>
@@ -32,7 +32,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 namespace nix {
 
@@ -137,7 +137,20 @@ Goal::Co DerivationGoal::init() {
     trace("init");
 
     if (useDerivation) {
+        /* The first thing to do is to make sure that the derivation
+           exists.  If it doesn't, it may be created through a
+           substitute. */
+
+        if (buildMode != bmNormal || !worker.evalStore.isValidPath(drvPath)) {
+            addWaitee(upcast_goal(worker.makePathSubstitutionGoal(drvPath)));
+            co_await Suspend{};
+        }
+
         trace("loading derivation");
+
+        if (nrFailed != 0) {
+            co_return done(BuildResult::MiscFailure, {}, Error("cannot build missing derivation '%s'", worker.store.printStorePath(drvPath)));
+        }
 
         /* `drvPath' should already be a root, but let's be on the safe
            side: if the user forgot to make it a root, we wouldn't want
@@ -1567,24 +1580,23 @@ void DerivationGoal::waiteeDone(GoalPtr waitee, ExitCode result)
     if (!useDerivation || !drv) return;
     auto & fullDrv = *dynamic_cast<Derivation *>(drv.get());
 
-    std::optional info = tryGetConcreteDrvGoal(waitee);
-    if (!info) return;
-    const auto & [dg, drvReq] = *info;
+    auto * dg = dynamic_cast<DerivationGoal *>(&*waitee);
+    if (!dg) return;
 
-    auto * nodeP = fullDrv.inputDrvs.findSlot(drvReq.get());
+    auto * nodeP = fullDrv.inputDrvs.findSlot(DerivedPath::Opaque { .path = dg->drvPath });
     if (!nodeP) return;
     auto & outputs = nodeP->value;
 
     for (auto & outputName : outputs) {
-        auto buildResult = dg.get().getBuildResult(DerivedPath::Built {
-            .drvPath = makeConstantStorePathRef(dg.get().drvPath),
+        auto buildResult = dg->getBuildResult(DerivedPath::Built {
+            .drvPath = makeConstantStorePathRef(dg->drvPath),
             .outputs = OutputsSpec::Names { outputName },
         });
         if (buildResult.success()) {
             auto i = buildResult.builtOutputs.find(outputName);
             if (i != buildResult.builtOutputs.end())
                 inputDrvOutputs.insert_or_assign(
-                    { dg.get().drvPath, outputName },
+                    { dg->drvPath, outputName },
                     i->second.outPath);
         }
     }

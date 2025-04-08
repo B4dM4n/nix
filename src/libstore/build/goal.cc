@@ -1,5 +1,5 @@
-#include "goal.hh"
-#include "worker.hh"
+#include "nix/store/build/goal.hh"
+#include "nix/store/build/worker.hh"
 
 namespace nix {
 
@@ -175,7 +175,7 @@ Goal::Done Goal::amDone(ExitCode result, std::optional<Error> ex)
     exitCode = result;
 
     if (ex) {
-        if (!preserveException && !waiters.empty())
+        if (!waiters.empty())
             logError(ex->info());
         else
             this->ex = std::move(*ex);

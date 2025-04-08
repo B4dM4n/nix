@@ -1,25 +1,29 @@
-#include "args/root.hh"
-#include "current-process.hh"
-#include "command.hh"
-#include "common-args.hh"
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "globals.hh"
-#include "legacy.hh"
-#include "shared.hh"
-#include "store-api.hh"
-#include "filetransfer.hh"
-#include "finally.hh"
-#include "loggers.hh"
-#include "markdown.hh"
-#include "memory-source-accessor.hh"
-#include "terminal.hh"
-#include "users.hh"
-#include "network-proxy.hh"
-#include "eval-cache.hh"
-#include "flake/flake.hh"
+#include "nix/util/args/root.hh"
+#include "nix/util/current-process.hh"
+#include "nix/cmd/command.hh"
+#include "nix/main/common-args.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/store/globals.hh"
+#include "nix/cmd/legacy.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/util/finally.hh"
+#include "nix/main/loggers.hh"
+#include "nix/cmd/markdown.hh"
+#include "nix/util/memory-source-accessor.hh"
+#include "nix/util/terminal.hh"
+#include "nix/util/users.hh"
+#include "nix/cmd/network-proxy.hh"
+#include "nix/expr/eval-cache.hh"
+#include "nix/flake/flake.hh"
+#include "nix/flake/settings.hh"
+#include "nix/util/json-utils.hh"
+
 #include "self-exe.hh"
-#include "json-utils.hh"
+#include "crash-handler.hh"
+#include "cli-config-private.hh"
 
 #include <sys/types.h>
 #include <regex>
@@ -33,7 +37,7 @@
 #endif
 
 #if __linux__
-# include "namespaces.hh"
+# include "nix/util/namespaces.hh"
 #endif
 
 #ifndef _WIN32
@@ -42,7 +46,7 @@ extern std::string chrootHelperName;
 void chrootHelper(int argc, char * * argv);
 #endif
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 namespace nix {
 
@@ -354,6 +358,8 @@ void mainWrapped(int argc, char * * argv)
 {
     savedArgv = argv;
 
+    registerCrashHandler();
+
     /* The chroot helper needs to be run before any threads have been
        started. */
 #ifndef _WIN32
@@ -365,7 +371,7 @@ void mainWrapped(int argc, char * * argv)
 
     initNix();
     initGC();
-    flake::initLib(flakeSettings);
+    flakeSettings.configureEvalSettings(evalSettings);
 
     /* Set the build hook location
 

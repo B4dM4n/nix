@@ -1,9 +1,9 @@
-#include "ssh.hh"
-#include "finally.hh"
-#include "current-process.hh"
-#include "environment-variables.hh"
-#include "util.hh"
-#include "exec.hh"
+#include "nix/store/ssh.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/current-process.hh"
+#include "nix/util/environment-variables.hh"
+#include "nix/util/util.hh"
+#include "nix/util/exec.hh"
 
 namespace nix {
 
@@ -117,10 +117,10 @@ std::unique_ptr<SSHMaster::Connection> SSHMaster::startCommand(
     ProcessOptions options;
     options.dieWithParent = false;
 
+    std::unique_ptr<Logger::Suspension> loggerSuspension;
     if (!fakeSSH && !useMaster) {
-        logger->pause();
+        loggerSuspension = std::make_unique<Logger::Suspension>(logger->suspend());
     }
-    Finally cleanup = [&]() { logger->resume(); };
 
     conn->sshPid = startProcess([&]() {
         restoreProcessContext();
@@ -199,8 +199,7 @@ Path SSHMaster::startMaster()
     ProcessOptions options;
     options.dieWithParent = false;
 
-    logger->pause();
-    Finally cleanup = [&]() { logger->resume(); };
+    auto suspension = logger->suspend();
 
     if (isMasterRunning())
         return state->socketPath;

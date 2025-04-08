@@ -1,20 +1,20 @@
-#include "error.hh"
-#include "fetchers.hh"
-#include "users.hh"
-#include "cache.hh"
-#include "globals.hh"
-#include "tarfile.hh"
-#include "store-api.hh"
-#include "url-parts.hh"
-#include "pathlocks.hh"
-#include "processes.hh"
-#include "git.hh"
-#include "git-utils.hh"
-#include "logging.hh"
-#include "finally.hh"
-#include "fetch-settings.hh"
-#include "json-utils.hh"
-#include "archive.hh"
+#include "nix/util/error.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/util/users.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/tarfile.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/url-parts.hh"
+#include "nix/store/pathlocks.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/git.hh"
+#include "nix/fetchers/git-utils.hh"
+#include "nix/util/logging.hh"
+#include "nix/util/finally.hh"
+#include "nix/fetchers/fetch-settings.hh"
+#include "nix/util/json-utils.hh"
+#include "nix/util/archive.hh"
 
 #include <regex>
 #include <string.h>
@@ -351,8 +351,7 @@ struct GitInputScheme : InputScheme
 
             if (commitMsg) {
                 // Pause the logger to allow for user input (such as a gpg passphrase) in `git commit`
-                logger->pause();
-                Finally restoreLogger([]() { logger->resume(); });
+                auto suspension = logger->suspend();
                 runProgram("git", true,
                     { "-C", repoPath->string(), "--git-dir", repoInfo.gitDir, "commit", std::string(path.rel()), "-F", "-" },
                     *commitMsg);
@@ -533,14 +532,20 @@ struct GitInputScheme : InputScheme
         return *head;
     }
 
-    static MakeNotAllowedError makeNotAllowedError(std::string url)
+    static MakeNotAllowedError makeNotAllowedError(std::filesystem::path repoPath)
     {
-        return [url{std::move(url)}](const CanonPath & path) -> RestrictedPathError
-        {
-            if (nix::pathExists(path.abs()))
-                return RestrictedPathError("access to path '%s' is forbidden because it is not under Git control; maybe you should 'git add' it to the repository '%s'?", path, url);
+        return [repoPath{std::move(repoPath)}](const CanonPath & path) -> RestrictedPathError {
+            if (fs::symlink_exists(repoPath / path.rel()))
+                return RestrictedPathError(
+                    "Path '%1%' in the repository %2% is not tracked by Git.\n"
+                    "\n"
+                    "To make it visible to Nix, run:\n"
+                    "\n"
+                    "git -C %2% add \"%1%\"",
+                    path.rel(),
+                    repoPath);
             else
-                return RestrictedPathError("path '%s' does not exist in Git repository '%s'", path, url);
+                return RestrictedPathError("Path '%s' does not exist in Git repository %s.", path.rel(), repoPath);
         };
     }
 
@@ -748,7 +753,7 @@ struct GitInputScheme : InputScheme
         ref<SourceAccessor> accessor =
             repo->getAccessor(repoInfo.workdirInfo,
                 exportIgnore,
-                makeNotAllowedError(repoInfo.locationToArg()));
+                makeNotAllowedError(repoPath));
 
         /* If the repo has submodules, return a mounted input accessor
            consisting of the accessor for the top-level repo and the

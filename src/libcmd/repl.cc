@@ -2,34 +2,34 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "error.hh"
-#include "repl-interacter.hh"
-#include "repl.hh"
+#include "nix/util/error.hh"
+#include "nix/cmd/repl-interacter.hh"
+#include "nix/cmd/repl.hh"
 
-#include "ansicolor.hh"
-#include "shared.hh"
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "attr-path.hh"
-#include "signals.hh"
-#include "store-api.hh"
-#include "log-store.hh"
-#include "common-eval-args.hh"
-#include "get-drvs.hh"
-#include "derivations.hh"
-#include "globals.hh"
-#include "flake/flake.hh"
-#include "flake/lockfile.hh"
-#include "users.hh"
-#include "editor-for.hh"
-#include "finally.hh"
-#include "markdown.hh"
-#include "local-fs-store.hh"
-#include "print.hh"
-#include "ref.hh"
-#include "value.hh"
+#include "nix/util/ansicolor.hh"
+#include "nix/main/shared.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/util/signals.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/log-store.hh"
+#include "nix/cmd/common-eval-args.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/globals.hh"
+#include "nix/flake/flake.hh"
+#include "nix/flake/lockfile.hh"
+#include "nix/util/users.hh"
+#include "nix/cmd/editor-for.hh"
+#include "nix/util/finally.hh"
+#include "nix/cmd/markdown.hh"
+#include "nix/store/local-fs-store.hh"
+#include "nix/expr/print.hh"
+#include "nix/util/ref.hh"
+#include "nix/expr/value.hh"
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 namespace nix {
 
@@ -102,8 +102,7 @@ struct NixRepl
                               unsigned int maxDepth = std::numeric_limits<unsigned int>::max())
     {
         // Hide the progress bar during printing because it might interfere
-        logger->pause();
-        Finally resumeLoggerDefer([]() { logger->resume(); });
+        auto suspension = logger->suspend();
         ::nix::printValue(*state, str, v, PrintOptions {
             .ansiColors = true,
             .force = true,
@@ -125,7 +124,7 @@ std::string removeWhitespace(std::string s)
 
 
 NixRepl::NixRepl(const LookupPath & lookupPath, nix::ref<Store> store, ref<EvalState> state,
-            std::function<NixRepl::AnnotatedValues()> getValues, RunNix * runNix = nullptr)
+            std::function<NixRepl::AnnotatedValues()> getValues, RunNix * runNix)
     : AbstractNixRepl(state)
     , debugTraceIndex(0)
     , getValues(getValues)
@@ -141,16 +140,13 @@ static std::ostream & showDebugTrace(std::ostream & out, const PosTable & positi
         out << ANSI_RED "error: " << ANSI_NORMAL;
     out << dt.hint.str() << "\n";
 
-    // prefer direct pos, but if noPos then try the expr.
-    auto pos = dt.pos
-        ? dt.pos
-        : positions[dt.expr.getPos() ? dt.expr.getPos() : noPos];
+    auto pos = dt.getPos(positions);
 
     if (pos) {
-        out << *pos;
-        if (auto loc = pos->getCodeLines()) {
+        out << pos;
+        if (auto loc = pos.getCodeLines()) {
             out << "\n";
-            printCodeLines(out, "", *pos, *loc);
+            printCodeLines(out, "", pos, *loc);
             out << "\n";
         }
     }
@@ -180,18 +176,20 @@ ReplExitStatus NixRepl::mainLoop()
 
     while (true) {
         // Hide the progress bar while waiting for user input, so that it won't interfere.
-        logger->pause();
-        // When continuing input from previous lines, don't print a prompt, just align to the same
-        // number of chars as the prompt.
-        if (!interacter->getLine(input, input.empty() ? ReplPromptType::ReplPrompt : ReplPromptType::ContinuationPrompt)) {
-            // Ctrl-D should exit the debugger.
-            state->debugStop = false;
-            logger->cout("");
-            // TODO: Should Ctrl-D exit just the current debugger session or
-            // the entire program?
-            return ReplExitStatus::QuitAll;
+        {
+            auto suspension = logger->suspend();
+            // When continuing input from previous lines, don't print a prompt, just align to the same
+            // number of chars as the prompt.
+            if (!interacter->getLine(input, input.empty() ? ReplPromptType::ReplPrompt : ReplPromptType::ContinuationPrompt)) {
+                // Ctrl-D should exit the debugger.
+                state->debugStop = false;
+                logger->cout("");
+                // TODO: Should Ctrl-D exit just the current debugger session or
+                // the entire program?
+                return ReplExitStatus::QuitAll;
+            }
+            // `suspension` resumes the logger
         }
-        logger->resume();
         try {
             switch (processLine(input)) {
                 case ProcessLineResult::Quit:
@@ -586,6 +584,7 @@ ProcessLineResult NixRepl::processLine(std::string line)
     else if (command == ":p" || command == ":print") {
         Value v;
         evalString(arg, v);
+        auto suspension = logger->suspend();
         if (v.type() == nString) {
             std::cout << v.string_view();
         } else {
@@ -694,6 +693,7 @@ ProcessLineResult NixRepl::processLine(std::string line)
         } else {
             Value v;
             evalString(line, v);
+            auto suspension = logger->suspend();
             printValue(std::cout, v, 1);
             std::cout << std::endl;
         }
@@ -839,9 +839,10 @@ std::unique_ptr<AbstractNixRepl> AbstractNixRepl::create(
 {
     return std::make_unique<NixRepl>(
         lookupPath,
-        openStore(),
+        std::move(store),
         state,
-        getValues
+        getValues,
+        runNix
     );
 }
 
@@ -859,7 +860,8 @@ ReplExitStatus AbstractNixRepl::runSimple(
             lookupPath,
             openStore(),
             evalState,
-            getValues
+            getValues,
+            /*runNix=*/nullptr
         );
 
     repl->initEnv();

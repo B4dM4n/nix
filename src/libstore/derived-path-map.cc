@@ -1,5 +1,5 @@
-#include "derived-path-map.hh"
-#include "util.hh"
+#include "nix/store/derived-path-map.hh"
+#include "nix/util/util.hh"
 
 namespace nix {
 
@@ -52,7 +52,6 @@ typename DerivedPathMap<V>::ChildNode * DerivedPathMap<V>::findSlot(const Single
 
 // instantiations
 
-#include "derivation-creation-and-realisation-goal.hh"
 namespace nix {
 
 template<>
@@ -68,8 +67,5 @@ std::strong_ordering DerivedPathMap<std::set<std::string>>::ChildNode::operator 
 
 template struct DerivedPathMap<std::set<std::string>>::ChildNode;
 template struct DerivedPathMap<std::set<std::string>>;
-
-template struct DerivedPathMap<std::weak_ptr<DerivationCreationAndRealisationGoal>>;
-
 
 };
