@@ -1,11 +1,11 @@
-#include "globals.hh"
-#include "current-process.hh"
-#include "shared.hh"
-#include "store-api.hh"
-#include "gc-store.hh"
-#include "loggers.hh"
-#include "progress-bar.hh"
-#include "signals.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/current-process.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/gc-store.hh"
+#include "nix/main/loggers.hh"
+#include "nix/main/progress-bar.hh"
+#include "nix/util/signals.hh"
 
 #include <algorithm>
 #include <exception>
@@ -22,8 +22,11 @@
 
 #include <openssl/crypto.h>
 
-#include "exit.hh"
-#include "strings.hh"
+#include "nix/util/exit.hh"
+#include "nix/util/strings.hh"
+
+#include "main-config-private.hh"
+
 
 namespace nix {
 
@@ -297,7 +300,7 @@ void printVersion(const std::string & programName)
     std::cout << fmt("%1% (Nix) %2%", programName, nixVersion) << std::endl;
     if (verbosity > lvlInfo) {
         Strings cfg;
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
         cfg.push_back("gc");
 #endif
         cfg.push_back("signed-caches");
@@ -314,20 +317,6 @@ void printVersion(const std::string & programName)
     }
     throw Exit();
 }
-
-
-void showManPage(const std::string & name)
-{
-    restoreProcessContext();
-    setEnv("MANPATH", settings.nixManDir.c_str());
-    execlp("man", "man", name.c_str(), nullptr);
-    if (errno == ENOENT) {
-        // Not SysError because we don't want to suffix the errno, aka No such file or directory.
-        throw Error("The '%1%' command was not found, but it is needed for '%2%' and some other '%3%' commands' help text. Perhaps you could install the '%1%' command?", "man", name.c_str(), "nix-*");
-    }
-    throw SysError("command 'man %1%' failed", name.c_str());
-}
-
 
 int handleExceptions(const std::string & programName, std::function<void()> fun)
 {
@@ -375,7 +364,7 @@ RunPager::RunPager()
     if (!pager) pager = getenv("PAGER");
     if (pager && ((std::string) pager == "" || (std::string) pager == "cat")) return;
 
-    stopProgressBar();
+    logger->stop();
 
     Pipe toPager;
     toPager.create();
@@ -416,7 +405,7 @@ RunPager::~RunPager()
         }
 #endif
     } catch (...) {
-        ignoreException();
+        ignoreExceptionInDestructor();
     }
 }
 

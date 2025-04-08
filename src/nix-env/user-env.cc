@@ -1,14 +1,14 @@
 #include "user-env.hh"
-#include "derivations.hh"
-#include "store-api.hh"
-#include "path-with-outputs.hh"
-#include "local-fs-store.hh"
-#include "globals.hh"
-#include "shared.hh"
-#include "eval.hh"
-#include "eval-inline.hh"
-#include "profiles.hh"
-#include "print-ambiguous.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/path-with-outputs.hh"
+#include "nix/store/local-fs-store.hh"
+#include "nix/store/globals.hh"
+#include "nix/main/shared.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/store/profiles.hh"
+#include "nix/expr/print-ambiguous.hh"
 
 #include <limits>
 #include <sstream>
@@ -111,9 +111,7 @@ bool createUserEnv(EvalState & state, PackageInfos & elems,
     auto manifestFile = ({
         std::ostringstream str;
         printAmbiguous(manifest, state.symbols, str, nullptr, std::numeric_limits<int>::max());
-        // TODO with C++20 we can use str.view() instead and avoid copy.
-        std::string str2 = str.str();
-        StringSource source { str2 };
+        StringSource source { toView(str) };
         state.store->addToStoreFromDump(
             source, "env-manifest.nix", FileSerialisationMethod::Flat, ContentAddressMethod::Raw::Text, HashAlgorithm::SHA256, references);
     });

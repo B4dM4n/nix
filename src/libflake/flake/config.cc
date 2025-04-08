@@ -1,7 +1,7 @@
-#include "users.hh"
-#include "config-global.hh"
-#include "flake/settings.hh"
-#include "flake.hh"
+#include "nix/util/users.hh"
+#include "nix/util/config-global.hh"
+#include "nix/flake/settings.hh"
+#include "nix/flake/flake.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -12,7 +12,7 @@ typedef std::map<std::string, std::map<std::string, bool>> TrustedList;
 
 Path trustedListPath()
 {
-    return getDataDir() + "/nix/trusted-settings.json";
+    return getDataDir() + "/trusted-settings.json";
 }
 
 static TrustedList readTrustedList()

@@ -1,23 +1,23 @@
-#include "command.hh"
-#include "installable-flake.hh"
-#include "common-args.hh"
-#include "shared.hh"
-#include "store-api.hh"
-#include "derivations.hh"
-#include "archive.hh"
-#include "builtins/buildenv.hh"
-#include "flake/flakeref.hh"
+#include "nix/cmd/command.hh"
+#include "nix/cmd/installable-flake.hh"
+#include "nix/main/common-args.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/derivations.hh"
+#include "nix/util/archive.hh"
+#include "nix/store/builtins/buildenv.hh"
+#include "nix/flake/flakeref.hh"
 #include "../nix-env/user-env.hh"
-#include "profiles.hh"
-#include "names.hh"
-#include "url.hh"
-#include "flake/url-name.hh"
+#include "nix/store/profiles.hh"
+#include "nix/store/names.hh"
+#include "nix/util/url.hh"
+#include "nix/flake/url-name.hh"
 
 #include <nlohmann/json.hpp>
 #include <regex>
 #include <iomanip>
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 using namespace nix;
 
@@ -122,12 +122,12 @@ struct ProfileManifest
 
     ProfileManifest() { }
 
-    ProfileManifest(EvalState & state, const Path & profile)
+    ProfileManifest(EvalState & state, const std::filesystem::path & profile)
     {
-        auto manifestPath = profile + "/manifest.json";
+        auto manifestPath = profile / "manifest.json";
 
-        if (pathExists(manifestPath)) {
-            auto json = nlohmann::json::parse(readFile(manifestPath));
+        if (std::filesystem::exists(manifestPath)) {
+            auto json = nlohmann::json::parse(readFile(manifestPath.string()));
 
             auto version = json.value("version", 0);
             std::string sUrl;
@@ -176,12 +176,12 @@ struct ProfileManifest
             }
         }
 
-        else if (pathExists(profile + "/manifest.nix")) {
+        else if (std::filesystem::exists(profile / "manifest.nix")) {
             // FIXME: needed because of pure mode; ugly.
-            state.allowPath(state.store->followLinksToStore(profile));
-            state.allowPath(state.store->followLinksToStore(profile + "/manifest.nix"));
+            state.allowPath(state.store->followLinksToStore(profile.string()));
+            state.allowPath(state.store->followLinksToStore((profile / "manifest.nix").string()));
 
-            auto packageInfos = queryInstalled(state, state.store->followLinksToStore(profile));
+            auto packageInfos = queryInstalled(state, state.store->followLinksToStore(profile.string()));
 
             for (auto & packageInfo : packageInfos) {
                 ProfileElement element;

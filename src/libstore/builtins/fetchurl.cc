@@ -1,15 +1,16 @@
-#include "builtins.hh"
-#include "filetransfer.hh"
-#include "store-api.hh"
-#include "archive.hh"
-#include "compression.hh"
+#include "nix/store/builtins.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/archive.hh"
+#include "nix/util/compression.hh"
 
 namespace nix {
 
 void builtinFetchurl(
     const BasicDerivation & drv,
     const std::map<std::string, Path> & outputs,
-    const std::string & netrcData)
+    const std::string & netrcData,
+    const std::string & caFileData)
 {
     /* Make the host's netrc data available. Too bad curl requires
        this to be stored in a file. It would be nice if we could just
@@ -18,6 +19,9 @@ void builtinFetchurl(
         settings.netrcFile = "netrc";
         writeFile(settings.netrcFile, netrcData, 0600);
     }
+
+    settings.caFile = "ca-certificates.crt";
+    writeFile(settings.caFile, caFileData, 0600);
 
     auto out = get(drv.outputs, "out");
     if (!out)
@@ -38,10 +42,7 @@ void builtinFetchurl(
 
         auto source = sinkToSource([&](Sink & sink) {
 
-            /* No need to do TLS verification, because we check the hash of
-               the result anyway. */
             FileTransferRequest request(url);
-            request.verifyTLS = false;
             request.decompress = false;
 
             auto decompressor = makeDecompressionSink(

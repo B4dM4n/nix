@@ -1,13 +1,13 @@
-#include "fetchers.hh"
-#include "processes.hh"
-#include "users.hh"
-#include "cache.hh"
-#include "globals.hh"
-#include "tarfile.hh"
-#include "store-api.hh"
-#include "url-parts.hh"
-#include "store-path-accessor.hh"
-#include "fetch-settings.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/users.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/tarfile.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/url-parts.hh"
+#include "nix/fetchers/store-path-accessor.hh"
+#include "nix/fetchers/fetch-settings.hh"
 
 #include <sys/time.h>
 
@@ -126,7 +126,7 @@ struct MercurialInputScheme : InputScheme
         return res;
     }
 
-    std::optional<Path> getSourcePath(const Input & input) const override
+    std::optional<std::filesystem::path> getSourcePath(const Input & input) const override
     {
         auto url = parseURL(getStrAttr(input.attrs, "url"));
         if (url.scheme == "file" && !input.getRef() && !input.getRev())
@@ -161,7 +161,7 @@ struct MercurialInputScheme : InputScheme
     {
         auto url = parseURL(getStrAttr(input.attrs, "url"));
         bool isLocal = url.scheme == "file";
-        return {isLocal, isLocal ? url.path : url.base};
+        return {isLocal, isLocal ? url.path : url.to_string()};
     }
 
     StorePath fetchToStore(ref<Store> store, Input & input) const
@@ -263,7 +263,7 @@ struct MercurialInputScheme : InputScheme
                 return makeResult(res->value, res->storePath);
         }
 
-        Path cacheDir = fmt("%s/nix/hg/%s", getCacheDir(), hashString(HashAlgorithm::SHA256, actualUrl).to_string(HashFormat::Nix32, false));
+        Path cacheDir = fmt("%s/hg/%s", getCacheDir(), hashString(HashAlgorithm::SHA256, actualUrl).to_string(HashFormat::Nix32, false));
 
         /* If this is a commit hash that we already have, we don't
            have to pull again. */

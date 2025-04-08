@@ -1,7 +1,7 @@
-#include "value-to-json.hh"
-#include "eval-inline.hh"
-#include "store-api.hh"
-#include "signals.hh"
+#include "nix/expr/value-to-json.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/signals.hh"
 
 #include <cstdlib>
 #include <iomanip>
@@ -22,7 +22,7 @@ json printValueAsJSON(EvalState & state, bool strict,
     switch (v.type()) {
 
         case nInt:
-            out = v.integer();
+            out = v.integer().value;
             break;
 
         case nBool:
@@ -108,7 +108,11 @@ json printValueAsJSON(EvalState & state, bool strict,
 void printValueAsJSON(EvalState & state, bool strict,
     Value & v, const PosIdx pos, std::ostream & str, NixStringContext & context, bool copyToStore)
 {
-    str << printValueAsJSON(state, strict, v, pos, context, copyToStore);
+    try {
+        str << printValueAsJSON(state, strict, v, pos, context, copyToStore);
+    } catch (nlohmann::json::exception & e) {
+        throw JSONSerializationError("JSON serialization error: %s", e.what());
+    }
 }
 
 json ExternalValueBase::printValueAsJSON(EvalState & state, bool strict,

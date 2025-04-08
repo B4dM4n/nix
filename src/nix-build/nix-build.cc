@@ -9,24 +9,26 @@
 
 #include <nlohmann/json.hpp>
 
-#include "current-process.hh"
-#include "parsed-derivations.hh"
-#include "store-api.hh"
-#include "local-fs-store.hh"
-#include "globals.hh"
-#include "realisation.hh"
-#include "derivations.hh"
-#include "shared.hh"
-#include "path-with-outputs.hh"
-#include "eval.hh"
-#include "eval-inline.hh"
-#include "get-drvs.hh"
-#include "common-eval-args.hh"
-#include "attr-path.hh"
-#include "legacy.hh"
-#include "users.hh"
-#include "network-proxy.hh"
-#include "compatibility-settings.hh"
+#include "nix/util/current-process.hh"
+#include "nix/store/parsed-derivations.hh"
+#include "nix/store/derivation-options.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/local-fs-store.hh"
+#include "nix/store/globals.hh"
+#include "nix/store/realisation.hh"
+#include "nix/store/derivations.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/path-with-outputs.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/cmd/common-eval-args.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/cmd/legacy.hh"
+#include "nix/util/users.hh"
+#include "nix/cmd/network-proxy.hh"
+#include "nix/cmd/compatibility-settings.hh"
+#include "man-pages.hh"
 
 using namespace nix;
 using namespace std::string_literals;
@@ -36,7 +38,7 @@ extern char * * environ __attribute__((weak));
 /* Recreate the effect of the perl shellwords function, breaking up a
  * string into arguments like a shell word, including escapes
  */
-static std::vector<std::string> shellwords(const std::string & s)
+static std::vector<std::string> shellwords(std::string_view s)
 {
     std::regex whitespace("^\\s+");
     auto begin = s.cbegin();
@@ -51,7 +53,7 @@ static std::vector<std::string> shellwords(const std::string & s)
     auto it = begin;
     for (; it != s.cend(); ++it) {
         if (st == sBegin) {
-            std::smatch match;
+            std::cmatch match;
             if (regex_search(it, s.cend(), match, whitespace)) {
                 cur.append(begin, it);
                 res.push_back(cur);
@@ -163,7 +165,7 @@ static void main_nix_build(int argc, char * * argv)
         script = argv[1];
         try {
             auto lines = tokenizeString<Strings>(readFile(script), "\n");
-            if (std::regex_search(lines.front(), std::regex("^#!"))) {
+            if (!lines.empty() && std::regex_search(lines.front(), std::regex("^#!"))) {
                 lines.pop_front();
                 inShebang = true;
                 for (int i = 2; i < argc; ++i)
@@ -173,7 +175,7 @@ static void main_nix_build(int argc, char * * argv)
                     line = chomp(line);
                     std::smatch match;
                     if (std::regex_match(line, match, std::regex("^#!\\s*nix-shell\\s+(.*)$")))
-                        for (const auto & word : shellwords(match[1].str()))
+                        for (const auto & word : shellwords({match[1].first, match[1].second}))
                             args.push_back(word);
                 }
             }
@@ -260,9 +262,9 @@ static void main_nix_build(int argc, char * * argv)
                 // read the shebang to understand which packages to read from. Since
                 // this is handled via nix-shell -p, we wrap our ruby script execution
                 // in ruby -e 'load' which ignores the shebangs.
-                envCommand = fmt("exec %1% %2% -e 'load(ARGV.shift)' -- %3% %4%", execArgs, interpreter, shellEscape(script), joined.str());
+                envCommand = fmt("exec %1% %2% -e 'load(ARGV.shift)' -- %3% %4%", execArgs, interpreter, shellEscape(script), toView(joined));
             } else {
-                envCommand = fmt("exec %1% %2% %3% %4%", execArgs, interpreter, shellEscape(script), joined.str());
+                envCommand = fmt("exec %1% %2% %3% %4%", execArgs, interpreter, shellEscape(script), toView(joined));
             }
         }
 
@@ -340,13 +342,15 @@ static void main_nix_build(int argc, char * * argv)
         exprs = {state->parseStdin()};
     else
         for (auto i : remainingArgs) {
-            auto baseDir = inShebang && !packages ? absPath(dirOf(script)) : i;
-
-            if (fromArgs)
+            if (fromArgs) {
+                auto shebangBaseDir = absPath(dirOf(script));
                 exprs.push_back(state->parseExprFromString(
                     std::move(i),
-                    (inShebang && compatibilitySettings.nixShellShebangArgumentsRelativeToScript) ? lookupFileArg(*state, baseDir) : state->rootPath(".")
+                    (inShebang && compatibilitySettings.nixShellShebangArgumentsRelativeToScript)
+                        ? lookupFileArg(*state, shebangBaseDir)
+                        : state->rootPath(".")
                 ));
+            }
             else {
                 auto absolute = i;
                 try {
@@ -526,8 +530,6 @@ static void main_nix_build(int argc, char * * argv)
         // Set the environment.
         auto env = getEnv();
 
-        auto tmp = getEnvNonEmpty("TMPDIR").value_or("/tmp");
-
         if (pure) {
             decltype(env) newEnv;
             for (auto & i : env)
@@ -538,18 +540,17 @@ static void main_nix_build(int argc, char * * argv)
             env["__ETC_PROFILE_SOURCED"] = "1";
         }
 
-        env["NIX_BUILD_TOP"] = env["TMPDIR"] = env["TEMPDIR"] = env["TMP"] = env["TEMP"] = tmp;
+        env["NIX_BUILD_TOP"] = env["TMPDIR"] = env["TEMPDIR"] = env["TMP"] = env["TEMP"] = tmpDir.path().string();
         env["NIX_STORE"] = store->storeDir;
         env["NIX_BUILD_CORES"] = std::to_string(settings.buildCores);
 
-        auto passAsFile = tokenizeString<StringSet>(getOr(drv.env, "passAsFile", ""));
+        ParsedDerivation parsedDrv(packageInfo.requireDrvPath(), drv);
+        DerivationOptions drvOptions = DerivationOptions::fromParsedDerivation(parsedDrv);
 
-        bool keepTmp = false;
         int fileNr = 0;
 
         for (auto & var : drv.env)
-            if (passAsFile.count(var.first)) {
-                keepTmp = true;
+            if (drvOptions.passAsFile.count(var.first)) {
                 auto fn = ".attr-" + std::to_string(fileNr++);
                 Path p = (tmpDir.path() / fn).string();
                 writeFile(p, var.second);
@@ -559,7 +560,7 @@ static void main_nix_build(int argc, char * * argv)
 
         std::string structuredAttrsRC;
 
-        if (env.count("__json")) {
+        if (parsedDrv.hasStructuredAttrs()) {
             StorePathSet inputs;
 
             std::function<void(const StorePath &, const DerivedPathMap<StringSet>::ChildNode &)> accumInputClosure;
@@ -577,8 +578,6 @@ static void main_nix_build(int argc, char * * argv)
             for (const auto & [inputDrv, inputNode] : drv.inputDrvs.map)
                 accumInputClosure(inputDrv, inputNode);
 
-            ParsedDerivation parsedDrv(packageInfo.requireDrvPath(), drv);
-
             if (auto structAttrs = parsedDrv.prepareStructuredAttrs(*store, inputs)) {
                 auto json = structAttrs.value();
                 structuredAttrsRC = writeStructuredAttrsShell(json);
@@ -591,7 +590,6 @@ static void main_nix_build(int argc, char * * argv)
 
                 env["NIX_ATTRS_SH_FILE"] = attrsSH;
                 env["NIX_ATTRS_JSON_FILE"] = attrsJSON;
-                keepTmp = true;
             }
         }
 
@@ -601,12 +599,10 @@ static void main_nix_build(int argc, char * * argv)
            lose the current $PATH directories. */
         auto rcfile = (tmpDir.path() / "rc").string();
         std::string rc = fmt(
-                R"(_nix_shell_clean_tmpdir() { command rm -rf %1%; }; )"s +
-                (keepTmp ?
-                    "trap _nix_shell_clean_tmpdir EXIT; "
-                    "exitHooks+=(_nix_shell_clean_tmpdir); "
-                    "failureHooks+=(_nix_shell_clean_tmpdir); ":
-                    "_nix_shell_clean_tmpdir; ") +
+                (R"(_nix_shell_clean_tmpdir() { command rm -rf %1%; };)"s
+                  "trap _nix_shell_clean_tmpdir EXIT; "
+                  "exitHooks+=(_nix_shell_clean_tmpdir); "
+                  "failureHooks+=(_nix_shell_clean_tmpdir); ") +
                 (pure ? "" : "[ -n \"$PS1\" ] && [ -e ~/.bashrc ] && source ~/.bashrc;") +
                 "%2%"
                 // always clear PATH.

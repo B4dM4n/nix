@@ -1,6 +1,6 @@
-#include "command.hh"
-#include "store-api.hh"
-#include "archive.hh"
+#include "nix/cmd/command.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/archive.hh"
 
 using namespace nix;
 
@@ -20,7 +20,7 @@ struct CmdDumpPath : StorePathCommand
 
     void run(ref<Store> store, const StorePath & storePath) override
     {
-        FdSink sink(getStandardOut());
+        FdSink sink(getStandardOutput());
         store->narFromPath(storePath, sink);
         sink.flush();
     }
@@ -55,7 +55,7 @@ struct CmdDumpPath2 : Command
 
     void run() override
     {
-        FdSink sink(getStandardOut());
+        FdSink sink(getStandardOutput());
         dumpPath(path, sink);
         sink.flush();
     }

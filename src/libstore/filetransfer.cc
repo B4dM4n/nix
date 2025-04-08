@@ -1,19 +1,19 @@
-#include "filetransfer.hh"
-#include "globals.hh"
-#include "config-global.hh"
-#include "store-api.hh"
-#include "s3.hh"
-#include "compression.hh"
-#include "finally.hh"
-#include "callback.hh"
-#include "signals.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/config-global.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/s3.hh"
+#include "nix/util/compression.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/callback.hh"
+#include "nix/util/signals.hh"
 
 #if ENABLE_S3
 #include <aws/core/client/ClientConfiguration.h>
 #endif
 
 #if __linux__
-# include "namespaces.hh"
+# include "nix/util/namespaces.hh"
 #endif
 
 #include <unistd.h>
@@ -54,6 +54,8 @@ struct curlFileTransfer : public FileTransfer
         bool done = false; // whether either the success or failure function has been called
         Callback<FileTransferResult> callback;
         CURL * req = 0;
+        // buffer to accompany the `req` above
+        char errbuf[CURL_ERROR_SIZE];
         bool active = false; // whether the handle has been added to the multi object
         std::string statusMsg;
 
@@ -92,7 +94,7 @@ struct curlFileTransfer : public FileTransfer
             : fileTransfer(fileTransfer)
             , request(request)
             , act(*logger, lvlTalkative, actFileTransfer,
-                fmt(request.data ? "uploading '%s'" : "downloading '%s'", request.uri),
+                request.post ? "" : fmt(request.data ?  "uploading '%s'" : "downloading '%s'", request.uri),
                 {request.uri}, request.parentAct)
             , callback(std::move(callback))
             , finalSink([this](std::string_view data) {
@@ -137,7 +139,7 @@ struct curlFileTransfer : public FileTransfer
                 if (!done)
                     fail(FileTransferError(Interrupted, {}, "download of '%s' was interrupted", request.uri));
             } catch (...) {
-                ignoreException();
+                ignoreExceptionInDestructor();
             }
         }
 
@@ -151,7 +153,7 @@ struct curlFileTransfer : public FileTransfer
         template<class T>
         void fail(T && e)
         {
-            failEx(std::make_exception_ptr(std::move(e)));
+            failEx(std::make_exception_ptr(std::forward<T>(e)));
         }
 
         LambdaSink finalSink;
@@ -259,7 +261,7 @@ struct curlFileTransfer : public FileTransfer
             return ((TransferItem *) userp)->headerCallback(contents, size, nmemb);
         }
 
-        int progressCallback(double dltotal, double dlnow)
+        int progressCallback(curl_off_t dltotal, curl_off_t dlnow)
         {
             try {
                 act.progress(dlnow, dltotal);
@@ -269,9 +271,19 @@ struct curlFileTransfer : public FileTransfer
             return getInterrupted();
         }
 
-        static int progressCallbackWrapper(void * userp, double dltotal, double dlnow, double ultotal, double ulnow)
+        int silentProgressCallback(curl_off_t dltotal, curl_off_t dlnow)
+        {
+            return getInterrupted();
+        }
+
+        static int progressCallbackWrapper(void * userp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
         {
             return ((TransferItem *) userp)->progressCallback(dltotal, dlnow);
+        }
+
+        static int silentProgressCallbackWrapper(void * userp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
+        {
+            return ((TransferItem *) userp)->silentProgressCallback(dltotal, dlnow);
         }
 
         static int debugCallback(CURL * handle, curl_infotype type, char * data, size_t size, void * userptr)
@@ -297,6 +309,14 @@ struct curlFileTransfer : public FileTransfer
         {
             return ((TransferItem *) userp)->readCallback(buffer, size, nitems);
         }
+
+        #if !defined(_WIN32) && LIBCURL_VERSION_NUM >= 0x071000
+        static int cloexec_callback(void *, curl_socket_t curlfd, curlsocktype purpose) {
+            unix::closeOnExec(curlfd);
+            vomit("cloexec set for fd %i", curlfd);
+            return CURL_SOCKOPT_OK;
+        }
+        #endif
 
         void init()
         {
@@ -330,8 +350,11 @@ struct curlFileTransfer : public FileTransfer
             curl_easy_setopt(req, CURLOPT_HEADERFUNCTION, TransferItem::headerCallbackWrapper);
             curl_easy_setopt(req, CURLOPT_HEADERDATA, this);
 
-            curl_easy_setopt(req, CURLOPT_PROGRESSFUNCTION, progressCallbackWrapper);
-            curl_easy_setopt(req, CURLOPT_PROGRESSDATA, this);
+            if (request.post)
+                curl_easy_setopt(req, CURLOPT_XFERINFOFUNCTION, silentProgressCallbackWrapper);
+            else
+                curl_easy_setopt(req, CURLOPT_XFERINFOFUNCTION, progressCallbackWrapper);
+            curl_easy_setopt(req, CURLOPT_XFERINFODATA, this);
             curl_easy_setopt(req, CURLOPT_NOPROGRESS, 0);
 
             curl_easy_setopt(req, CURLOPT_HTTPHEADER, requestHeaders);
@@ -343,7 +366,10 @@ struct curlFileTransfer : public FileTransfer
                 curl_easy_setopt(req, CURLOPT_NOBODY, 1);
 
             if (request.data) {
-                curl_easy_setopt(req, CURLOPT_UPLOAD, 1L);
+                if (request.post)
+                    curl_easy_setopt(req, CURLOPT_POST, 1L);
+                else
+                    curl_easy_setopt(req, CURLOPT_UPLOAD, 1L);
                 curl_easy_setopt(req, CURLOPT_READFUNCTION, readCallbackWrapper);
                 curl_easy_setopt(req, CURLOPT_READDATA, this);
                 curl_easy_setopt(req, CURLOPT_INFILESIZE_LARGE, (curl_off_t) request.data->length());
@@ -357,6 +383,10 @@ struct curlFileTransfer : public FileTransfer
                 curl_easy_setopt(req, CURLOPT_SSL_VERIFYHOST, 0);
             }
 
+            #if !defined(_WIN32) && LIBCURL_VERSION_NUM >= 0x071000
+            curl_easy_setopt(req, CURLOPT_SOCKOPTFUNCTION, cloexec_callback);
+            #endif
+
             curl_easy_setopt(req, CURLOPT_CONNECTTIMEOUT, fileTransferSettings.connectTimeout.get());
 
             curl_easy_setopt(req, CURLOPT_LOW_SPEED_LIMIT, 1L);
@@ -369,6 +399,9 @@ struct curlFileTransfer : public FileTransfer
 
             if (writtenToSink)
                 curl_easy_setopt(req, CURLOPT_RESUME_FROM_LARGE, writtenToSink);
+
+            curl_easy_setopt(req, CURLOPT_ERRORBUFFER, errbuf);
+            errbuf[0] = 0;
 
             result.data.clear();
             result.bodySize = 0;
@@ -413,7 +446,8 @@ struct curlFileTransfer : public FileTransfer
                 if (httpStatus == 304 && result.etag == "")
                     result.etag = request.expectedETag;
 
-                act.progress(result.bodySize, result.bodySize);
+                if (!request.post)
+                    act.progress(result.bodySize, result.bodySize);
                 done = true;
                 callback(std::move(result));
             }
@@ -484,8 +518,8 @@ struct curlFileTransfer : public FileTransfer
                         code == CURLE_OK ? "" : fmt(" (curl error: %s)", curl_easy_strerror(code)))
                     : FileTransferError(err,
                         std::move(response),
-                        "unable to %s '%s': %s (%d)",
-                        request.verb(), request.uri, curl_easy_strerror(code), code);
+                        "unable to %s '%s': %s (%d) %s",
+                        request.verb(), request.uri, curl_easy_strerror(code), code, errbuf);
 
                 /* If this is a transient error, then maybe retry the
                    download after a while. If we're writing to a
@@ -754,12 +788,17 @@ struct curlFileTransfer : public FileTransfer
 
                 S3Helper s3Helper(profile, region, scheme, endpoint);
 
+                Activity act(*logger, lvlTalkative, actFileTransfer,
+                    fmt("downloading '%s'", request.uri),
+                    {request.uri}, request.parentAct);
+
                 // FIXME: implement ETag
                 auto s3Res = s3Helper.getObject(bucketName, key);
                 FileTransferResult res;
                 if (!s3Res.data)
-                    throw FileTransferError(NotFound, "S3 object '%s' does not exist", request.uri);
+                    throw FileTransferError(NotFound, {}, "S3 object '%s' does not exist", request.uri);
                 res.data = std::move(*s3Res.data);
+                res.urls.push_back(request.uri);
                 callback(std::move(res));
 #else
                 throw nix::Error("cannot download '%s' because Nix is not built with S3 support", request.uri);

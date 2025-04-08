@@ -1,4 +1,4 @@
-#include "position.hh"
+#include "nix/util/position.hh"
 
 namespace nix {
 
@@ -9,7 +9,7 @@ Pos::Pos(const Pos * other)
     }
     line = other->line;
     column = other->column;
-    origin = std::move(other->origin);
+    origin = other->origin;
 }
 
 Pos::operator std::shared_ptr<Pos>() const
@@ -64,6 +64,13 @@ std::optional<std::string> Pos::getSource() const
             }
         }
     }, origin);
+}
+
+std::optional<SourcePath> Pos::getSourcePath() const
+{
+    if (auto * path = std::get_if<SourcePath>(&origin))
+        return *path;
+    return std::nullopt;
 }
 
 void Pos::print(std::ostream & out, bool showOrigin) const

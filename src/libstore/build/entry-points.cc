@@ -1,10 +1,10 @@
-#include "worker.hh"
-#include "substitution-goal.hh"
+#include "nix/store/build/worker.hh"
+#include "nix/store/build/substitution-goal.hh"
 #ifndef _WIN32 // TODO Enable building on Windows
-#  include "derivation-goal.hh"
+#  include "nix/store/build/derivation-goal.hh"
 #endif
-#include "local-store.hh"
-#include "strings.hh"
+#include "nix/store/local-store.hh"
+#include "nix/util/strings.hh"
 
 namespace nix {
 
@@ -66,6 +66,7 @@ std::vector<KeyedBuildResult> Store::buildPathsWithResults(
     worker.run(goals);
 
     std::vector<KeyedBuildResult> results;
+    results.reserve(state.size());
 
     for (auto & [req, goalPtr] : state)
         results.emplace_back(KeyedBuildResult {

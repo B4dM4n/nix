@@ -1,13 +1,13 @@
-#include "current-process.hh"
-#include "util.hh"
-#include "finally.hh"
-#include "file-system.hh"
-#include "processes.hh"
-#include "signals.hh"
+#include "nix/util/current-process.hh"
+#include "nix/util/util.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/file-system.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/signals.hh"
 
 #include <mutex>
 #include <sys/resource.h>
-#include "cgroup.hh"
+#include "nix/util/cgroup.hh"
 
 #include <sys/mount.h>
 
@@ -118,7 +118,7 @@ void saveMountNamespace()
 void restoreMountNamespace()
 {
     try {
-        auto savedCwd = absPath(".");
+        auto savedCwd = std::filesystem::current_path();
 
         if (fdSavedMountNamespace && setns(fdSavedMountNamespace.get(), CLONE_NEWNS) == -1)
             throw SysError("restoring parent mount namespace");

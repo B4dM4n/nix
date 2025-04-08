@@ -1,11 +1,13 @@
-#include "logging.hh"
-#include "pathlocks.hh"
-#include "signals.hh"
-#include "util.hh"
-#include <errhandlingapi.h>
-#include <fileapi.h>
-#include <windows.h>
-#include "windows-error.hh"
+#include "nix/util/logging.hh"
+#include "nix/store/pathlocks.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/util.hh"
+
+#ifdef _WIN32
+#  include <errhandlingapi.h>
+#  include <fileapi.h>
+#  include <windows.h>
+#  include "nix/util/windows-error.hh"
 
 namespace nix {
 
@@ -154,3 +156,4 @@ FdLock::FdLock(Descriptor desc, LockType lockType, bool wait, std::string_view w
 }
 
 }
+#endif

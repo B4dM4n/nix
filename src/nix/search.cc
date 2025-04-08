@@ -1,21 +1,22 @@
-#include "command-installable-value.hh"
-#include "globals.hh"
-#include "eval.hh"
-#include "eval-inline.hh"
-#include "eval-settings.hh"
-#include "names.hh"
-#include "get-drvs.hh"
-#include "common-args.hh"
-#include "shared.hh"
-#include "eval-cache.hh"
-#include "attr-path.hh"
-#include "hilite.hh"
+#include "nix/cmd/command-installable-value.hh"
+#include "nix/store/globals.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/store/names.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/main/common-args.hh"
+#include "nix/main/shared.hh"
+#include "nix/expr/eval-cache.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/util/hilite.hh"
+#include "nix/util/strings-inline.hh"
 
 #include <regex>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 using namespace nix;
 using json = nlohmann::json;
@@ -160,7 +161,6 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                                 {"description", description},
                             };
                         } else {
-                            auto name2 = hiliteMatches(name.name, nameMatches, ANSI_GREEN, "\e[0;2m");
                             if (results > 1) logger->cout("");
                             logger->cout(
                                 "* %s%s",

@@ -1,8 +1,8 @@
-#include "get-drvs.hh"
-#include "eval-inline.hh"
-#include "derivations.hh"
-#include "store-api.hh"
-#include "path-with-outputs.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/path-with-outputs.hh"
 
 #include <cstring>
 #include <regex>
@@ -246,8 +246,8 @@ NixInt PackageInfo::queryMetaInt(const std::string & name, NixInt def)
     if (v->type() == nString) {
         /* Backwards compatibility with before we had support for
            integer meta fields. */
-        if (auto n = string2Int<NixInt>(v->c_str()))
-            return *n;
+        if (auto n = string2Int<NixInt::Inner>(v->c_str()))
+            return NixInt{*n};
     }
     return def;
 }
@@ -374,11 +374,12 @@ static void getDerivations(EvalState & state, Value & vIn,
            bound to the attribute with the "lower" name should take
            precedence). */
         for (auto & i : v.attrs()->lexicographicOrder(state.symbols)) {
+            std::string_view symbol{state.symbols[i->name]};
             try {
-                debug("evaluating attribute '%1%'", state.symbols[i->name]);
-                if (!std::regex_match(std::string(state.symbols[i->name]), attrRegex))
+                debug("evaluating attribute '%1%'", symbol);
+                if (!std::regex_match(symbol.begin(), symbol.end(), attrRegex))
                     continue;
-                std::string pathPrefix2 = addToPath(pathPrefix, state.symbols[i->name]);
+                std::string pathPrefix2 = addToPath(pathPrefix, symbol);
                 if (combineChannels)
                     getDerivations(state, *i->value, pathPrefix2, autoArgs, drvs, done, ignoreAssertionFailures);
                 else if (getDerivation(state, *i->value, pathPrefix2, drvs, done, ignoreAssertionFailures)) {
@@ -392,7 +393,7 @@ static void getDerivations(EvalState & state, Value & vIn,
                     }
                 }
             } catch (Error & e) {
-                e.addTrace(state.positions[i->pos], "while evaluating the attribute '%s'", state.symbols[i->name]);
+                e.addTrace(state.positions[i->pos], "while evaluating the attribute '%s'", symbol);
                 throw;
             }
         }

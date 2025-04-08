@@ -1,11 +1,11 @@
-#include "common-args.hh"
-#include "args/root.hh"
-#include "config-global.hh"
-#include "globals.hh"
-#include "logging.hh"
-#include "loggers.hh"
-#include "util.hh"
-#include "plugin.hh"
+#include "nix/main/common-args.hh"
+#include "nix/util/args/root.hh"
+#include "nix/util/config-global.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/logging.hh"
+#include "nix/main/loggers.hh"
+#include "nix/util/util.hh"
+#include "nix/main/plugin.hh"
 
 namespace nix {
 
@@ -17,7 +17,9 @@ MixCommonArgs::MixCommonArgs(const std::string & programName)
         .shortName = 'v',
         .description = "Increase the logging verbosity level.",
         .category = loggingCategory,
-        .handler = {[]() { verbosity = (Verbosity) (verbosity + 1); }},
+        .handler = {[]() {
+            verbosity = (Verbosity) std::min<std::underlying_type_t<Verbosity>>(verbosity + 1, lvlVomit);
+        }},
     });
 
     addFlag({

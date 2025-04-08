@@ -1,17 +1,19 @@
-#include "command.hh"
-#include "common-args.hh"
-#include "shared.hh"
-#include "store-api.hh"
-#include "filetransfer.hh"
-#include "finally.hh"
-#include "progress-bar.hh"
-#include "tarfile.hh"
-#include "attr-path.hh"
-#include "eval-inline.hh"
-#include "legacy.hh"
-#include "posix-source-accessor.hh"
-#include "misc-store-flags.hh"
-#include "terminal.hh"
+#include "nix/cmd/command.hh"
+#include "nix/main/common-args.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/util/finally.hh"
+#include "nix/main/loggers.hh"
+#include "nix/util/tarfile.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/cmd/legacy.hh"
+#include "nix/util/posix-source-accessor.hh"
+#include "nix/cmd/misc-store-flags.hh"
+#include "nix/util/terminal.hh"
+
+#include "man-pages.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -189,10 +191,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
         if (args.size() > 2)
             throw UsageError("too many arguments");
 
-        Finally f([]() { stopProgressBar(); });
-
-        if (isTTY())
-          startProgressBar();
+        setLogFormat("bar");
 
         auto store = openStore();
         auto state = std::make_unique<EvalState>(myArgs.lookupPath, store, fetchSettings, evalSettings);
@@ -246,7 +245,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
         auto [storePath, hash] = prefetchFile(
             store, resolveMirrorUrl(*state, url), name, ha, expectedHash, unpack, executable);
 
-        stopProgressBar();
+        logger->stop();
 
         if (!printPath)
             printInfo("path is '%s'", store->printStorePath(storePath));

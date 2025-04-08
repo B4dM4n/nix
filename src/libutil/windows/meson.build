@@ -4,16 +4,11 @@ sources += files(
   'file-path.cc',
   'file-system.cc',
   'muxable-pipe.cc',
+  'os-string.cc',
   'processes.cc',
   'users.cc',
   'windows-async-pipe.cc',
   'windows-error.cc',
 )
 
-include_dirs += include_directories('.')
-
-headers += files(
-  'signals-impl.hh',
-  'windows-async-pipe.hh',
-  'windows-error.hh',
-)
+subdir('include/nix/util')

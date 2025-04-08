@@ -2,13 +2,14 @@
 
 #include <assert.h>
 
-#include "s3.hh"
-#include "s3-binary-cache-store.hh"
-#include "nar-info.hh"
-#include "nar-info-disk-cache.hh"
-#include "globals.hh"
-#include "compression.hh"
-#include "filetransfer.hh"
+#include "nix/store/s3.hh"
+#include "nix/store/s3-binary-cache-store.hh"
+#include "nix/store/nar-info.hh"
+#include "nix/store/nar-info-disk-cache.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/compression.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/util/signals.hh"
 
 #include <aws/core/Aws.h>
 #include <aws/core/VersionConfig.h>
@@ -47,7 +48,11 @@ R && checkAws(std::string_view s, Aws::Utils::Outcome<R, E> && outcome)
     if (!outcome.IsSuccess())
         throw S3Error(
             outcome.GetError().GetErrorType(),
-            s + ": " + outcome.GetError().GetMessage());
+            fmt(
+                "%s: %s (request id: %s)",
+                s,
+                outcome.GetError().GetMessage(),
+                outcome.GetError().GetRequestId()));
     return outcome.GetResultWithOwnership();
 }
 
@@ -117,11 +122,13 @@ class RetryStrategy : public Aws::Client::DefaultRetryStrategy
 {
     bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error, long attemptedRetries) const override
     {
+        checkInterrupt();
         auto retry = Aws::Client::DefaultRetryStrategy::ShouldRetry(error, attemptedRetries);
         if (retry)
-            printError("AWS error '%s' (%s), will retry in %d ms",
+            printError("AWS error '%s' (%s; request id: %s), will retry in %d ms",
                 error.GetExceptionName(),
                 error.GetMessage(),
+                error.GetRequestId(),
                 CalculateDelayBeforeNextRetry(error, attemptedRetries));
         return retry;
     }
@@ -220,8 +227,6 @@ std::string S3BinaryCacheStoreConfig::doc()
 
 struct S3BinaryCacheStoreImpl : virtual S3BinaryCacheStoreConfig, public virtual S3BinaryCacheStore
 {
-    std::string bucketName;
-
     Stats stats;
 
     S3Helper s3Helper;
@@ -454,7 +459,7 @@ struct S3BinaryCacheStoreImpl : virtual S3BinaryCacheStoreConfig, public virtual
             debug("got %d keys, next marker '%s'",
                 contents.size(), res.GetNextMarker());
 
-            for (auto object : contents) {
+            for (const auto & object : contents) {
                 auto & key = object.GetKey();
                 if (key.size() != 40 || !hasSuffix(key, ".narinfo")) continue;
                 paths.insert(parseStorePath(storeDir + "/" + key.substr(0, key.size() - 8) + "-" + MissingName));

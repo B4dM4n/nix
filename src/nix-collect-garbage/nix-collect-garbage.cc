@@ -1,15 +1,18 @@
-#include "file-system.hh"
-#include "signals.hh"
-#include "store-api.hh"
-#include "store-cast.hh"
-#include "gc-store.hh"
-#include "profiles.hh"
-#include "shared.hh"
-#include "globals.hh"
-#include "legacy.hh"
+#include "nix/util/file-system.hh"
+#include "nix/util/signals.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/store-cast.hh"
+#include "nix/store/gc-store.hh"
+#include "nix/store/profiles.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/globals.hh"
+#include "nix/cmd/legacy.hh"
+#include "man-pages.hh"
 
 #include <iostream>
 #include <cerrno>
+
+namespace nix::fs { using namespace std::filesystem; }
 
 using namespace nix;
 
@@ -21,23 +24,23 @@ bool dryRun = false;
  * Of course, this makes rollbacks to before this point in time
  * impossible. */
 
-void removeOldGenerations(std::string dir)
+void removeOldGenerations(fs::path dir)
 {
-    if (access(dir.c_str(), R_OK) != 0) return;
+    if (access(dir.string().c_str(), R_OK) != 0) return;
 
-    bool canWrite = access(dir.c_str(), W_OK) == 0;
+    bool canWrite = access(dir.string().c_str(), W_OK) == 0;
 
-    for (auto & i : std::filesystem::directory_iterator{dir}) {
+    for (auto & i : fs::directory_iterator{dir}) {
         checkInterrupt();
 
         auto path = i.path().string();
         auto type = i.symlink_status().type();
 
-        if (type == std::filesystem::file_type::symlink && canWrite) {
+        if (type == fs::file_type::symlink && canWrite) {
             std::string link;
             try {
                 link = readLink(path);
-            } catch (std::filesystem::filesystem_error & e) {
+            } catch (fs::filesystem_error & e) {
                 if (e.code() == std::errc::no_such_file_or_directory) continue;
                 throw;
             }
@@ -49,7 +52,7 @@ void removeOldGenerations(std::string dir)
                 } else
                     deleteOldGenerations(path, dryRun);
             }
-        } else if (type == std::filesystem::file_type::directory) {
+        } else if (type == fs::file_type::directory) {
             removeOldGenerations(path);
         }
     }
@@ -81,8 +84,11 @@ static int main_nix_collect_garbage(int argc, char * * argv)
         });
 
         if (removeOld) {
-            std::set<Path> dirsToClean = {
-                profilesDir(), settings.nixStateDir + "/profiles", dirOf(getDefaultProfile())};
+            std::set<fs::path> dirsToClean = {
+                profilesDir(),
+                fs::path{settings.nixStateDir} / "profiles",
+                fs::path{getDefaultProfile()}.parent_path(),
+            };
             for (auto & dir : dirsToClean)
                 removeOldGenerations(dir);
         }

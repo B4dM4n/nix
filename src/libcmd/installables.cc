@@ -1,37 +1,39 @@
-#include "globals.hh"
-#include "installables.hh"
-#include "installable-derived-path.hh"
-#include "installable-attr-path.hh"
-#include "installable-flake.hh"
-#include "outputs-spec.hh"
-#include "users.hh"
-#include "util.hh"
-#include "command.hh"
-#include "attr-path.hh"
-#include "common-eval-args.hh"
-#include "derivations.hh"
-#include "eval-inline.hh"
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "get-drvs.hh"
-#include "store-api.hh"
-#include "shared.hh"
-#include "flake/flake.hh"
-#include "eval-cache.hh"
-#include "url.hh"
-#include "registry.hh"
-#include "build-result.hh"
+#include "nix/store/globals.hh"
+#include "nix/cmd/installables.hh"
+#include "nix/cmd/installable-derived-path.hh"
+#include "nix/cmd/installable-attr-path.hh"
+#include "nix/cmd/installable-flake.hh"
+#include "nix/store/outputs-spec.hh"
+#include "nix/util/users.hh"
+#include "nix/util/util.hh"
+#include "nix/cmd/command.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/cmd/common-eval-args.hh"
+#include "nix/store/derivations.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/store/store-api.hh"
+#include "nix/main/shared.hh"
+#include "nix/flake/flake.hh"
+#include "nix/expr/eval-cache.hh"
+#include "nix/util/url.hh"
+#include "nix/fetchers/registry.hh"
+#include "nix/store/build-result.hh"
 
 #include <regex>
 #include <queue>
 
 #include <nlohmann/json.hpp>
 
-#include "strings-inline.hh"
+#include "nix/util/strings-inline.hh"
 
 namespace nix {
 
-void completeFlakeInputPath(
+namespace fs { using namespace std::filesystem; }
+
+void completeFlakeInputAttrPath(
     AddCompletions & completions,
     ref<EvalState> evalState,
     const std::vector<FlakeRef> & flakeRefs,
@@ -86,7 +88,7 @@ MixFlakeOptions::MixFlakeOptions()
 
     > **DEPRECATED**
     >
-    > Use [`--no-use-registries`](#opt-no-use-registries) instead.
+    > Use [`--no-use-registries`](@docroot@/command-ref/conf-file.md#conf-use-registries) instead.
         )",
         .category = category,
         .handler = {[&]() {
@@ -115,10 +117,10 @@ MixFlakeOptions::MixFlakeOptions()
         .labels = {"input-path"},
         .handler = {[&](std::string s) {
             warn("'--update-input' is a deprecated alias for 'flake update' and will be removed in a future version.");
-            lockFlags.inputUpdates.insert(flake::parseInputPath(s));
+            lockFlags.inputUpdates.insert(flake::parseInputAttrPath(s));
         }},
         .completer = {[&](AddCompletions & completions, size_t, std::string_view prefix) {
-            completeFlakeInputPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
+            completeFlakeInputAttrPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
         }}
     });
 
@@ -127,15 +129,15 @@ MixFlakeOptions::MixFlakeOptions()
         .description = "Override a specific flake input (e.g. `dwarffs/nixpkgs`). This implies `--no-write-lock-file`.",
         .category = category,
         .labels = {"input-path", "flake-url"},
-        .handler = {[&](std::string inputPath, std::string flakeRef) {
+        .handler = {[&](std::string inputAttrPath, std::string flakeRef) {
             lockFlags.writeLockFile = false;
             lockFlags.inputOverrides.insert_or_assign(
-                flake::parseInputPath(inputPath),
+                flake::parseInputAttrPath(inputAttrPath),
                 parseFlakeRef(fetchSettings, flakeRef, absPath(getCommandBaseDir()), true));
         }},
         .completer = {[&](AddCompletions & completions, size_t n, std::string_view prefix) {
             if (n == 0) {
-                completeFlakeInputPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
+                completeFlakeInputAttrPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
             } else if (n == 1) {
                 completeFlakeRef(completions, getEvalState()->store, prefix);
             }
@@ -341,7 +343,7 @@ void completeFlakeRefWithFragment(
             auto flakeRefS = std::string(prefix.substr(0, hash));
 
             // TODO: ideally this would use the command base directory instead of assuming ".".
-            auto flakeRef = parseFlakeRef(fetchSettings, expandTilde(flakeRefS), absPath("."));
+            auto flakeRef = parseFlakeRef(fetchSettings, expandTilde(flakeRefS), fs::current_path().string());
 
             auto evalCache = openEvalCache(*evalState,
                 std::make_shared<flake::LockedFlake>(lockFlake(
@@ -448,7 +450,7 @@ ref<eval_cache::EvalCache> openEvalCache(
     std::shared_ptr<flake::LockedFlake> lockedFlake)
 {
     auto fingerprint = evalSettings.useEvalCache && evalSettings.pureEval
-        ? lockedFlake->getFingerprint(state.store)
+        ? lockedFlake->getFingerprint(state.store, state.fetchSettings)
         : std::nullopt;
     auto rootLoader = [&state, lockedFlake]()
         {
@@ -855,7 +857,8 @@ std::vector<FlakeRef> RawInstallablesCommand::getFlakeRefsForCompletion()
 {
     applyDefaultInstallables(rawInstallables);
     std::vector<FlakeRef> res;
-    for (auto i : rawInstallables)
+    res.reserve(rawInstallables.size());
+    for (const auto & i : rawInstallables)
         res.push_back(parseFlakeRefWithFragment(
             fetchSettings,
             expandTilde(i),
@@ -913,6 +916,14 @@ void BuiltPathsCommand::applyDefaultInstallables(std::vector<std::string> & rawI
 {
     if (rawInstallables.empty() && !all)
         rawInstallables.push_back(".");
+}
+
+BuiltPaths toBuiltPaths(const std::vector<BuiltPathWithResult> & builtPathsWithResult)
+{
+    BuiltPaths res;
+    for (auto & i : builtPathsWithResult)
+        res.push_back(i.path);
+    return res;
 }
 
 }

@@ -1,12 +1,33 @@
-#include "file-system.hh"
-#include "signals.hh"
-#include "finally.hh"
-#include "serialise.hh"
+#include "nix/util/file-system.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/serialise.hh"
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
+
+#include "util-config-private.hh"
+#include "util-unix-config-private.hh"
 
 namespace nix {
+
+namespace {
+
+// This function is needed to handle non-blocking reads/writes. This is needed in the buildhook, because
+// somehow the json logger file descriptor ends up beeing non-blocking and breaks remote-building.
+// TODO: get rid of buildhook and remove this function again (https://github.com/NixOS/nix/issues/12688)
+void pollFD(int fd, int events)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = events;
+    int ret = poll(&pfd, 1, -1);
+    if (ret == -1) {
+        throw SysError("poll on file descriptor failed");
+    }
+}
+}
 
 std::string readFile(int fd)
 {
@@ -17,14 +38,18 @@ std::string readFile(int fd)
     return drainFD(fd, true, st.st_size);
 }
 
-
 void readFull(int fd, char * buf, size_t count)
 {
     while (count) {
         checkInterrupt();
         ssize_t res = read(fd, buf, count);
         if (res == -1) {
-            if (errno == EINTR) continue;
+            switch (errno) {
+            case EINTR: continue;
+            case EAGAIN:
+                pollFD(fd, POLLIN);
+                continue;
+            }
             throw SysError("reading from file");
         }
         if (res == 0) throw EndOfFile("unexpected end-of-file");
@@ -39,15 +64,22 @@ void writeFull(int fd, std::string_view s, bool allowInterrupts)
     while (!s.empty()) {
         if (allowInterrupts) checkInterrupt();
         ssize_t res = write(fd, s.data(), s.size());
-        if (res == -1 && errno != EINTR)
+        if (res == -1) {
+            switch (errno) {
+            case EINTR: continue;
+            case EAGAIN:
+                pollFD(fd, POLLOUT);
+                continue;
+            }
             throw SysError("writing to file");
+        }
         if (res > 0)
             s.remove_prefix(res);
     }
 }
 
 
-std::string readLine(int fd)
+std::string readLine(int fd, bool eofOk)
 {
     std::string s;
     while (1) {
@@ -56,10 +88,21 @@ std::string readLine(int fd)
         // FIXME: inefficient
         ssize_t rd = read(fd, &ch, 1);
         if (rd == -1) {
-            if (errno != EINTR)
+            switch (errno) {
+            case EINTR: continue;
+            case EAGAIN: {
+                pollFD(fd, POLLIN);
+                continue;
+            }
+            default:
                 throw SysError("reading a line");
-        } else if (rd == 0)
-            throw EndOfFile("unexpected EOF reading a line");
+            }
+        } else if (rd == 0) {
+            if (eofOk)
+                return s;
+            else
+                throw EndOfFile("unexpected EOF reading a line");
+        }
         else {
             if (ch == '\n') return s;
             s += ch;
@@ -120,14 +163,38 @@ void Pipe::create()
 
 //////////////////////////////////////////////////////////////////////
 
-void unix::closeMostFDs(const std::set<int> & exceptions)
+#if __linux__ || __FreeBSD__
+static int unix_close_range(unsigned int first, unsigned int last, int flags)
 {
+#if !HAVE_CLOSE_RANGE
+    return syscall(SYS_close_range, first, last, (unsigned int)flags);
+#else
+    return close_range(first, last, flags);
+#endif
+}
+#endif
+
+void unix::closeExtraFDs()
+{
+    constexpr int MAX_KEPT_FD = 2;
+    static_assert(std::max({STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO}) == MAX_KEPT_FD);
+
+#if __linux__ || __FreeBSD__
+    // first try to close_range everything we don't care about. if this
+    // returns an error with these parameters we're running on a kernel
+    // that does not implement close_range (i.e. pre 5.9) and fall back
+    // to the old method. we should remove that though, in some future.
+    if (unix_close_range(MAX_KEPT_FD + 1, ~0U, 0) == 0) {
+        return;
+    }
+#endif
+
 #if __linux__
     try {
         for (auto & s : std::filesystem::directory_iterator{"/proc/self/fd"}) {
             checkInterrupt();
             auto fd = std::stoi(s.path().filename());
-            if (!exceptions.count(fd)) {
+            if (fd > MAX_KEPT_FD) {
                 debug("closing leaked FD %d", fd);
                 close(fd);
             }
@@ -142,9 +209,8 @@ void unix::closeMostFDs(const std::set<int> & exceptions)
 #if HAVE_SYSCONF
     maxFD = sysconf(_SC_OPEN_MAX);
 #endif
-    for (int fd = 0; fd < maxFD; ++fd)
-        if (!exceptions.count(fd))
-            close(fd); /* ignore result */
+    for (int fd = MAX_KEPT_FD + 1; fd < maxFD; ++fd)
+        close(fd); /* ignore result */
 }
 
 

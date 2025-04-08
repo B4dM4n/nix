@@ -1,11 +1,13 @@
 #include "nix_api_util.h"
-#include "config-global.hh"
-#include "error.hh"
+#include "nix/util/config-global.hh"
+#include "nix/util/error.hh"
 #include "nix_api_util_internal.h"
-#include "util.hh"
+#include "nix/util/util.hh"
 
 #include <cxxabi.h>
 #include <typeinfo>
+
+#include "nix_api_util_config.h"
 
 nix_c_context * nix_c_context_create()
 {
@@ -57,6 +59,12 @@ nix_err nix_set_err_msg(nix_c_context * context, nix_err err, const char * msg)
     return err;
 }
 
+void nix_clear_err(nix_c_context * context)
+{
+    if (context)
+        context->last_err_code = NIX_OK;
+}
+
 const char * nix_version_get()
 {
     return PACKAGE_VERSION;
@@ -106,7 +114,7 @@ const char * nix_err_msg(nix_c_context * context, const nix_c_context * read_con
 {
     if (context)
         context->last_err_code = NIX_OK;
-    if (read_context->last_err) {
+    if (read_context->last_err && read_context->last_err_code != NIX_OK) {
         if (n)
             *n = read_context->last_err->size();
         return read_context->last_err->c_str();

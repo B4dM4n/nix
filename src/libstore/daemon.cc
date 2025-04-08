@@ -1,23 +1,23 @@
-#include "daemon.hh"
-#include "signals.hh"
-#include "worker-protocol.hh"
-#include "worker-protocol-connection.hh"
-#include "worker-protocol-impl.hh"
-#include "build-result.hh"
-#include "store-api.hh"
-#include "store-cast.hh"
-#include "gc-store.hh"
-#include "log-store.hh"
-#include "indirect-root-store.hh"
-#include "path-with-outputs.hh"
-#include "finally.hh"
-#include "archive.hh"
-#include "derivations.hh"
-#include "args.hh"
-#include "git.hh"
+#include "nix/store/daemon.hh"
+#include "nix/util/signals.hh"
+#include "nix/store/worker-protocol.hh"
+#include "nix/store/worker-protocol-connection.hh"
+#include "nix/store/worker-protocol-impl.hh"
+#include "nix/store/build-result.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/store-cast.hh"
+#include "nix/store/gc-store.hh"
+#include "nix/store/log-store.hh"
+#include "nix/store/indirect-root-store.hh"
+#include "nix/store/path-with-outputs.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/archive.hh"
+#include "nix/store/derivations.hh"
+#include "nix/util/args.hh"
+#include "nix/util/git.hh"
 
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
-# include "monitor-fd.hh"
+# include "nix/util/monitor-fd.hh"
 #endif
 
 #include <sstream>
@@ -90,11 +90,11 @@ struct TunnelLogger : public Logger
     {
         if (ei.level > verbosity) return;
 
-        std::stringstream oss;
+        std::ostringstream oss;
         showErrorInfo(oss, ei, false);
 
         StringSink buf;
-        buf << STDERR_NEXT << oss.str();
+        buf << STDERR_NEXT << toView(oss);
         enqueueMsg(buf.s);
     }
 
@@ -402,6 +402,9 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
             logger->startWork();
             auto pathInfo = [&]() {
                 // NB: FramedSource must be out of scope before logger->stopWork();
+                // FIXME: this means that if there is an error
+                // half-way through, the client will keep sending
+                // data, since we haven't sent it the error yet.
                 auto [contentAddressMethod, hashAlgo] = ContentAddressMethod::parseWithAlgo(camStr);
                 FramedSource source(conn.from);
                 FileSerialisationMethod dumpMethod;
@@ -590,7 +593,7 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
 
         auto drvType = drv.type();
 
-        /* Content-addressed derivations are trustless because their output paths
+        /* Content-addressing derivations are trustless because their output paths
            are verified by their content alone, so any derivation is free to
            try to produce such a path.
 
@@ -1022,6 +1025,7 @@ void processConnection(
 {
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
     auto monitor = !recursive ? std::make_unique<MonitorFdHup>(from.fd) : nullptr;
+    (void) monitor; // suppress warning
 #endif
 
     /* Exchange the greeting. */
@@ -1038,11 +1042,15 @@ void processConnection(
     conn.protoVersion = protoVersion;
     conn.features = features;
 
-    auto tunnelLogger = new TunnelLogger(conn.to, protoVersion);
-    auto prevLogger = nix::logger;
+    auto tunnelLogger_ = std::make_unique<TunnelLogger>(conn.to, protoVersion);
+    auto tunnelLogger = tunnelLogger_.get();
+    std::unique_ptr<Logger> prevLogger_;
+    auto prevLogger = logger.get();
     // FIXME
-    if (!recursive)
-        logger = tunnelLogger;
+    if (!recursive) {
+        prevLogger_ = std::move(logger);
+        logger = std::move(tunnelLogger_);
+    }
 
     unsigned int opCount = 0;
 

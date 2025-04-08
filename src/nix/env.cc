@@ -1,10 +1,11 @@
 #include <unordered_set>
 #include <queue>
 
-#include "command.hh"
-#include "eval.hh"
+#include "nix/cmd/command.hh"
+#include "nix/expr/eval.hh"
 #include "run.hh"
-#include "strings.hh"
+#include "nix/util/strings.hh"
+#include "nix/util/executable-path.hh"
 
 using namespace nix;
 
@@ -95,10 +96,10 @@ struct CmdShell : InstallablesCommand, MixEnvironment
         }
 
         // TODO: split losslessly; empty means .
-        auto unixPath = tokenizeString<Strings>(getEnv("PATH").value_or(""), ":");
-        unixPath.insert(unixPath.begin(), pathAdditions.begin(), pathAdditions.end());
-        auto unixPathString = concatStringsSep(":", unixPath);
-        setEnv("PATH", unixPathString.c_str());
+        auto unixPath = ExecutablePath::load();
+        unixPath.directories.insert(unixPath.directories.begin(), pathAdditions.begin(), pathAdditions.end());
+        auto unixPathString = unixPath.render();
+        setEnvOs(OS_STR("PATH"), unixPathString.c_str());
 
         Strings args;
         for (auto & arg : command)

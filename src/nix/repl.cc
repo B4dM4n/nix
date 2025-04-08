@@ -1,11 +1,31 @@
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "globals.hh"
-#include "command.hh"
-#include "installable-value.hh"
-#include "repl.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/util/config-global.hh"
+#include "nix/store/globals.hh"
+#include "nix/cmd/command.hh"
+#include "nix/cmd/installable-value.hh"
+#include "nix/cmd/repl.hh"
+#include "nix/util/processes.hh"
+#include "self-exe.hh"
 
 namespace nix {
+
+void runNix(Path program, const Strings & args,
+    const std::optional<std::string> & input = {})
+{
+    auto subprocessEnv = getEnv();
+    subprocessEnv["NIX_CONFIG"] = globalConfig.toKeyValue();
+    //isInteractive avoid grabling interactive commands
+    runProgram2(RunOptions {
+        .program = getNixBin(program).string(),
+        .args = args,
+        .environment = subprocessEnv,
+        .input = input,
+        .isInteractive = true,
+    });
+
+    return;
+}
 
 struct CmdRepl : RawInstallablesCommand
 {
@@ -81,7 +101,8 @@ struct CmdRepl : RawInstallablesCommand
             lookupPath,
             openStore(),
             state,
-            getValues
+            getValues,
+            runNix
         );
         repl->autoArgs = getAutoArgs(*repl->state);
         repl->initEnv();

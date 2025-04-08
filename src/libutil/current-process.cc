@@ -1,12 +1,12 @@
 #include <algorithm>
 #include <cstring>
 
-#include "current-process.hh"
-#include "util.hh"
-#include "finally.hh"
-#include "file-system.hh"
-#include "processes.hh"
-#include "signals.hh"
+#include "nix/util/current-process.hh"
+#include "nix/util/util.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/file-system.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/signals.hh"
 #include <math.h>
 
 #ifdef __APPLE__
@@ -15,12 +15,8 @@
 
 #if __linux__
 # include <mutex>
-# include "cgroup.hh"
-# include "namespaces.hh"
-#endif
-
-#ifndef _WIN32
-# include <sys/resource.h>
+# include "nix/util/cgroup.hh"
+# include "nix/util/namespaces.hh"
 #endif
 
 namespace nix {
@@ -32,11 +28,7 @@ unsigned int getMaxCPU()
         auto cgroupFS = getCgroupFS();
         if (!cgroupFS) return 0;
 
-        auto cgroups = getCgroups("/proc/self/cgroup");
-        auto cgroup = cgroups[""];
-        if (cgroup == "") return 0;
-
-        auto cpuFile = *cgroupFS + "/" + cgroup + "/cpu.max";
+        auto cpuFile = *cgroupFS + "/" + getCurrentCgroup() + "/cpu.max";
 
         auto cpuMax = readFile(cpuFile);
         auto cpuMaxParts = tokenizeString<std::vector<std::string>>(cpuMax, " \n");
@@ -49,7 +41,7 @@ unsigned int getMaxCPU()
         auto period = cpuMaxParts[1];
         if (quota != "max")
                 return std::ceil(std::stoi(quota) / std::stof(period));
-    } catch (Error &) { ignoreException(lvlDebug); }
+    } catch (Error &) { ignoreExceptionInDestructor(lvlDebug); }
     #endif
 
     return 0;
@@ -59,11 +51,11 @@ unsigned int getMaxCPU()
 //////////////////////////////////////////////////////////////////////
 
 
+#ifndef _WIN32
 size_t savedStackSize = 0;
 
 void setStackSize(size_t stackSize)
 {
-    #ifndef _WIN32
     struct rlimit limit;
     if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur < stackSize) {
         savedStackSize = limit.rlim_cur;
@@ -81,31 +73,8 @@ void setStackSize(size_t stackSize)
             );
         }
     }
-    #else
-    ULONG_PTR stackLow, stackHigh;
-    GetCurrentThreadStackLimits(&stackLow, &stackHigh);
-    ULONG maxStackSize = stackHigh - stackLow;
-    ULONG currStackSize = 0;
-    // This retrieves the current promised stack size
-    SetThreadStackGuarantee(&currStackSize);
-    if (currStackSize < stackSize) {
-        savedStackSize = currStackSize;
-        ULONG newStackSize = std::min(static_cast<ULONG>(stackSize), maxStackSize);
-        if (SetThreadStackGuarantee(&newStackSize) == 0) {
-            logger->log(
-                lvlError,
-                HintFmt(
-                    "Failed to increase stack size from %1% to %2% (maximum allowed stack size: %3%): %4%",
-                    savedStackSize,
-                    stackSize,
-                    maxStackSize,
-                    std::to_string(GetLastError())
-                ).str()
-            );
-        }
-    }
-    #endif
 }
+#endif
 
 void restoreProcessContext(bool restoreMounts)
 {

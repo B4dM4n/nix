@@ -1,7 +1,7 @@
-#include "file-content-address.hh"
-#include "archive.hh"
-#include "git.hh"
-#include "source-path.hh"
+#include "nix/util/file-content-address.hh"
+#include "nix/util/archive.hh"
+#include "nix/util/git.hh"
+#include "nix/util/source-path.hh"
 
 namespace nix {
 
@@ -88,14 +88,15 @@ void dumpPath(
 void restorePath(
     const Path & path,
     Source & source,
-    FileSerialisationMethod method)
+    FileSerialisationMethod method,
+    bool startFsync)
 {
     switch (method) {
     case FileSerialisationMethod::Flat:
-        writeFile(path, source);
+        writeFile(path, source, 0666, startFsync);
         break;
     case FileSerialisationMethod::NixArchive:
-        restorePath(path, source);
+        restorePath(path, source, startFsync);
         break;
     }
 }

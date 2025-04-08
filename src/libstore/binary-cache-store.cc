@@ -1,18 +1,18 @@
-#include "archive.hh"
-#include "binary-cache-store.hh"
-#include "compression.hh"
-#include "derivations.hh"
-#include "source-accessor.hh"
-#include "globals.hh"
-#include "nar-info.hh"
-#include "sync.hh"
-#include "remote-fs-accessor.hh"
-#include "nar-info-disk-cache.hh"
-#include "nar-accessor.hh"
-#include "thread-pool.hh"
-#include "callback.hh"
-#include "signals.hh"
-#include "archive.hh"
+#include "nix/util/archive.hh"
+#include "nix/store/binary-cache-store.hh"
+#include "nix/util/compression.hh"
+#include "nix/store/derivations.hh"
+#include "nix/util/source-accessor.hh"
+#include "nix/store/globals.hh"
+#include "nix/store/nar-info.hh"
+#include "nix/util/sync.hh"
+#include "nix/store/remote-fs-accessor.hh"
+#include "nix/store/nar-info-disk-cache.hh"
+#include "nix/store/nar-accessor.hh"
+#include "nix/util/thread-pool.hh"
+#include "nix/util/callback.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/archive.hh"
 
 #include <chrono>
 #include <future>
@@ -39,15 +39,13 @@ BinaryCacheStore::BinaryCacheStore(const Params & params)
 
 void BinaryCacheStore::init()
 {
-    std::string cacheInfoFile = "nix-cache-info";
-
-    auto cacheInfo = getFile(cacheInfoFile);
+    auto cacheInfo = getNixCacheInfo();
     if (!cacheInfo) {
         upsertFile(cacheInfoFile, "StoreDir: " + storeDir + "\n", "text/x-nix-cache-info");
     } else {
         for (auto & line : tokenizeString<Strings>(*cacheInfo, "\n")) {
-            size_t colon= line.find(':');
-            if (colon ==std::string::npos) continue;
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
             auto name = line.substr(0, colon);
             auto value = trim(line.substr(colon + 1, std::string::npos));
             if (name == "StoreDir") {
@@ -61,6 +59,11 @@ void BinaryCacheStore::init()
             }
         }
     }
+}
+
+std::optional<std::string> BinaryCacheStore::getNixCacheInfo()
+{
+    return getFile(cacheInfoFile);
 }
 
 void BinaryCacheStore::upsertFile(const std::string & path,
