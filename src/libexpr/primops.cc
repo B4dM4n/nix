@@ -1,19 +1,19 @@
-#include "derivations.hh"
-#include "downstream-placeholder.hh"
-#include "eval-inline.hh"
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "gc-small-vector.hh"
-#include "json-to-value.hh"
-#include "names.hh"
-#include "path-references.hh"
-#include "store-api.hh"
-#include "util.hh"
-#include "processes.hh"
-#include "value-to-json.hh"
-#include "value-to-xml.hh"
-#include "primops.hh"
-#include "fetch-to-store.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/downstream-placeholder.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/expr/gc-small-vector.hh"
+#include "nix/expr/json-to-value.hh"
+#include "nix/store/names.hh"
+#include "nix/store/path-references.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/util.hh"
+#include "nix/util/processes.hh"
+#include "nix/expr/value-to-json.hh"
+#include "nix/expr/value-to-xml.hh"
+#include "nix/expr/primops.hh"
+#include "nix/fetchers/fetch-to-store.hh"
 
 #include <boost/container/small_vector.hpp>
 #include <nlohmann/json.hpp>
@@ -45,6 +45,15 @@ static inline Value * mkString(EvalState & state, const std::csub_match & match)
     Value * v = state.allocValue();
     v->mkString({match.first, match.second});
     return v;
+}
+
+std::string EvalState::realiseString(Value & s, StorePathSet * storePathsOutMaybe, bool isIFD, const PosIdx pos)
+{
+    nix::NixStringContext stringContext;
+    auto rawStr = coerceToString(pos, s, stringContext, "while realising a string").toOwned();
+    auto rewrites = realiseContext(stringContext, storePathsOutMaybe, isIFD);
+
+    return nix::rewriteStrings(rawStr, rewrites);
 }
 
 StringMap EvalState::realiseContext(const NixStringContext & context, StorePathSet * maybePathsOut, bool isIFD)
@@ -136,8 +145,7 @@ static SourcePath realisePath(EvalState & state, const PosIdx pos, Value & v, st
     try {
         if (!context.empty() && path.accessor == state.rootFS) {
             auto rewrites = state.realiseContext(context);
-            auto realPath = state.toRealPath(rewriteStrings(path.path.abs(), rewrites), context);
-            path = {path.accessor, CanonPath(realPath)};
+            path = {path.accessor, CanonPath(rewriteStrings(path.path.abs(), rewrites))};
         }
         return resolveSymlinks ? path.resolveSymlinks(*resolveSymlinks) : path;
     } catch (Error & e) {
@@ -230,7 +238,7 @@ static void scopedImport(EvalState & state, const PosIdx pos, SourcePath & path,
     Env * env = &state.allocEnv(vScope->attrs()->size());
     env->up = &state.baseEnv;
 
-    auto staticEnv = std::make_shared<StaticEnv>(nullptr, state.staticBaseEnv.get(), vScope->attrs()->size());
+    auto staticEnv = std::make_shared<StaticEnv>(nullptr, state.staticBaseEnv, vScope->attrs()->size());
 
     unsigned int displ = 0;
     for (auto & attr : *vScope->attrs()) {
@@ -1586,9 +1594,13 @@ static RegisterPrimOp primop_placeholder({
     .name = "placeholder",
     .args = {"output"},
     .doc = R"(
-      Return a placeholder string for the specified *output* that will be
-      substituted by the corresponding output path at build time. Typical
-      outputs would be `"out"`, `"bin"` or `"dev"`.
+      Return at
+      [output placeholder string](@docroot@/store/derivation/index.md#output-placeholder)
+      for the specified *output* that will be substituted by the corresponding
+      [output path](@docroot@/glossary.md#gloss-output-path)
+      at build time.
+
+      Typical outputs would be `"out"`, `"bin"` or `"dev"`.
     )",
     .fun = prim_placeholder,
 });
@@ -2126,12 +2138,15 @@ static RegisterPrimOp primop_outputOf({
     .name = "__outputOf",
     .args = {"derivation-reference", "output-name"},
     .doc = R"(
-      Return the output path of a derivation, literally or using a placeholder if needed.
+      Return the output path of a derivation, literally or using an
+      [input placeholder string](@docroot@/store/derivation/index.md#input-placeholder)
+      if needed.
 
       If the derivation has a statically-known output path (i.e. the derivation output is input-addressed, or fixed content-addresed), the output path will just be returned.
-      But if the derivation is content-addressed or if the derivation is itself not-statically produced (i.e. is the output of another derivation), a placeholder will be returned instead.
+      But if the derivation is content-addressed or if the derivation is itself not-statically produced (i.e. is the output of another derivation), an input placeholder will be returned instead.
 
-      *`derivation reference`* must be a string that may contain a regular store path to a derivation, or may be a placeholder reference. If the derivation is produced by a derivation, you must explicitly select `drv.outPath`.
+      *`derivation reference`* must be a string that may contain a regular store path to a derivation, or may be an input placeholder reference.
+      If the derivation is produced by a derivation, you must explicitly select `drv.outPath`.
       This primop can be chained arbitrarily deeply.
       For instance,
 
@@ -2141,9 +2156,9 @@ static RegisterPrimOp primop_outputOf({
         "out"
       ```
 
-      will return a placeholder for the output of the output of `myDrv`.
+      will return a input placeholder for the output of the output of `myDrv`.
 
-      This primop corresponds to the `^` sigil for derivable paths, e.g. as part of installable syntax on the command line.
+      This primop corresponds to the `^` sigil for [deriving paths](@docroot@/glossary.md#gloss-deriving-paths), e.g. as part of installable syntax on the command line.
     )",
     .fun = prim_outputOf,
     .experimentalFeature = Xp::DynamicDerivations,
@@ -2463,21 +2478,11 @@ static void addPath(
     const NixStringContext & context)
 {
     try {
-        StorePathSet refs;
-
         if (path.accessor == state.rootFS && state.store->isInStore(path.path.abs())) {
             // FIXME: handle CA derivation outputs (where path needs to
             // be rewritten to the actual output).
             auto rewrites = state.realiseContext(context);
-            path = {state.rootFS, CanonPath(state.toRealPath(rewriteStrings(path.path.abs(), rewrites), context))};
-
-            try {
-                auto [storePath, subPath] = state.store->toStorePath(path.path.abs());
-                // FIXME: we should scanForReferences on the path before adding it
-                refs = state.store->queryPathInfo(storePath)->references;
-                path = {state.rootFS, CanonPath(state.store->toRealPath(storePath) + subPath)};
-            } catch (Error &) { // FIXME: should be InvalidPathError
-            }
+            path = {path.accessor, CanonPath(rewriteStrings(path.path.abs(), rewrites))};
         }
 
         std::unique_ptr<PathFilter> filter;
@@ -4664,7 +4669,7 @@ RegisterPrimOp::RegisterPrimOp(PrimOp && primOp)
 }
 
 
-void EvalState::createBaseEnv()
+void EvalState::createBaseEnv(const EvalSettings & evalSettings)
 {
     baseEnv.up = 0;
 
@@ -4922,6 +4927,12 @@ void EvalState::createBaseEnv()
                 primOpAdjusted.arity = std::max(primOp.args.size(), primOp.arity);
                 addPrimOp(std::move(primOpAdjusted));
             }
+
+    for (auto & primOp : evalSettings.extraPrimOps) {
+        auto primOpAdjusted = primOp;
+        primOpAdjusted.arity = std::max(primOp.args.size(), primOp.arity);
+        addPrimOp(std::move(primOpAdjusted));
+    }
 
     /* Add a wrapper around the derivation primop that computes the
        `drvPath' and `outPath' attributes lazily.

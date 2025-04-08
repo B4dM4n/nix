@@ -1,11 +1,10 @@
-#include "command-installable-value.hh"
-#include "common-args.hh"
-#include "shared.hh"
-#include "store-api.hh"
-#include "eval.hh"
-#include "eval-inline.hh"
-#include "value-to-json.hh"
-#include "progress-bar.hh"
+#include "nix/cmd/command-installable-value.hh"
+#include "nix/main/common-args.hh"
+#include "nix/main/shared.hh"
+#include "nix/store/store-api.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/value-to-json.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -75,7 +74,7 @@ struct CmdEval : MixJSON, InstallableValueCommand, MixReadOnlyOption
         }
 
         if (writeTo) {
-            stopProgressBar();
+            logger->stop();
 
             if (fs::symlink_exists(*writeTo))
                 throw Error("path '%s' already exists", writeTo->string());
@@ -114,7 +113,7 @@ struct CmdEval : MixJSON, InstallableValueCommand, MixReadOnlyOption
         }
 
         else if (raw) {
-            stopProgressBar();
+            logger->stop();
             writeFull(getStandardOutput(), *state->coerceToString(noPos, *v, context, "while generating the eval command output"));
         }
 

@@ -1,22 +1,22 @@
-#include "local-store.hh"
-#include "globals.hh"
-#include "git.hh"
-#include "archive.hh"
-#include "pathlocks.hh"
-#include "worker-protocol.hh"
-#include "derivations.hh"
-#include "realisation.hh"
-#include "nar-info.hh"
-#include "references.hh"
-#include "callback.hh"
-#include "topo-sort.hh"
-#include "finally.hh"
-#include "compression.hh"
-#include "signals.hh"
-#include "posix-fs-canonicalise.hh"
-#include "posix-source-accessor.hh"
-#include "keys.hh"
-#include "users.hh"
+#include "nix/store/local-store.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/git.hh"
+#include "nix/util/archive.hh"
+#include "nix/store/pathlocks.hh"
+#include "nix/store/worker-protocol.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/realisation.hh"
+#include "nix/store/nar-info.hh"
+#include "nix/util/references.hh"
+#include "nix/util/callback.hh"
+#include "nix/util/topo-sort.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/compression.hh"
+#include "nix/util/signals.hh"
+#include "nix/store/posix-fs-canonicalise.hh"
+#include "nix/util/posix-source-accessor.hh"
+#include "nix/store/keys.hh"
+#include "nix/util/users.hh"
 
 #include <iostream>
 #include <algorithm>
@@ -52,7 +52,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
+
+#include "store-config-private.hh"
 
 
 namespace nix {
@@ -116,7 +118,7 @@ LocalStore::LocalStore(
     state->stmts = std::make_unique<State::Stmts>();
 
     /* Create missing state directories if they don't already exist. */
-    createDirs(realStoreDir);
+    createDirs(realStoreDir.get());
     if (readOnly) {
         experimentalFeatureSettings.require(Xp::ReadOnlyLocalStore);
     } else {
@@ -136,7 +138,12 @@ LocalStore::LocalStore(
     for (auto & perUserDir : {profilesDir + "/per-user", gcRootsDir + "/per-user"}) {
         createDirs(perUserDir);
         if (!readOnly) {
-            if (chmod(perUserDir.c_str(), 0755) == -1)
+            auto st = lstat(perUserDir);
+
+            // Skip chmod call if the directory already has the correct permissions (0755).
+            // This is to avoid failing when the executing user lacks permissions to change the directory's permissions
+            // even if it would be no-op.
+            if ((st.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) != 0755 && chmod(perUserDir.c_str(), 0755) == -1)
                 throw SysError("could not set permissions on '%s' to 755", perUserDir);
         }
     }
@@ -167,16 +174,15 @@ LocalStore::LocalStore(
 
     /* Ensure that the store and its parents are not symlinks. */
     if (!settings.allowSymlinkedStore) {
-        Path path = realStoreDir;
-        struct stat st;
-        while (path != "/") {
-            st = lstat(path);
-            if (S_ISLNK(st.st_mode))
+        std::filesystem::path path = realStoreDir.get();
+        std::filesystem::path root = path.root_path();
+        while (path != root) {
+            if (std::filesystem::is_symlink(path))
                 throw Error(
                         "the path '%1%' is a symlink; "
                         "this is not allowed for the Nix store and its parent directories",
                         path);
-            path = dirOf(path);
+            path = path.parent_path();
         }
     }
 
@@ -243,7 +249,7 @@ LocalStore::LocalStore(
     else if (curSchema == 0) { /* new store */
         curSchema = nixSchemaVersion;
         openDB(*state, true);
-        writeFile(schemaPath, fmt("%1%", nixSchemaVersion), 0666, true);
+        writeFile(schemaPath, fmt("%1%", curSchema), 0666, true);
     }
 
     else if (curSchema < nixSchemaVersion) {

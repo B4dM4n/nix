@@ -1,21 +1,20 @@
-#include "error.hh"
-#include "fetchers.hh"
-#include "users.hh"
-#include "cache.hh"
-#include "globals.hh"
-#include "tarfile.hh"
-#include "store-api.hh"
-#include "url-parts.hh"
-#include "pathlocks.hh"
-#include "processes.hh"
-#include "git.hh"
-#include "mounted-source-accessor.hh"
-#include "git-utils.hh"
-#include "logging.hh"
-#include "finally.hh"
-#include "fetch-settings.hh"
-#include "json-utils.hh"
-#include "archive.hh"
+#include "nix/util/error.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/util/users.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/tarfile.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/url-parts.hh"
+#include "nix/store/pathlocks.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/git.hh"
+#include "nix/fetchers/git-utils.hh"
+#include "nix/util/logging.hh"
+#include "nix/util/finally.hh"
+#include "nix/fetchers/fetch-settings.hh"
+#include "nix/util/json-utils.hh"
+#include "nix/util/archive.hh"
 
 #include <regex>
 #include <string.h>
@@ -69,7 +68,7 @@ std::optional<std::string> readHead(const Path & path)
 
     std::string_view line = output;
     line = line.substr(0, line.find("\n"));
-    if (const auto parseResult = git::parseLsRemoteLine(line)) {
+    if (const auto parseResult = git::parseLsRemoteLine(line); parseResult && parseResult->reference == "HEAD") {
         switch (parseResult->kind) {
             case git::LsRemoteRefLine::Kind::Symbolic:
                 debug("resolved HEAD ref '%s' for repo '%s'", parseResult->target, path);
@@ -185,7 +184,7 @@ struct GitInputScheme : InputScheme
         for (auto & [name, value] : url.query) {
             if (name == "rev" || name == "ref" || name == "keytype" || name == "publicKey" || name == "publicKeys")
                 attrs.emplace(name, value);
-            else if (name == "shallow" || name == "submodules" || name == "exportIgnore" || name == "allRefs" || name == "verifyCommit")
+            else if (name == "shallow" || name == "submodules" || name == "lfs" || name == "exportIgnore" || name == "allRefs" || name == "verifyCommit")
                 attrs.emplace(name, Explicit<bool> { value == "1" });
             else
                 url2.query.emplace(name, value);
@@ -210,6 +209,7 @@ struct GitInputScheme : InputScheme
             "rev",
             "shallow",
             "submodules",
+            "lfs",
             "exportIgnore",
             "lastModified",
             "revCount",
@@ -262,6 +262,8 @@ struct GitInputScheme : InputScheme
         if (auto ref = input.getRef()) url.query.insert_or_assign("ref", *ref);
         if (getShallowAttr(input))
             url.query.insert_or_assign("shallow", "1");
+        if (getLfsAttr(input))
+            url.query.insert_or_assign("lfs", "1");
         if (getSubmodulesAttr(input))
             url.query.insert_or_assign("submodules", "1");
         if (maybeGetBoolAttr(input.attrs, "exportIgnore").value_or(false))
@@ -349,8 +351,7 @@ struct GitInputScheme : InputScheme
 
             if (commitMsg) {
                 // Pause the logger to allow for user input (such as a gpg passphrase) in `git commit`
-                logger->pause();
-                Finally restoreLogger([]() { logger->resume(); });
+                auto suspension = logger->suspend();
                 runProgram("git", true,
                     { "-C", repoPath->string(), "--git-dir", repoInfo.gitDir, "commit", std::string(path.rel()), "-F", "-" },
                     *commitMsg);
@@ -411,6 +412,11 @@ struct GitInputScheme : InputScheme
         return maybeGetBoolAttr(input.attrs, "submodules").value_or(false);
     }
 
+    bool getLfsAttr(const Input & input) const
+    {
+        return maybeGetBoolAttr(input.attrs, "lfs").value_or(false);
+    }
+
     bool getExportIgnoreAttr(const Input & input) const
     {
         return maybeGetBoolAttr(input.attrs, "exportIgnore").value_or(false);
@@ -459,8 +465,14 @@ struct GitInputScheme : InputScheme
                     url);
             }
             repoInfo.location = std::filesystem::absolute(url.path);
-        } else
+        } else {
+            if (url.scheme == "file")
+                /* Query parameters are meaningless for file://, but
+                   Git interprets them as part of the file name. So get
+                   rid of them. */
+                url.query.clear();
             repoInfo.location = url;
+        }
 
         // If this is a local directory and no ref or revision is
         // given, then allow the use of an unclean working tree.
@@ -520,14 +532,20 @@ struct GitInputScheme : InputScheme
         return *head;
     }
 
-    static MakeNotAllowedError makeNotAllowedError(std::string url)
+    static MakeNotAllowedError makeNotAllowedError(std::filesystem::path repoPath)
     {
-        return [url{std::move(url)}](const CanonPath & path) -> RestrictedPathError
-        {
-            if (nix::pathExists(path.abs()))
-                return RestrictedPathError("access to path '%s' is forbidden because it is not under Git control; maybe you should 'git add' it to the repository '%s'?", path, url);
+        return [repoPath{std::move(repoPath)}](const CanonPath & path) -> RestrictedPathError {
+            if (fs::symlink_exists(repoPath / path.rel()))
+                return RestrictedPathError(
+                    "Path '%1%' in the repository %2% is not tracked by Git.\n"
+                    "\n"
+                    "To make it visible to Nix, run:\n"
+                    "\n"
+                    "git -C %2% add \"%1%\"",
+                    path.rel(),
+                    repoPath);
             else
-                return RestrictedPathError("path '%s' does not exist in Git repository '%s'", path, url);
+                return RestrictedPathError("Path '%s' does not exist in Git repository %s.", path.rel(), repoPath);
         };
     }
 
@@ -605,16 +623,16 @@ struct GitInputScheme : InputScheme
                 try {
                     auto fetchRef =
                         getAllRefsAttr(input)
-                        ? "refs/*"
+                        ? "refs/*:refs/*"
                         : input.getRev()
                         ? input.getRev()->gitRev()
                         : ref.compare(0, 5, "refs/") == 0
-                        ? ref
+                        ? fmt("%1%:%1%", ref)
                         : ref == "HEAD"
                         ? ref
-                        : "refs/heads/" + ref;
+                        : fmt("%1%:%1%", "refs/heads/" + ref);
 
-                    repo->fetch(repoUrl.to_string(), fmt("%s:%s", fetchRef, fetchRef), getShallowAttr(input));
+                    repo->fetch(repoUrl.to_string(), fetchRef, getShallowAttr(input));
                 } catch (Error & e) {
                     if (!std::filesystem::exists(localRefFile)) throw;
                     logError(e.info());
@@ -672,9 +690,8 @@ struct GitInputScheme : InputScheme
         verifyCommit(input, repo);
 
         bool exportIgnore = getExportIgnoreAttr(input);
-        auto accessor = repo->getAccessor(rev, exportIgnore);
-
-        accessor->setPathDisplay("«" + input.to_string() + "»");
+        bool smudgeLfs = getLfsAttr(input);
+        auto accessor = repo->getAccessor(rev, exportIgnore, "«" + input.to_string() + "»", smudgeLfs);
 
         /* If the repo has submodules, fetch them and return a mounted
            input accessor consisting of the accessor for the top-level
@@ -694,6 +711,7 @@ struct GitInputScheme : InputScheme
                 attrs.insert_or_assign("rev", submoduleRev.gitRev());
                 attrs.insert_or_assign("exportIgnore", Explicit<bool>{ exportIgnore });
                 attrs.insert_or_assign("submodules", Explicit<bool>{ true });
+                attrs.insert_or_assign("lfs", Explicit<bool>{ smudgeLfs });
                 attrs.insert_or_assign("allRefs", Explicit<bool>{ true });
                 auto submoduleInput = fetchers::Input::fromAttrs(*input.settings, std::move(attrs));
                 auto [submoduleAccessor, submoduleInput2] =
@@ -735,9 +753,7 @@ struct GitInputScheme : InputScheme
         ref<SourceAccessor> accessor =
             repo->getAccessor(repoInfo.workdirInfo,
                 exportIgnore,
-                makeNotAllowedError(repoInfo.locationToArg()));
-
-        accessor->setPathDisplay(repoInfo.locationToArg());
+                makeNotAllowedError(repoPath));
 
         /* If the repo has submodules, return a mounted input accessor
            consisting of the accessor for the top-level repo and the
@@ -836,7 +852,7 @@ struct GitInputScheme : InputScheme
     {
         auto makeFingerprint = [&](const Hash & rev)
         {
-            return rev.gitRev() + (getSubmodulesAttr(input) ? ";s" : "") + (getExportIgnoreAttr(input) ? ";e" : "");
+            return rev.gitRev() + (getSubmodulesAttr(input) ? ";s" : "") + (getExportIgnoreAttr(input) ? ";e" : "") + (getLfsAttr(input) ? ";l" : "");
         };
 
         if (auto rev = input.getRev())

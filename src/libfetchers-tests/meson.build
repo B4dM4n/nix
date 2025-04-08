@@ -31,18 +31,14 @@ deps_private += rapidcheck
 gtest = dependency('gtest', main : true)
 deps_private += gtest
 
-add_project_arguments(
-  # TODO(Qyriad): Yes this is how the autoconf+Make system did it.
-  # It would be nice for our headers to be idempotent instead.
-  '-include', 'config-util.hh',
-  '-include', 'config-store.hh',
-  # '-include', 'config-fetchers.h',
-  language : 'cpp',
-)
+libgit2 = dependency('libgit2')
+deps_private += libgit2
 
 subdir('nix-meson-build-support/common')
 
 sources = files(
+  'access-tokens.cc',
+  'git-utils.cc',
   'public-key.cc',
 )
 

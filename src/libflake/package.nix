@@ -1,15 +1,16 @@
-{ lib
-, mkMesonLibrary
+{
+  lib,
+  mkMesonLibrary,
 
-, nix-util
-, nix-store
-, nix-fetchers
-, nix-expr
-, nlohmann_json
+  nix-util,
+  nix-store,
+  nix-fetchers,
+  nix-expr,
+  nlohmann_json,
 
-# Configuration Options
+  # Configuration Options
 
-, version
+  version,
 }:
 
 let
@@ -27,6 +28,8 @@ mkMesonLibrary (finalAttrs: {
     ../../.version
     ./.version
     ./meson.build
+    ./include/nix/flake/meson.build
+    ./call-flake.nix
     (fileset.fileFilter (file: file.hasExt "cc") ./.)
     (fileset.fileFilter (file: file.hasExt "hh") ./.)
   ];
@@ -38,14 +41,6 @@ mkMesonLibrary (finalAttrs: {
     nix-expr
     nlohmann_json
   ];
-
-  preConfigure =
-    # "Inline" .version so it's not a symlink, and includes the suffix.
-    # Do the meson utils, without modification.
-    ''
-      chmod u+w ./.version
-      echo ${version} > ../../.version
-    '';
 
   meta = {
     platforms = lib.platforms.unix ++ lib.platforms.windows;

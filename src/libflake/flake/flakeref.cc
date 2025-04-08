@@ -1,8 +1,8 @@
-#include "flakeref.hh"
-#include "store-api.hh"
-#include "url.hh"
-#include "url-parts.hh"
-#include "fetchers.hh"
+#include "nix/flake/flakeref.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/url.hh"
+#include "nix/util/url-parts.hh"
+#include "nix/fetchers/fetchers.hh"
 
 namespace nix {
 
@@ -107,7 +107,7 @@ std::pair<FlakeRef, std::string> parsePathFlakeRefWithFragment(
            to 'baseDir'). If so, search upward to the root of the
            repo (i.e. the directory containing .git). */
 
-        path = absPath(path, baseDir);
+        path = absPath(path, baseDir, true);
 
         if (isFlake) {
 
@@ -283,10 +283,10 @@ FlakeRef FlakeRef::fromAttrs(
         fetchers::maybeGetStrAttr(attrs, "dir").value_or(""));
 }
 
-std::pair<StorePath, FlakeRef> FlakeRef::fetchTree(ref<Store> store) const
+std::pair<ref<SourceAccessor>, FlakeRef> FlakeRef::lazyFetch(ref<Store> store) const
 {
-    auto [storePath, lockedInput] = input.fetchToStore(store);
-    return {std::move(storePath), FlakeRef(std::move(lockedInput), subdir)};
+    auto [accessor, lockedInput] = input.getAccessor(store);
+    return {accessor, FlakeRef(std::move(lockedInput), subdir)};
 }
 
 std::tuple<FlakeRef, std::string, ExtendedOutputsSpec> parseFlakeRefWithFragmentAndExtendedOutputsSpec(

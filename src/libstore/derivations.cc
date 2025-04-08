@@ -1,14 +1,14 @@
-#include "derivations.hh"
-#include "downstream-placeholder.hh"
-#include "store-api.hh"
-#include "globals.hh"
-#include "types.hh"
-#include "util.hh"
-#include "split.hh"
-#include "common-protocol.hh"
-#include "common-protocol-impl.hh"
-#include "strings-inline.hh"
-#include "json-utils.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/downstream-placeholder.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/types.hh"
+#include "nix/util/util.hh"
+#include "nix/util/split.hh"
+#include "nix/store/common-protocol.hh"
+#include "nix/store/common-protocol-impl.hh"
+#include "nix/util/strings-inline.hh"
+#include "nix/util/json-utils.hh"
 
 #include <boost/container/small_vector.hpp>
 #include <nlohmann/json.hpp>
@@ -300,7 +300,7 @@ static DerivationOutput parseDerivationOutput(
         } else {
             xpSettings.require(Xp::CaDerivations);
             if (pathS != "")
-                throw FormatError("content-addressed derivation output should not specify output path");
+                throw FormatError("content-addressing derivation output should not specify output path");
             return DerivationOutput::CAFloating {
                 .method = std::move(method),
                 .hashAlgo = std::move(hashAlgo),
@@ -843,16 +843,6 @@ DrvHash hashDerivationModulo(Store & store, const Derivation & drv, bool maskOut
         };
     }
 
-    if (type.isImpure()) {
-        std::map<std::string, Hash> outputHashes;
-        for (const auto & [outputName, _] : drv.outputs)
-            outputHashes.insert_or_assign(outputName, impureOutputHash);
-        return DrvHash {
-            .hashes = outputHashes,
-            .kind = DrvHash::Kind::Deferred,
-        };
-    }
-
     auto kind = std::visit(overloaded {
         [](const DerivationType::InputAddressed & ia) {
             /* This might be a "pesimistically" deferred output, so we don't
@@ -865,7 +855,7 @@ DrvHash hashDerivationModulo(Store & store, const Derivation & drv, bool maskOut
                 : DrvHash::Kind::Deferred;
         },
         [](const DerivationType::Impure &) -> DrvHash::Kind {
-            assert(false);
+            return DrvHash::Kind::Deferred;
         }
     }, drv.type().raw);
 

@@ -1,14 +1,13 @@
-#include "processes.hh"
-#include "command.hh"
-#include "common-args.hh"
-#include "store-api.hh"
-#include "filetransfer.hh"
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "attr-path.hh"
-#include "names.hh"
-#include "progress-bar.hh"
-#include "executable-path.hh"
+#include "nix/util/processes.hh"
+#include "nix/cmd/command.hh"
+#include "nix/main/common-args.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/store/names.hh"
+#include "nix/util/executable-path.hh"
 #include "self-exe.hh"
 
 using namespace nix;
@@ -71,7 +70,7 @@ struct CmdUpgradeNix : MixDryRun, StoreCommand
         auto version = DrvName(storePath.name()).version;
 
         if (dryRun) {
-            stopProgressBar();
+            logger->stop();
             warn("would upgrade to version %s", version);
             return;
         }
@@ -89,7 +88,7 @@ struct CmdUpgradeNix : MixDryRun, StoreCommand
                 throw Error("could not verify that '%s' works", program);
         }
 
-        stopProgressBar();
+        logger->stop();
 
         {
             Activity act(*logger, lvlInfo, actUnknown,

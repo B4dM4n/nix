@@ -1,16 +1,17 @@
 #include <unordered_set>
 
-#include "derivations.hh"
-#include "parsed-derivations.hh"
-#include "globals.hh"
-#include "store-api.hh"
-#include "thread-pool.hh"
-#include "realisation.hh"
-#include "topo-sort.hh"
-#include "callback.hh"
-#include "closure.hh"
-#include "filetransfer.hh"
-#include "strings.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/parsed-derivations.hh"
+#include "nix/store/derivation-options.hh"
+#include "nix/store/globals.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/thread-pool.hh"
+#include "nix/store/realisation.hh"
+#include "nix/util/topo-sort.hh"
+#include "nix/util/callback.hh"
+#include "nix/util/closure.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/util/strings.hh"
 
 namespace nix {
 
@@ -222,8 +223,9 @@ void Store::queryMissing(const std::vector<DerivedPath> & targets,
 
             auto drv = make_ref<Derivation>(derivationFromPath(drvPath));
             ParsedDerivation parsedDrv(StorePath(drvPath), *drv);
+            DerivationOptions drvOptions = DerivationOptions::fromParsedDerivation(parsedDrv);
 
-            if (!knownOutputPaths && settings.useSubstitutes && parsedDrv.substitutesAllowed()) {
+            if (!knownOutputPaths && settings.useSubstitutes && drvOptions.substitutesAllowed()) {
                 experimentalFeatureSettings.require(Xp::CaDerivations);
 
                 // If there are unknown output paths, attempt to find if the
@@ -253,7 +255,7 @@ void Store::queryMissing(const std::vector<DerivedPath> & targets,
                 }
             }
 
-            if (knownOutputPaths && settings.useSubstitutes && parsedDrv.substitutesAllowed()) {
+            if (knownOutputPaths && settings.useSubstitutes && drvOptions.substitutesAllowed()) {
                 auto drvState = make_ref<Sync<DrvState>>(DrvState(invalid.size()));
                 for (auto & output : invalid)
                     pool.enqueue(std::bind(checkOutput, drvPath, drv, output, drvState));

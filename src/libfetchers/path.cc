@@ -1,7 +1,9 @@
-#include "fetchers.hh"
-#include "store-api.hh"
-#include "archive.hh"
-#include "store-path-accessor.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/archive.hh"
+#include "nix/fetchers/store-path-accessor.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/fetchers/fetch-to-store.hh"
 
 namespace nix::fetchers {
 
@@ -125,7 +127,7 @@ struct PathInputScheme : InputScheme
 
         auto absPath = getAbsPath(input);
 
-        Activity act(*logger, lvlTalkative, actUnknown, fmt("copying '%s' to the store", absPath));
+        Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", absPath));
 
         // FIXME: check whether access to 'path' is allowed.
         auto storePath = store->maybeParseStorePath(absPath.string());
@@ -140,6 +142,14 @@ struct PathInputScheme : InputScheme
                 mtime = dumpPathAndGetMtime(absPath.string(), sink, defaultPathFilter);
             });
             storePath = store->addToStoreFromDump(*src, "source");
+        }
+
+        // To avoid copying the path again to the /nix/store, we need to add a cache entry.
+        ContentAddressMethod method = ContentAddressMethod::Raw::NixArchive;
+        auto fp = getFingerprint(store, input);
+        if (fp) {
+            auto cacheKey = makeFetchToStoreCacheKey(input.getName(), *fp, method, "/");
+            fetchers::getCache()->upsert(cacheKey, *store, {}, *storePath);
         }
 
         /* Trust the lastModified value supplied by the user, if

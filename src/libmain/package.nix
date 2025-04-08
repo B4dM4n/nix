@@ -1,14 +1,15 @@
-{ lib
-, mkMesonLibrary
+{
+  lib,
+  mkMesonLibrary,
 
-, openssl
+  openssl,
 
-, nix-util
-, nix-store
+  nix-util,
+  nix-store,
 
-# Configuration Options
+  # Configuration Options
 
-, version
+  version,
 }:
 
 let
@@ -26,6 +27,7 @@ mkMesonLibrary (finalAttrs: {
     ../../.version
     ./.version
     ./meson.build
+    ./include/nix/main/meson.build
     (fileset.fileFilter (file: file.hasExt "cc") ./.)
     (fileset.fileFilter (file: file.hasExt "hh") ./.)
   ];
@@ -35,14 +37,6 @@ mkMesonLibrary (finalAttrs: {
     nix-store
     openssl
   ];
-
-  preConfigure =
-    # "Inline" .version so it's not a symlink, and includes the suffix.
-    # Do the meson utils, without modification.
-    ''
-      chmod u+w ./.version
-      echo ${version} > ../../.version
-    '';
 
   meta = {
     platforms = lib.platforms.unix ++ lib.platforms.windows;

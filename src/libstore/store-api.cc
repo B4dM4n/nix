@@ -1,28 +1,28 @@
-#include "signature/local-keys.hh"
-#include "source-accessor.hh"
-#include "globals.hh"
-#include "derived-path.hh"
-#include "realisation.hh"
-#include "derivations.hh"
-#include "store-api.hh"
-#include "util.hh"
-#include "nar-info-disk-cache.hh"
-#include "thread-pool.hh"
-#include "references.hh"
-#include "archive.hh"
-#include "callback.hh"
-#include "git.hh"
-#include "posix-source-accessor.hh"
+#include "nix/util/signature/local-keys.hh"
+#include "nix/util/source-accessor.hh"
+#include "nix/store/globals.hh"
+#include "nix/store/derived-path.hh"
+#include "nix/store/realisation.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/util.hh"
+#include "nix/store/nar-info-disk-cache.hh"
+#include "nix/util/thread-pool.hh"
+#include "nix/util/references.hh"
+#include "nix/util/archive.hh"
+#include "nix/util/callback.hh"
+#include "nix/util/git.hh"
+#include "nix/util/posix-source-accessor.hh"
 // FIXME this should not be here, see TODO below on
 // `addMultipleToStore`.
-#include "worker-protocol.hh"
-#include "signals.hh"
-#include "users.hh"
+#include "nix/store/worker-protocol.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/users.hh"
 
 #include <filesystem>
 #include <nlohmann/json.hpp>
 
-#include "strings.hh"
+#include "nix/util/strings.hh"
 
 using json = nlohmann::json;
 
@@ -230,20 +230,24 @@ void Store::addMultipleToStore(
 {
     std::atomic<size_t> nrDone{0};
     std::atomic<size_t> nrFailed{0};
-    std::atomic<uint64_t> bytesExpected{0};
     std::atomic<uint64_t> nrRunning{0};
 
     using PathWithInfo = std::pair<ValidPathInfo, std::unique_ptr<Source>>;
 
+    uint64_t bytesExpected = 0;
+
     std::map<StorePath, PathWithInfo *> infosMap;
     StorePathSet storePathsToAdd;
     for (auto & thingToAdd : pathsToCopy) {
+        bytesExpected += thingToAdd.first.narSize;
         infosMap.insert_or_assign(thingToAdd.first.path, &thingToAdd);
         storePathsToAdd.insert(thingToAdd.first.path);
     }
 
-    auto showProgress = [&]() {
-        act.progress(nrDone, pathsToCopy.size(), nrRunning, nrFailed);
+    act.setExpected(actCopyPath, bytesExpected);
+
+    auto showProgress = [&, nrTotal = pathsToCopy.size()]() {
+        act.progress(nrDone, nrTotal, nrRunning, nrFailed);
     };
 
     processGraph<StorePath>(
@@ -258,9 +262,6 @@ void Store::addMultipleToStore(
                 showProgress();
                 return StorePathSet();
             }
-
-            bytesExpected += info.narSize;
-            act.setExpected(actCopyPath, bytesExpected);
 
             return info.references;
         },
@@ -1104,9 +1105,6 @@ std::map<StorePath, StorePath> copyPaths(
         return storePathForDst;
     };
 
-    // total is accessed by each copy, which are each handled in separate threads
-    std::atomic<uint64_t> total = 0;
-
     for (auto & missingPath : sortedMissing) {
         auto info = srcStore.queryPathInfo(missingPath);
 
@@ -1116,9 +1114,10 @@ std::map<StorePath, StorePath> copyPaths(
         ValidPathInfo infoForDst = *info;
         infoForDst.path = storePathForDst;
 
-        auto source = sinkToSource([&](Sink & sink) {
+        auto source = sinkToSource([&, narSize = info->narSize](Sink & sink) {
             // We can reasonably assume that the copy will happen whenever we
             // read the path, so log something about that at that point
+            uint64_t total = 0;
             auto srcUri = srcStore.getUri();
             auto dstUri = dstStore.getUri();
             auto storePathS = srcStore.printStorePath(missingPath);
@@ -1129,13 +1128,13 @@ std::map<StorePath, StorePath> copyPaths(
 
             LambdaSink progressSink([&](std::string_view data) {
                 total += data.size();
-                act.progress(total, info->narSize);
+                act.progress(total, narSize);
             });
             TeeSink tee { sink, progressSink };
 
             srcStore.narFromPath(missingPath, tee);
         });
-        pathsToCopy.push_back(std::pair{infoForDst, std::move(source)});
+        pathsToCopy.emplace_back(std::move(infoForDst), std::move(source));
     }
 
     dstStore.addMultipleToStore(std::move(pathsToCopy), act, repair, checkSigs);
@@ -1278,8 +1277,8 @@ Derivation Store::readInvalidDerivation(const StorePath & drvPath)
 }
 
 
-#include "local-store.hh"
-#include "uds-remote-store.hh"
+#include "nix/store/local-store.hh"
+#include "nix/store/uds-remote-store.hh"
 
 
 namespace nix {

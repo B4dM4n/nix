@@ -1,14 +1,14 @@
-#include "tarball.hh"
-#include "fetchers.hh"
-#include "cache.hh"
-#include "filetransfer.hh"
-#include "store-api.hh"
-#include "archive.hh"
-#include "tarfile.hh"
-#include "types.hh"
-#include "store-path-accessor.hh"
-#include "store-api.hh"
-#include "git-utils.hh"
+#include "nix/fetchers/tarball.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/store/store-api.hh"
+#include "nix/util/archive.hh"
+#include "nix/util/tarfile.hh"
+#include "nix/util/types.hh"
+#include "nix/fetchers/store-path-accessor.hh"
+#include "nix/store/store-api.hh"
+#include "nix/fetchers/git-utils.hh"
 
 namespace nix::fetchers {
 
@@ -105,7 +105,8 @@ DownloadFileResult downloadFile(
 
 static DownloadTarballResult downloadTarball_(
     const std::string & url,
-    const Headers & headers)
+    const Headers & headers,
+    const std::string & displayPrefix)
 {
     Cache::Key cacheKey{"tarball", {{"url", url}}};
 
@@ -118,7 +119,7 @@ static DownloadTarballResult downloadTarball_(
             .treeHash = treeHash,
             .lastModified = (time_t) getIntAttr(infoAttrs, "lastModified"),
             .immutableUrl = maybeGetStrAttr(infoAttrs, "immutableUrl"),
-            .accessor = getTarballCache()->getAccessor(treeHash, false),
+            .accessor = getTarballCache()->getAccessor(treeHash, false, displayPrefix),
         };
     };
 
@@ -371,9 +372,10 @@ struct TarballInputScheme : CurlInputScheme
     {
         auto input(_input);
 
-        auto result = downloadTarball_(getStrAttr(input.attrs, "url"), {});
-
-        result.accessor->setPathDisplay("«" + input.to_string() + "»");
+        auto result = downloadTarball_(
+            getStrAttr(input.attrs, "url"),
+            {},
+            "«" + input.to_string() + "»");
 
         if (result.immutableUrl) {
             auto immutableInput = Input::fromURL(*input.settings, *result.immutableUrl);

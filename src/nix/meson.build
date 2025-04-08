@@ -35,6 +35,9 @@ subdir('nix-meson-build-support/windows-version')
 
 configdata = configuration_data()
 
+# The CLI has a more detailed version string than the libraries; see `nixVersion`
+configdata.set_quoted('NIX_CLI_VERSION', meson.project_version())
+
 fs = import('fs')
 
 bindir = get_option('bindir')
@@ -43,28 +46,15 @@ if not fs.is_absolute(bindir)
 endif
 configdata.set_quoted('NIX_BIN_DIR', bindir)
 
-config_h = configure_file(
+config_priv_h = configure_file(
   configuration : configdata,
-  output : 'config-nix-cli.hh',
-)
-
-add_project_arguments(
-  # TODO(Qyriad): Yes this is how the autoconf+Make system did it.
-  # It would be nice for our headers to be idempotent instead.
-  '-include', 'config-util.hh',
-  '-include', 'config-store.hh',
-  '-include', 'config-expr.hh',
-  #'-include', 'config-fetchers.hh',
-  '-include', 'config-main.hh',
-  '-include', 'config-cmd.hh',
-  '-include', 'config-nix-cli.hh',
-  language : 'cpp',
+  output : 'cli-config-private.hh',
 )
 
 subdir('nix-meson-build-support/common')
 subdir('nix-meson-build-support/generate-header')
 
-nix_sources = [config_h] + files(
+nix_sources = [config_priv_h] + files(
   'add-to-store.cc',
   'app.cc',
   'self-exe.cc',
@@ -74,6 +64,7 @@ nix_sources = [config_h] + files(
   'config-check.cc',
   'config.cc',
   'copy.cc',
+  'crash-handler.cc',
   'derivation-add.cc',
   'derivation-show.cc',
   'derivation.cc',
@@ -91,6 +82,7 @@ nix_sources = [config_h] + files(
   'ls.cc',
   'main.cc',
   'make-content-addressed.cc',
+  'man-pages.cc',
   'nar.cc',
   'optimise-store.cc',
   'path-from-hash-part.cc',
@@ -183,6 +175,16 @@ if host_machine.system() != 'windows'
   ]
 endif
 
+fs = import('fs')
+prefix = get_option('prefix')
+
+mandir = get_option('mandir')
+mandir = fs.is_absolute(mandir) ? mandir : prefix / mandir
+
+cpp_args= [
+  '-DNIX_MAN_DIR="@0@"'.format(mandir)
+]
+
 include_dirs = [include_directories('.')]
 
 this_exe = executable(
@@ -190,6 +192,7 @@ this_exe = executable(
   sources,
   dependencies : deps_private_subproject + deps_private + deps_other,
   include_directories : include_dirs,
+  cpp_args : cpp_args,
   link_args: linker_export_flags,
   install : true,
 )
@@ -224,7 +227,7 @@ foreach linkname : nix_symlinks
     # The 'runtime' tag is what executables default to, which we want to emulate here.
     install_tag : 'runtime'
   )
-  t = custom_target(
+  custom_target(
     command: ['ln', '-sf', fs.name(this_exe), '@OUTPUT@'],
     output: linkname + executable_suffix,
     # native doesn't allow dangling symlinks, but the target executable often doesn't exist at this time

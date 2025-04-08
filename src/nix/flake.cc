@@ -1,28 +1,30 @@
-#include "command.hh"
-#include "installable-flake.hh"
-#include "common-args.hh"
-#include "shared.hh"
-#include "eval.hh"
-#include "eval-inline.hh"
-#include "eval-settings.hh"
-#include "flake/flake.hh"
-#include "get-drvs.hh"
-#include "signals.hh"
-#include "store-api.hh"
-#include "derivations.hh"
-#include "outputs-spec.hh"
-#include "attr-path.hh"
-#include "fetchers.hh"
-#include "registry.hh"
-#include "eval-cache.hh"
-#include "markdown.hh"
-#include "users.hh"
+#include "nix/cmd/command.hh"
+#include "nix/cmd/installable-flake.hh"
+#include "nix/main/common-args.hh"
+#include "nix/main/shared.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/flake/flake.hh"
+#include "nix/expr/get-drvs.hh"
+#include "nix/util/signals.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/outputs-spec.hh"
+#include "nix/expr/attr-path.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/fetchers/registry.hh"
+#include "nix/expr/eval-cache.hh"
+#include "nix/cmd/markdown.hh"
+#include "nix/util/users.hh"
+#include "nix/fetchers/fetch-to-store.hh"
+#include "nix/store/local-fs-store.hh"
 
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <iomanip>
 
-#include "strings-inline.hh"
+#include "nix/util/strings-inline.hh"
 
 namespace nix::fs { using namespace std::filesystem; }
 
@@ -95,20 +97,20 @@ public:
             .optional=true,
             .handler={[&](std::vector<std::string> inputsToUpdate){
                 for (const auto & inputToUpdate : inputsToUpdate) {
-                    InputPath inputPath;
+                    InputAttrPath inputAttrPath;
                     try {
-                        inputPath = flake::parseInputPath(inputToUpdate);
+                        inputAttrPath = flake::parseInputAttrPath(inputToUpdate);
                     } catch (Error & e) {
                         warn("Invalid flake input '%s'. To update a specific flake, use 'nix flake update --flake %s' instead.", inputToUpdate, inputToUpdate);
                         throw e;
                     }
-                    if (lockFlags.inputUpdates.contains(inputPath))
-                        warn("Input '%s' was specified multiple times. You may have done this by accident.");
-                    lockFlags.inputUpdates.insert(inputPath);
+                    if (lockFlags.inputUpdates.contains(inputAttrPath))
+                        warn("Input '%s' was specified multiple times. You may have done this by accident.", printInputAttrPath(inputAttrPath));
+                    lockFlags.inputUpdates.insert(inputAttrPath);
                 }
             }},
             .completer = {[&](AddCompletions & completions, size_t, std::string_view prefix) {
-                completeFlakeInputPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
+                completeFlakeInputAttrPath(completions, getEvalState(), getFlakeRefsForCompletion(), prefix);
             }}
         });
 
@@ -214,7 +216,7 @@ struct CmdFlakeMetadata : FlakeCommand, MixJSON
         auto & flake = lockedFlake.flake;
 
         // Currently, all flakes are in the Nix store via the rootFS accessor.
-        auto storePath = store->printStorePath(sourcePathToStorePath(store, flake.path).first);
+        auto storePath = store->printStorePath(store->toStorePath(flake.path.path.abs()).first);
 
         if (json) {
             nlohmann::json j;
@@ -304,7 +306,7 @@ struct CmdFlakeMetadata : FlakeCommand, MixJSON
                     } else if (auto follows = std::get_if<1>(&input.second)) {
                         logger->cout("%s" ANSI_BOLD "%s" ANSI_NORMAL " follows input '%s'",
                             prefix + (last ? treeLast : treeConn), input.first,
-                            printInputPath(*follows));
+                            printInputAttrPath(*follows));
                     }
                 }
             };
@@ -903,7 +905,7 @@ struct CmdFlakeInitCommon : virtual Args, EvalCommand
         std::function<void(const SourcePath & from, const fs::path & to)> copyDir;
         copyDir = [&](const SourcePath & from, const fs::path & to)
         {
-            fs::create_directories(to);
+            createDirs(to);
 
             for (auto & [name, entry] : from.readDirectory()) {
                 checkInterrupt();
@@ -1077,7 +1079,7 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun
 
         StorePathSet sources;
 
-        auto storePath = sourcePathToStorePath(store, flake.flake.path).first;
+        auto storePath = store->toStorePath(flake.flake.path.path.abs()).first;
 
         sources.insert(storePath);
 
@@ -1088,19 +1090,21 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun
             nlohmann::json jsonObj2 = json ? json::object() : nlohmann::json(nullptr);
             for (auto & [inputName, input] : node.inputs) {
                 if (auto inputNode = std::get_if<0>(&input)) {
-                    auto storePath =
-                        dryRun
-                        ? (*inputNode)->lockedRef.input.computeStorePath(*store)
-                        : (*inputNode)->lockedRef.input.fetchToStore(store).first;
-                    if (json) {
-                        auto& jsonObj3 = jsonObj2[inputName];
-                        jsonObj3["path"] = store->printStorePath(storePath);
-                        sources.insert(std::move(storePath));
-                        jsonObj3["inputs"] = traverse(**inputNode);
-                    } else {
-                        sources.insert(std::move(storePath));
-                        traverse(**inputNode);
+                    std::optional<StorePath> storePath;
+                    if (!(*inputNode)->lockedRef.input.isRelative()) {
+                        storePath =
+                            dryRun
+                            ? (*inputNode)->lockedRef.input.computeStorePath(*store)
+                            : (*inputNode)->lockedRef.input.fetchToStore(store).first;
+                        sources.insert(*storePath);
                     }
+                    if (json) {
+                        auto & jsonObj3 = jsonObj2[inputName];
+                        if (storePath)
+                            jsonObj3["path"] = store->printStorePath(*storePath);
+                        jsonObj3["inputs"] = traverse(**inputNode);
+                    } else
+                        traverse(**inputNode);
                 }
             }
             return jsonObj2;
@@ -1429,8 +1433,18 @@ struct CmdFlakeShow : FlakeCommand, MixJSON
 
 struct CmdFlakePrefetch : FlakeCommand, MixJSON
 {
+    std::optional<std::filesystem::path> outLink;
+
     CmdFlakePrefetch()
     {
+        addFlag({
+            .longName = "out-link",
+            .shortName = 'o',
+            .description = "Create symlink named *path* to the resulting store path.",
+            .labels = {"path"},
+            .handler = {&outLink},
+            .completer = completePath
+        });
     }
 
     std::string description() override
@@ -1449,7 +1463,8 @@ struct CmdFlakePrefetch : FlakeCommand, MixJSON
     {
         auto originalRef = getFlakeRef();
         auto resolvedRef = originalRef.resolve(store);
-        auto [storePath, lockedRef] = resolvedRef.fetchTree(store);
+        auto [accessor, lockedRef] = resolvedRef.lazyFetch(store);
+        auto storePath = fetchToStore(*store, accessor, FetchMode::Copy, lockedRef.input.getName());
         auto hash = store->queryPathInfo(storePath)->narHash;
 
         if (json) {
@@ -1464,6 +1479,13 @@ struct CmdFlakePrefetch : FlakeCommand, MixJSON
                 lockedRef.to_string(),
                 store->printStorePath(storePath),
                 hash.to_string(HashFormat::SRI, true));
+        }
+
+        if (outLink) {
+            if (auto store2 = store.dynamic_pointer_cast<LocalFSStore>())
+                createOutLinks(*outLink, {BuiltPath::Opaque{storePath}}, *store2);
+            else
+                throw Error("'--out-link' is not supported for this Nix store");
         }
     }
 };

@@ -1,11 +1,12 @@
-#include "git-utils.hh"
-#include "cache.hh"
-#include "finally.hh"
-#include "processes.hh"
-#include "signals.hh"
-#include "users.hh"
-#include "fs-sink.hh"
-#include "sync.hh"
+#include "nix/fetchers/git-utils.hh"
+#include "nix/fetchers/git-lfs-fetch.hh"
+#include "nix/fetchers/cache.hh"
+#include "nix/util/finally.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/users.hh"
+#include "nix/util/fs-sink.hh"
+#include "nix/util/sync.hh"
 
 #include <git2/attr.h>
 #include <git2/blob.h>
@@ -60,14 +61,6 @@ namespace nix {
 
 struct GitSourceAccessor;
 
-// Some wrapper types that ensure that the git_*_free functions get called.
-template<auto del>
-struct Deleter
-{
-    template <typename T>
-    void operator()(T * p) const { del(p); };
-};
-
 typedef std::unique_ptr<git_repository, Deleter<git_repository_free>> Repository;
 typedef std::unique_ptr<git_tree_entry, Deleter<git_tree_entry_free>> TreeEntry;
 typedef std::unique_ptr<git_tree, Deleter<git_tree_free>> Tree;
@@ -84,20 +77,6 @@ typedef std::unique_ptr<git_config_iterator, Deleter<git_config_iterator_free>> 
 typedef std::unique_ptr<git_odb, Deleter<git_odb_free>> ObjectDb;
 typedef std::unique_ptr<git_packbuilder, Deleter<git_packbuilder_free>> PackBuilder;
 typedef std::unique_ptr<git_indexer, Deleter<git_indexer_free>> Indexer;
-
-// A helper to ensure that we don't leak objects returned by libgit2.
-template<typename T>
-struct Setter
-{
-    T & t;
-    typename T::pointer p = nullptr;
-
-    Setter(T & t) : t(t) { }
-
-    ~Setter() { if (p) t = T(p); }
-
-    operator typename T::pointer * () { return &p; }
-};
 
 Hash toHash(const git_oid & oid)
 {
@@ -206,7 +185,8 @@ static git_packbuilder_progress PACKBUILDER_PROGRESS_CHECK_INTERRUPT = &packBuil
 
 } // extern "C"
 
-static void initRepoAtomically(std::filesystem::path &path, bool bare) {
+static void initRepoAtomically(std::filesystem::path &path, bool bare)
+{
     if (pathExists(path.string())) return;
 
     Path tmpDir = createTempDir(os_string_to_string(PathViewNG { std::filesystem::path(path).parent_path() }));
@@ -505,9 +485,15 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     /**
      * A 'GitSourceAccessor' with no regard for export-ignore or any other transformations.
      */
-    ref<GitSourceAccessor> getRawAccessor(const Hash & rev);
+    ref<GitSourceAccessor> getRawAccessor(
+        const Hash & rev,
+        bool smudgeLfs = false);
 
-    ref<SourceAccessor> getAccessor(const Hash & rev, bool exportIgnore) override;
+    ref<SourceAccessor> getAccessor(
+        const Hash & rev,
+        bool exportIgnore,
+        std::string displayPrefix,
+        bool smudgeLfs = false) override;
 
     ref<SourceAccessor> getAccessor(const WorkdirInfo & wd, bool exportIgnore, MakeNotAllowedError e) override;
 
@@ -544,13 +530,10 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         //       then use code that was removed in this commit (see blame)
 
         auto dir = this->path;
-        Strings gitArgs;
-        if (shallow) {
-            gitArgs = { "-C", dir.string(), "fetch", "--quiet", "--force", "--depth", "1", "--", url, refspec };
-        }
-        else {
-            gitArgs = { "-C", dir.string(), "fetch", "--quiet", "--force", "--", url, refspec };
-        }
+        Strings gitArgs{"-C", dir.string(), "--git-dir", ".", "fetch", "--quiet", "--force"};
+        if (shallow)
+            append(gitArgs, {"--depth", "1"});
+        append(gitArgs, {std::string("--"), url, refspec});
 
         runProgram(RunOptions {
             .program = "git",
@@ -629,7 +612,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
 
     Hash treeHashToNarHash(const Hash & treeHash) override
     {
-        auto accessor = getAccessor(treeHash, false);
+        auto accessor = getAccessor(treeHash, false, "");
 
         fetchers::Cache::Key cacheKey{"treeHashToNarHash", {{"treeHash", treeHash.gitRev()}}};
 
@@ -669,24 +652,40 @@ ref<GitRepo> GitRepo::openRepo(const std::filesystem::path & path, bool create, 
 /**
  * Raw git tree input accessor.
  */
+
 struct GitSourceAccessor : SourceAccessor
 {
     ref<GitRepoImpl> repo;
     Object root;
+    std::optional<lfs::Fetch> lfsFetch = std::nullopt;
 
-    GitSourceAccessor(ref<GitRepoImpl> repo_, const Hash & rev)
+    GitSourceAccessor(ref<GitRepoImpl> repo_, const Hash & rev, bool smudgeLfs)
         : repo(repo_)
         , root(peelToTreeOrBlob(lookupObject(*repo, hashToOID(rev)).get()))
     {
+        if (smudgeLfs)
+            lfsFetch = std::make_optional(lfs::Fetch(*repo, hashToOID(rev)));
     }
 
     std::string readBlob(const CanonPath & path, bool symlink)
     {
-        auto blob = getBlob(path, symlink);
+        const auto blob = getBlob(path, symlink);
 
-        auto data = std::string_view((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
+        if (lfsFetch) {
+            if (lfsFetch->shouldFetch(path)) {
+                StringSink s;
+                try {
+                    auto contents = std::string((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
+                    lfsFetch->fetch(contents, path, s, [&s](uint64_t size){ s.s.reserve(size); });
+                } catch (Error & e) {
+                    e.addTrace({}, "while smudging git-lfs file '%s'", path);
+                    throw;
+                }
+                return s.s;
+            }
+        }
 
-        return std::string(data);
+        return std::string((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
     }
 
     std::string readFile(const CanonPath & path) override
@@ -1190,37 +1189,38 @@ struct GitFileSystemObjectSinkImpl : GitFileSystemObjectSink
     }
 };
 
-ref<GitSourceAccessor> GitRepoImpl::getRawAccessor(const Hash & rev)
+ref<GitSourceAccessor> GitRepoImpl::getRawAccessor(
+    const Hash & rev,
+    bool smudgeLfs)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
-    return make_ref<GitSourceAccessor>(self, rev);
+    return make_ref<GitSourceAccessor>(self, rev, smudgeLfs);
 }
 
-ref<SourceAccessor> GitRepoImpl::getAccessor(const Hash & rev, bool exportIgnore)
+ref<SourceAccessor> GitRepoImpl::getAccessor(
+    const Hash & rev,
+    bool exportIgnore,
+    std::string displayPrefix,
+    bool smudgeLfs)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
-    ref<GitSourceAccessor> rawGitAccessor = getRawAccessor(rev);
-    if (exportIgnore) {
+    ref<GitSourceAccessor> rawGitAccessor = getRawAccessor(rev, smudgeLfs);
+    rawGitAccessor->setPathDisplay(std::move(displayPrefix));
+    if (exportIgnore)
         return make_ref<GitExportIgnoreSourceAccessor>(self, rawGitAccessor, rev);
-    }
-    else {
+    else
         return rawGitAccessor;
-    }
 }
 
 ref<SourceAccessor> GitRepoImpl::getAccessor(const WorkdirInfo & wd, bool exportIgnore, MakeNotAllowedError makeNotAllowedError)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
-    /* In case of an empty workdir, return an empty in-memory tree. We
-       cannot use AllowListSourceAccessor because it would return an
-       error for the root (and we can't add the root to the allow-list
-       since that would allow access to all its children). */
     ref<SourceAccessor> fileAccessor =
-        wd.files.empty()
-        ? makeEmptySourceAccessor()
-        : AllowListSourceAccessor::create(
+        AllowListSourceAccessor::create(
             makeFSSourceAccessor(path),
-            std::set<CanonPath> { wd.files },
+            std::set<CanonPath>{ wd.files },
+            // Always allow access to the root, but not its children.
+            std::unordered_set<CanonPath>{CanonPath::root},
             std::move(makeNotAllowedError)).cast<SourceAccessor>();
     if (exportIgnore)
         return make_ref<GitExportIgnoreSourceAccessor>(self, fileAccessor, std::nullopt);
@@ -1238,7 +1238,7 @@ std::vector<std::tuple<GitRepoImpl::Submodule, Hash>> GitRepoImpl::getSubmodules
     /* Read the .gitmodules files from this revision. */
     CanonPath modulesFile(".gitmodules");
 
-    auto accessor = getAccessor(rev, exportIgnore);
+    auto accessor = getAccessor(rev, exportIgnore, "");
     if (!accessor->pathExists(modulesFile)) return {};
 
     /* Parse it and get the revision of each submodule. */

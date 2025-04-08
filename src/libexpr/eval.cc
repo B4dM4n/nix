@@ -1,24 +1,25 @@
-#include "eval.hh"
-#include "eval-settings.hh"
-#include "primops.hh"
-#include "print-options.hh"
-#include "exit.hh"
-#include "types.hh"
-#include "util.hh"
-#include "store-api.hh"
-#include "derivations.hh"
-#include "downstream-placeholder.hh"
-#include "eval-inline.hh"
-#include "filetransfer.hh"
-#include "function-trace.hh"
-#include "profiles.hh"
-#include "print.hh"
-#include "filtering-source-accessor.hh"
-#include "memory-source-accessor.hh"
-#include "gc-small-vector.hh"
-#include "url.hh"
-#include "fetch-to-store.hh"
-#include "tarball.hh"
+#include "nix/expr/eval.hh"
+#include "nix/expr/eval-settings.hh"
+#include "nix/expr/primops.hh"
+#include "nix/expr/print-options.hh"
+#include "nix/util/exit.hh"
+#include "nix/util/types.hh"
+#include "nix/util/util.hh"
+#include "nix/store/store-api.hh"
+#include "nix/store/derivations.hh"
+#include "nix/store/downstream-placeholder.hh"
+#include "nix/expr/eval-inline.hh"
+#include "nix/store/filetransfer.hh"
+#include "nix/expr/function-trace.hh"
+#include "nix/store/profiles.hh"
+#include "nix/expr/print.hh"
+#include "nix/fetchers/filtering-source-accessor.hh"
+#include "nix/util/memory-source-accessor.hh"
+#include "nix/expr/gc-small-vector.hh"
+#include "nix/util/url.hh"
+#include "nix/fetchers/fetch-to-store.hh"
+#include "nix/fetchers/tarball.hh"
+
 #include "parser-tab.hh"
 
 #include <algorithm>
@@ -38,7 +39,7 @@
 #  include <sys/resource.h>
 #endif
 
-#include "strings-inline.hh"
+#include "nix/util/strings-inline.hh"
 
 using json = nlohmann::json;
 
@@ -246,24 +247,47 @@ EvalState::EvalState(
     , repair(NoRepair)
     , emptyBindings(0)
     , rootFS(
-        settings.restrictEval || settings.pureEval
-        ? ref<SourceAccessor>(AllowListSourceAccessor::create(getFSSourceAccessor(), {},
-            [&settings](const CanonPath & path) -> RestrictedPathError {
-                auto modeInformation = settings.pureEval
-                    ? "in pure evaluation mode (use '--impure' to override)"
-                    : "in restricted mode";
-                throw RestrictedPathError("access to absolute path '%1%' is forbidden %2%", path, modeInformation);
-            }))
-        : getFSSourceAccessor())
+        ({
+            /* In pure eval mode, we provide a filesystem that only
+               contains the Nix store.
+
+               If we have a chroot store and pure eval is not enabled,
+               use a union accessor to make the chroot store available
+               at its logical location while still having the
+               underlying directory available. This is necessary for
+               instance if we're evaluating a file from the physical
+               /nix/store while using a chroot store. */
+            auto accessor = getFSSourceAccessor();
+
+            auto realStoreDir = dirOf(store->toRealPath(StorePath::dummy));
+            if (settings.pureEval || store->storeDir != realStoreDir) {
+                auto storeFS = makeMountedSourceAccessor(
+                    {
+                        {CanonPath::root, makeEmptySourceAccessor()},
+                        {CanonPath(store->storeDir), makeFSSourceAccessor(realStoreDir)}
+                    });
+                accessor = settings.pureEval
+                    ? storeFS
+                    : makeUnionSourceAccessor({accessor, storeFS});
+            }
+
+            /* Apply access control if needed. */
+            if (settings.restrictEval || settings.pureEval)
+                accessor = AllowListSourceAccessor::create(accessor, {}, {},
+                    [&settings](const CanonPath & path) -> RestrictedPathError {
+                        auto modeInformation = settings.pureEval
+                            ? "in pure evaluation mode (use '--impure' to override)"
+                            : "in restricted mode";
+                        throw RestrictedPathError("access to absolute path '%1%' is forbidden %2%", path, modeInformation);
+                    });
+
+            accessor;
+        }))
     , corepkgsFS(make_ref<MemorySourceAccessor>())
     , internalFS(make_ref<MemorySourceAccessor>())
     , derivationInternal{corepkgsFS->addFile(
         CanonPath("derivation-internal.nix"),
         #include "primops/derivation.nix.gen.hh"
-    )}
-    , callFlakeInternal{internalFS->addFile(
-        CanonPath("call-flake.nix"),
-        #include "call-flake.nix.gen.hh"
     )}
     , store(store)
     , buildStore(buildStore ? buildStore : store)
@@ -271,7 +295,7 @@ EvalState::EvalState(
     , debugStop(false)
     , trylevel(0)
     , regexCache(makeRegexCache())
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
     , valueAllocCache(std::allocate_shared<void *>(traceable_allocator<void *>(), nullptr))
     , env1AllocCache(std::allocate_shared<void *>(traceable_allocator<void *>(), nullptr))
     , baseEnvP(std::allocate_shared<Env *>(traceable_allocator<Env *>(), &allocEnv(BASE_ENV_SIZE)))
@@ -326,7 +350,7 @@ EvalState::EvalState(
         #include "fetchurl.nix.gen.hh"
     );
 
-    createBaseEnv();
+    createBaseEnv(settings);
 }
 
 
@@ -344,7 +368,7 @@ void EvalState::allowPath(const Path & path)
 void EvalState::allowPath(const StorePath & storePath)
 {
     if (auto rootFS2 = rootFS.dynamic_pointer_cast<AllowListSourceAccessor>())
-        rootFS2->allowPrefix(CanonPath(store->toRealPath(storePath)));
+        rootFS2->allowPrefix(CanonPath(store->printStorePath(storePath)));
 }
 
 void EvalState::allowClosure(const StorePath & storePath)
@@ -419,16 +443,6 @@ void EvalState::checkURI(const std::string & uri)
     }
 
     throw RestrictedPathError("access to URI '%s' is forbidden in restricted mode", uri);
-}
-
-
-Path EvalState::toRealPath(const Path & path, const NixStringContext & context)
-{
-    // FIXME: check whether 'path' is in 'context'.
-    return
-        !context.empty() && store->isInStore(path)
-        ? store->toRealPath(path)
-        : path;
 }
 
 
@@ -754,18 +768,26 @@ void EvalState::runDebugRepl(const Error * error, const Env & env, const Expr & 
     if (!debugRepl || inDebugger)
         return;
 
-    auto dts =
-        error && expr.getPos()
-        ? std::make_unique<DebugTraceStacker>(
-            *this,
-            DebugTrace {
-                .pos = error->info().pos ? error->info().pos : positions[expr.getPos()],
+    auto dts = [&]() -> std::unique_ptr<DebugTraceStacker> {
+        if (error && expr.getPos()) {
+            auto trace = DebugTrace{
+                .pos = [&]() -> std::variant<Pos, PosIdx> {
+                    if (error->info().pos) {
+                        if (auto * pos = error->info().pos.get())
+                            return *pos;
+                        return noPos;
+                    }
+                    return expr.getPos();
+                }(),
                 .expr = expr,
                 .env = env,
                 .hint = error->info().msg,
-                .isError = true
-            })
-        : nullptr;
+                .isError = true};
+
+            return std::make_unique<DebugTraceStacker>(*this, std::move(trace));
+        }
+        return nullptr;
+    }();
 
     if (error)
     {
@@ -810,7 +832,7 @@ static std::unique_ptr<DebugTraceStacker> makeDebugTraceStacker(
     EvalState & state,
     Expr & expr,
     Env & env,
-    std::shared_ptr<Pos> && pos,
+    std::variant<Pos, PosIdx> pos,
     const Args & ... formatArgs)
 {
     return std::make_unique<DebugTraceStacker>(state,
@@ -1087,7 +1109,7 @@ void EvalState::evalFile(const SourcePath & path, Value & v, bool mustBeTrivial)
                 *this,
                 *e,
                 this->baseEnv,
-                e->getPos() ? std::make_shared<Pos>(positions[e->getPos()]) : nullptr,
+                e->getPos(),
                 "while evaluating the file '%1%':", resolvedPath.to_string())
             : nullptr;
 
@@ -1313,9 +1335,7 @@ void ExprLet::eval(EvalState & state, Env & env, Value & v)
             state,
             *this,
             env2,
-            getPos()
-                ? std::make_shared<Pos>(state.positions[getPos()])
-                : nullptr,
+            getPos(),
             "while evaluating a '%1%' expression",
             "let"
         )
@@ -1384,7 +1404,7 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 state,
                 *this,
                 env,
-                state.positions[getPos()],
+                getPos(),
                 "while evaluating the attribute '%1%'",
                 showAttrPath(state, env, attrPath))
             : nullptr;
@@ -1585,7 +1605,7 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
             try {
                 auto dts = debugRepl
                     ? makeDebugTraceStacker(
-                        *this, *lambda.body, env2, positions[lambda.pos],
+                        *this, *lambda.body, env2, lambda.pos,
                         "while calling %s",
                         lambda.name
                         ? concatStrings("'", symbols[lambda.name], "'")
@@ -1720,9 +1740,7 @@ void ExprCall::eval(EvalState & state, Env & env, Value & v)
             state,
             *this,
             env,
-            getPos()
-                ? std::make_shared<Pos>(state.positions[getPos()])
-                : nullptr,
+            getPos(),
             "while calling a function"
         )
         : nullptr;
@@ -2051,7 +2069,7 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
     else if (firstType == nPath) {
         if (!context.empty())
             state.error<EvalError>("a string that refers to a store path cannot be appended to a path").atPos(pos).withFrame(env, *this).debugThrow();
-        v.mkPath(state.rootPath(CanonPath(canonPath(str()))));
+        v.mkPath(state.rootPath(CanonPath(str())));
     } else
         v.mkStringMove(c_str(), context);
 }
@@ -2106,7 +2124,7 @@ void EvalState::forceValueDeep(Value & v)
                 try {
                     // If the value is a thunk, we're evaling. Otherwise no trace necessary.
                     auto dts = debugRepl && i.value->isThunk()
-                        ? makeDebugTraceStacker(*this, *i.value->payload.thunk.expr, *i.value->payload.thunk.env, positions[i.pos],
+                        ? makeDebugTraceStacker(*this, *i.value->payload.thunk.expr, *i.value->payload.thunk.env, i.pos,
                             "while evaluating the attribute '%1%'", symbols[i.name])
                         : nullptr;
 
@@ -2228,18 +2246,18 @@ std::string_view EvalState::forceString(Value & v, const PosIdx pos, std::string
 }
 
 
-void copyContext(const Value & v, NixStringContext & context)
+void copyContext(const Value & v, NixStringContext & context, const ExperimentalFeatureSettings & xpSettings)
 {
     if (v.payload.string.context)
         for (const char * * p = v.payload.string.context; *p; ++p)
-            context.insert(NixStringContextElem::parse(*p));
+            context.insert(NixStringContextElem::parse(*p, xpSettings));
 }
 
 
-std::string_view EvalState::forceString(Value & v, NixStringContext & context, const PosIdx pos, std::string_view errorCtx)
+std::string_view EvalState::forceString(Value & v, NixStringContext & context, const PosIdx pos, std::string_view errorCtx, const ExperimentalFeatureSettings & xpSettings)
 {
     auto s = forceString(v, pos, errorCtx);
-    copyContext(v, context);
+    copyContext(v, context, xpSettings);
     return s;
 }
 
@@ -2384,7 +2402,7 @@ StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePat
         : [&]() {
             auto dstPath = fetchToStore(
                 *store,
-                path.resolveSymlinks(),
+                path.resolveSymlinks(SymlinkResolution::Ancestors),
                 settings.readOnlyMode ? FetchMode::DryRun : FetchMode::Copy,
                 path.baseName(),
                 ContentAddressMethod::Raw::NixArchive,
@@ -2432,7 +2450,7 @@ SourcePath EvalState::coerceToPath(const PosIdx pos, Value & v, NixStringContext
     auto path = coerceToString(pos, v, context, errorCtx, false, false, true).toOwned();
     if (path == "" || path[0] != '/')
         error<EvalError>("string '%1%' doesn't represent an absolute path", path).withTrace(pos, errorCtx).debugThrow();
-    return rootPath(CanonPath(path));
+    return rootPath(path);
 }
 
 
@@ -2445,10 +2463,10 @@ StorePath EvalState::coerceToStorePath(const PosIdx pos, Value & v, NixStringCon
 }
 
 
-std::pair<SingleDerivedPath, std::string_view> EvalState::coerceToSingleDerivedPathUnchecked(const PosIdx pos, Value & v, std::string_view errorCtx)
+std::pair<SingleDerivedPath, std::string_view> EvalState::coerceToSingleDerivedPathUnchecked(const PosIdx pos, Value & v, std::string_view errorCtx, const ExperimentalFeatureSettings & xpSettings)
 {
     NixStringContext context;
-    auto s = forceString(v, context, pos, errorCtx);
+    auto s = forceString(v, context, pos, errorCtx, xpSettings);
     auto csize = context.size();
     if (csize != 1)
         error<EvalError>(
@@ -2794,7 +2812,7 @@ bool EvalState::eqValues(Value & v1, Value & v2, const PosIdx pos, std::string_v
 }
 
 bool EvalState::fullGC() {
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
     GC_gcollect();
     // Check that it ran. We might replace this with a version that uses more
     // of the boehm API to get this reliably, at a maintenance cost.
@@ -2813,7 +2831,7 @@ void EvalState::maybePrintStats()
 
     if (showStats) {
         // Make the final heap size more deterministic.
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
         if (!fullGC()) {
             warn("failed to perform a full GC before reporting stats");
         }
@@ -2835,7 +2853,7 @@ void EvalState::printStatistics()
     uint64_t bValues = nrValues * sizeof(Value);
     uint64_t bAttrsets = nrAttrsets * sizeof(Bindings) + nrAttrsInAttrsets * sizeof(Attr);
 
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
     GC_word heapSize, totalBytes;
     GC_get_heap_usage_safe(&heapSize, 0, 0, 0, &totalBytes);
     double gcFullOnlyTime = ({
@@ -2857,7 +2875,7 @@ void EvalState::printStatistics()
 #ifndef _WIN32 // TODO implement
         {"cpu", cpuTime},
 #endif
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
         {GC_is_incremental_mode() ? "gcNonIncremental" : "gc", gcFullOnlyTime},
 #ifndef _WIN32 // TODO implement
         {GC_is_incremental_mode() ? "gcNonIncrementalFraction" : "gcFraction", gcFullOnlyTime / cpuTime},
@@ -2901,7 +2919,7 @@ void EvalState::printStatistics()
     topObj["nrLookups"] = nrLookups;
     topObj["nrPrimOpCalls"] = nrPrimOpCalls;
     topObj["nrFunctionCalls"] = nrFunctionCalls;
-#if HAVE_BOEHMGC
+#if NIX_USE_BOEHMGC
     topObj["gc"] = {
         {"heapSize", heapSize},
         {"totalBytes", totalBytes},
@@ -3070,8 +3088,11 @@ std::optional<SourcePath> EvalState::resolveLookupPathPath(const LookupPath::Pat
     auto i = lookupPathResolved.find(value);
     if (i != lookupPathResolved.end()) return i->second;
 
-    auto finish = [&](SourcePath res) {
-        debug("resolved search path element '%s' to '%s'", value, res);
+    auto finish = [&](std::optional<SourcePath> res) {
+        if (res)
+            debug("resolved search path element '%s' to '%s'", value, *res);
+        else
+            debug("failed to resolve search path element '%s'", value);
         lookupPathResolved.emplace(value, res);
         return res;
     };
@@ -3083,7 +3104,7 @@ std::optional<SourcePath> EvalState::resolveLookupPathPath(const LookupPath::Pat
                 fetchSettings,
                 EvalSettings::resolvePseudoUrl(value));
             auto storePath = fetchToStore(*store, SourcePath(accessor), FetchMode::Copy);
-            return finish(rootPath(store->toRealPath(storePath)));
+            return finish(this->storePath(storePath));
         } catch (Error & e) {
             logWarning({
                 .msg = HintFmt("Nix search path entry '%1%' cannot be downloaded, ignoring", value)
@@ -3114,7 +3135,7 @@ std::optional<SourcePath> EvalState::resolveLookupPathPath(const LookupPath::Pat
             }
         }
 
-        if (path.pathExists())
+        if (path.resolveSymlinks().pathExists())
             return finish(std::move(path));
         else {
             logWarning({
@@ -3123,8 +3144,7 @@ std::optional<SourcePath> EvalState::resolveLookupPathPath(const LookupPath::Pat
         }
     }
 
-    debug("failed to resolve search path element '%s'", value);
-    return std::nullopt;
+    return finish(std::nullopt);
 }
 
 
