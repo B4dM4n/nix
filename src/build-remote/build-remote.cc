@@ -139,30 +139,32 @@ static int main_build_remote(int argc, char * * argv)
                 for (auto & m : machines) {
                     debug("considering building on remote machine '%s'", m.storeUri.render());
 
-                    if (m.enabled &&
-                        m.systemSupported(neededSystem) &&
-                        m.allSupported(requiredFeatures) &&
-                        m.mandatoryMet(requiredFeatures) &&
-                        m.storeUri.render() != "ssh://localhost" ||
-                        m.storeUri.render() == "ssh://localhost" &&
-                        canBuildLocally)
+                    if (m.storeUri.render() == "ssh://localhost"
+                            ? couldBuildLocally
+                            : (m.enabled &&
+                                m.systemSupported(neededSystem) &&
+                                m.allSupported(requiredFeatures) &&
+                                m.mandatoryMet(requiredFeatures)))
                     {
                         rightType = true;
                         AutoCloseFD free;
                         uint64_t load = 0;
-                        for (uint64_t slot = 0; slot < m.maxJobs; ++slot) {
-                            auto slotLock = openSlotLock(m, slot);
-                            if (lockFile(slotLock.get(), ltWrite, false)) {
-                                if (!free) {
-                                    free = std::move(slotLock);
+                        if (m.storeUri.render() != "ssh://localhost") {
+                            for (uint64_t slot = 0; slot < m.maxJobs; ++slot) {
+                                auto slotLock = openSlotLock(m, slot);
+                                if (lockFile(slotLock.get(), ltWrite, false)) {
+                                    if (!free) {
+                                        free = std::move(slotLock);
+                                    }
+                                } else {
+                                    ++load;
                                 }
-                            } else {
-                                ++load;
                             }
-                        }
-                        if (!free) {
+                            if (!free) {
+                                continue;
+                            }
+                        } else if (!canBuildLocally)
                             continue;
-                        }
                         bool best = false;
                         if (!bestSlotLock) {
                             best = true;
@@ -186,6 +188,11 @@ static int main_build_remote(int argc, char * * argv)
                 }
 
                 if (!bestSlotLock) {
+                    if (canBuildLocally && bestMachine && bestMachine->storeUri.render() == "ssh://localhost") {
+                        // let the calling nix process build it
+                        std::cerr << "# decline\n";
+                        break;
+                    }
                     if (rightType && !canBuildLocally)
                         std::cerr << "# postpone\n";
                     else
@@ -225,12 +232,6 @@ static int main_build_remote(int argc, char * * argv)
 
                         std::cerr << "# decline\n";
                     }
-                    break;
-                }
-
-                if (canBuildLocally && bestMachine->storeUri.render() == "ssh://localhost") {
-                    // let the calling nix process build it
-                    std::cerr << "# decline\n";
                     break;
                 }
 
