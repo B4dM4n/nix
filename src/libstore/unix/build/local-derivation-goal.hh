@@ -27,9 +27,15 @@ struct LocalDerivationGoal : public DerivationGoal
     std::optional<Path> cgroup;
 
     /**
-     * The temporary directory.
+     * The temporary directory used for the build.
      */
     Path tmpDir;
+
+    /**
+     * The top-level temporary directory. `tmpDir` is either equal to
+     * or a child of this directory.
+     */
+    Path topTmpDir;
 
     /**
      * The path of the temporary directory in the sandbox.
@@ -65,6 +71,16 @@ struct LocalDerivationGoal : public DerivationGoal
      */
     bool useChroot = false;
 
+    /**
+     * The parent directory of `chrootRootDir`. It has permission 700
+     * and is owned by root to ensure other users cannot mess with
+     * `chrootRootDir`.
+     */
+    Path chrootParentDir;
+
+    /**
+     * The root of the chroot environment.
+     */
     Path chrootRootDir;
 
     /**
@@ -93,11 +109,6 @@ struct LocalDerivationGoal : public DerivationGoal
     typedef map<std::string, std::string> Environment;
     Environment env;
 
-#if __APPLE__
-    typedef std::string SandboxProfile;
-    SandboxProfile additionalSandboxProfile;
-#endif
-
     /**
      * Hash rewriting.
      */
@@ -114,7 +125,7 @@ struct LocalDerivationGoal : public DerivationGoal
      *   rewrite after the build. Otherwise the regular predetermined paths are
      *   put here.
      *
-     * - Floating content-addressed derivations do not know their final build
+     * - Floating content-addressing derivations do not know their final build
      *   output paths until the outputs are hashed, so random locations are
      *   used, and then renamed. The randomness helps guard against hidden
      *   self-references.
@@ -182,7 +193,7 @@ struct LocalDerivationGoal : public DerivationGoal
     /**
      * The additional states.
      */
-    void tryLocalBuild() override;
+    Goal::Co tryLocalBuild() override;
 
     /**
      * Start building a derivation.
@@ -195,6 +206,11 @@ struct LocalDerivationGoal : public DerivationGoal
     void initEnv();
 
     /**
+     * Process messages send by the sandbox initialization.
+     */
+    void processSandboxSetupMessages();
+
+    /**
      * Setup tmp dir location.
      */
     void initTmpDir();
@@ -204,8 +220,15 @@ struct LocalDerivationGoal : public DerivationGoal
      */
     void writeStructuredAttrs();
 
+    /**
+     * Start an in-process nix daemon thread for recursive-nix.
+     */
     void startDaemon();
 
+    /**
+     * Stop the in-process nix daemon thread.
+     * @see startDaemon
+     */
     void stopDaemon();
 
     /**

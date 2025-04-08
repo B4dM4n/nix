@@ -22,7 +22,7 @@ json printValueAsJSON(EvalState & state, bool strict,
     switch (v.type()) {
 
         case nInt:
-            out = v.integer();
+            out = v.integer().value;
             break;
 
         case nBool:
@@ -58,7 +58,7 @@ json printValueAsJSON(EvalState & state, bool strict,
                 out = json::object();
                 for (auto & a : v.attrs()->lexicographicOrder(state.symbols)) {
                     try {
-                        out[state.symbols[a->name]] = printValueAsJSON(state, strict, *a->value, a->pos, context, copyToStore);
+                        out.emplace(state.symbols[a->name], printValueAsJSON(state, strict, *a->value, a->pos, context, copyToStore));
                     } catch (Error & e) {
                         e.addTrace(state.positions[a->pos],
                             HintFmt("while evaluating attribute '%1%'", state.symbols[a->name]));
@@ -108,7 +108,11 @@ json printValueAsJSON(EvalState & state, bool strict,
 void printValueAsJSON(EvalState & state, bool strict,
     Value & v, const PosIdx pos, std::ostream & str, NixStringContext & context, bool copyToStore)
 {
-    str << printValueAsJSON(state, strict, v, pos, context, copyToStore);
+    try {
+        str << printValueAsJSON(state, strict, v, pos, context, copyToStore);
+    } catch (nlohmann::json::exception & e) {
+        throw JSONSerializationError("JSON serialization error: %s", e.what());
+    }
 }
 
 json ExternalValueBase::printValueAsJSON(EvalState & state, bool strict,

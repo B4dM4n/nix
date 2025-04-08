@@ -45,7 +45,9 @@ static std::string runHg(const Strings & args, const std::optional<std::string> 
 
 struct MercurialInputScheme : InputScheme
 {
-    std::optional<Input> inputFromURL(const ParsedURL & url, bool requireTree) const override
+    std::optional<Input> inputFromURL(
+        const Settings & settings,
+        const ParsedURL & url, bool requireTree) const override
     {
         if (url.scheme != "hg+http" &&
             url.scheme != "hg+https" &&
@@ -68,7 +70,7 @@ struct MercurialInputScheme : InputScheme
 
         attrs.emplace("url", url2.to_string());
 
-        return inputFromAttrs(attrs);
+        return inputFromAttrs(settings, attrs);
     }
 
     std::string_view schemeName() const override
@@ -88,7 +90,9 @@ struct MercurialInputScheme : InputScheme
         };
     }
 
-    std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
+    std::optional<Input> inputFromAttrs(
+        const Settings & settings,
+        const Attrs & attrs) const override
     {
         parseURL(getStrAttr(attrs, "url"));
 
@@ -97,7 +101,7 @@ struct MercurialInputScheme : InputScheme
                 throw BadURL("invalid Mercurial branch/tag name '%s'", *ref);
         }
 
-        Input input;
+        Input input{settings};
         input.attrs = attrs;
         return input;
     }
@@ -122,7 +126,7 @@ struct MercurialInputScheme : InputScheme
         return res;
     }
 
-    std::optional<Path> getSourcePath(const Input & input) const override
+    std::optional<std::filesystem::path> getSourcePath(const Input & input) const override
     {
         auto url = parseURL(getStrAttr(input.attrs, "url"));
         if (url.scheme == "file" && !input.getRef() && !input.getRev())
@@ -157,7 +161,7 @@ struct MercurialInputScheme : InputScheme
     {
         auto url = parseURL(getStrAttr(input.attrs, "url"));
         bool isLocal = url.scheme == "file";
-        return {isLocal, isLocal ? url.path : url.base};
+        return {isLocal, isLocal ? url.path : url.to_string()};
     }
 
     StorePath fetchToStore(ref<Store> store, Input & input) const
@@ -182,10 +186,10 @@ struct MercurialInputScheme : InputScheme
                 /* This is an unclean working tree. So copy all tracked
                    files. */
 
-                if (!fetchSettings.allowDirty)
+                if (!input.settings->allowDirty)
                     throw Error("Mercurial tree '%s' is unclean", actualUrl);
 
-                if (fetchSettings.warnDirty)
+                if (input.settings->warnDirty)
                     warn("Mercurial tree '%s' is unclean", actualUrl);
 
                 input.attrs.insert_or_assign("ref", chomp(runHg({ "branch", "-R", actualUrl })));
@@ -213,7 +217,7 @@ struct MercurialInputScheme : InputScheme
                 auto storePath = store->addToStore(
                     input.getName(),
                     {getFSSourceAccessor(), CanonPath(actualPath)},
-                    FileIngestionMethod::Recursive, HashAlgorithm::SHA256, {},
+                    ContentAddressMethod::Raw::NixArchive, HashAlgorithm::SHA256, {},
                     filter);
 
                 return storePath;
@@ -259,7 +263,7 @@ struct MercurialInputScheme : InputScheme
                 return makeResult(res->value, res->storePath);
         }
 
-        Path cacheDir = fmt("%s/nix/hg/%s", getCacheDir(), hashString(HashAlgorithm::SHA256, actualUrl).to_string(HashFormat::Nix32, false));
+        Path cacheDir = fmt("%s/hg/%s", getCacheDir(), hashString(HashAlgorithm::SHA256, actualUrl).to_string(HashFormat::Nix32, false));
 
         /* If this is a commit hash that we already have, we don't
            have to pull again. */

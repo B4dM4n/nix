@@ -11,6 +11,8 @@ outPath10=$(nix-env -f ./user-envs.nix -qa --out-path --no-name '*' | grep foo-1
 drvPath10=$(nix-env -f ./user-envs.nix -qa --drv-path --no-name '*' | grep foo-1.0)
 [ -n "$outPath10" -a -n "$drvPath10" ]
 
+TODO_NixOS
+
 # Query with json
 nix-env -f ./user-envs.nix -qa --json | jq -e '.[] | select(.name == "bar-0.1") | [
     .outputName == "out",
@@ -171,11 +173,19 @@ nix-env -q '*' | grepQuiet bar-0.1.1
 
 # Test priorities: foo-0.1 has a lower priority than foo-1.0, so it
 # should be possible to install both without a collision.  Also test
-# ‘--set-flag priority’ to manually override the declared priorities.
+# '-i --priority' and  '--set-flag priority' to manually override the
+# declared priorities.
 nix-env -e '*'
 nix-env -i foo-0.1 foo-1.0
 [ "$($profiles/test/bin/foo)" = "foo-1.0" ]
 nix-env --set-flag priority 1 foo-0.1
+[ "$($profiles/test/bin/foo)" = "foo-0.1" ]
+
+# Priorities can be overridden with the --priority flag
+nix-env -e '*'
+nix-env -i foo-1.0
+[ "$($profiles/test/bin/foo)" = "foo-1.0" ]
+nix-env -i --priority 1 foo-0.1
 [ "$($profiles/test/bin/foo)" = "foo-0.1" ]
 
 # Test nix-env --set.

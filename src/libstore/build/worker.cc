@@ -4,6 +4,7 @@
 #include "substitution-goal.hh"
 #include "drv-output-substitution-goal.hh"
 #include "derivation-goal.hh"
+#include "derivation-creation-and-realisation-goal.hh"
 #ifndef _WIN32 // TODO Enable building on Windows
 #  include "local-derivation-goal.hh"
 #  include "hook-instance.hh"
@@ -19,7 +20,6 @@ Worker::Worker(Store & store, Store & evalStore)
     , store(store)
     , evalStore(evalStore)
 {
-    /* Debugging: prevent recursive workers. */
     nrLocalBuilds = 0;
     nrSubstitutions = 0;
     lastWokenUp = steady_time_point::min();
@@ -41,6 +41,24 @@ Worker::~Worker()
     assert(expectedSubstitutions == 0);
     assert(expectedDownloadSize == 0);
     assert(expectedNarSize == 0);
+}
+
+
+std::shared_ptr<DerivationCreationAndRealisationGoal> Worker::makeDerivationCreationAndRealisationGoal(
+    ref<SingleDerivedPath> drvReq,
+    const OutputsSpec & wantedOutputs,
+    BuildMode buildMode)
+{
+    std::weak_ptr<DerivationCreationAndRealisationGoal> & goal_weak = outerDerivationGoals.ensureSlot(*drvReq).value;
+    std::shared_ptr<DerivationCreationAndRealisationGoal> goal = goal_weak.lock();
+    if (!goal) {
+        goal = std::make_shared<DerivationCreationAndRealisationGoal>(drvReq, wantedOutputs, *this, buildMode);
+        goal_weak = goal;
+        wakeUp(goal);
+    } else {
+        goal->addWantedOutputs(wantedOutputs);
+    }
+    return goal;
 }
 
 
@@ -121,10 +139,7 @@ GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
 {
     return std::visit(overloaded {
         [&](const DerivedPath::Built & bfd) -> GoalPtr {
-            if (auto bop = std::get_if<DerivedPath::Opaque>(&*bfd.drvPath))
-                return makeDerivationGoal(bop->path, bfd.outputs, buildMode);
-            else
-                throw UnimplementedError("Building dynamic derivations in one shot is not yet implemented.");
+            return makeDerivationCreationAndRealisationGoal(bfd.drvPath, bfd.outputs, buildMode);
         },
         [&](const DerivedPath::Opaque & bo) -> GoalPtr {
             return makePathSubstitutionGoal(bo.path, buildMode == bmRepair ? Repair : NoRepair);
@@ -133,24 +148,46 @@ GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
 }
 
 
+template<typename K, typename V, typename F>
+static void cullMap(std::map<K, V> & goalMap, F f)
+{
+    for (auto i = goalMap.begin(); i != goalMap.end();)
+        if (!f(i->second))
+            i = goalMap.erase(i);
+        else ++i;
+}
+
+
 template<typename K, typename G>
 static void removeGoal(std::shared_ptr<G> goal, std::map<K, std::weak_ptr<G>> & goalMap)
 {
     /* !!! inefficient */
-    for (auto i = goalMap.begin();
-         i != goalMap.end(); )
-        if (i->second.lock() == goal) {
-            auto j = i; ++j;
-            goalMap.erase(i);
-            i = j;
-        }
-        else ++i;
+    cullMap(goalMap, [&](const std::weak_ptr<G> & gp) -> bool {
+        return gp.lock() != goal;
+    });
+}
+
+template<typename K>
+static void removeGoal(std::shared_ptr<DerivationCreationAndRealisationGoal> goal, std::map<K, DerivedPathMap<std::weak_ptr<DerivationCreationAndRealisationGoal>>::ChildNode> & goalMap);
+
+template<typename K>
+static void removeGoal(std::shared_ptr<DerivationCreationAndRealisationGoal> goal, std::map<K, DerivedPathMap<std::weak_ptr<DerivationCreationAndRealisationGoal>>::ChildNode> & goalMap)
+{
+    /* !!! inefficient */
+    cullMap(goalMap, [&](DerivedPathMap<std::weak_ptr<DerivationCreationAndRealisationGoal>>::ChildNode & node) -> bool {
+        if (node.value.lock() == goal)
+            node.value.reset();
+        removeGoal(goal, node.childMap);
+        return !node.value.expired() || !node.childMap.empty();
+    });
 }
 
 
 void Worker::removeGoal(GoalPtr goal)
 {
-    if (auto drvGoal = std::dynamic_pointer_cast<DerivationGoal>(goal))
+    if (auto drvGoal = std::dynamic_pointer_cast<DerivationCreationAndRealisationGoal>(goal))
+        nix::removeGoal(drvGoal, outerDerivationGoals.map);
+    else if (auto drvGoal = std::dynamic_pointer_cast<DerivationGoal>(goal))
         nix::removeGoal(drvGoal, derivationGoals);
     else
     if (auto subGoal = std::dynamic_pointer_cast<PathSubstitutionGoal>(goal))
@@ -185,13 +222,13 @@ void Worker::wakeUp(GoalPtr goal)
 }
 
 
-unsigned Worker::getNrLocalBuilds()
+size_t Worker::getNrLocalBuilds()
 {
     return nrLocalBuilds;
 }
 
 
-unsigned Worker::getNrSubstitutions()
+size_t Worker::getNrSubstitutions()
 {
     return nrSubstitutions;
 }
@@ -216,8 +253,11 @@ void Worker::childStarted(GoalPtr goal, const std::set<MuxablePipePollState::Com
         case JobCategory::Build:
             nrLocalBuilds++;
             break;
+        case JobCategory::Administration:
+            /* Intentionally not limited, see docs */
+            break;
         default:
-            abort();
+            unreachable();
         }
     }
 }
@@ -239,8 +279,11 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
             assert(nrLocalBuilds > 0);
             nrLocalBuilds--;
             break;
+        case JobCategory::Administration:
+            /* Intentionally not limited, see docs */
+            break;
         default:
-            abort();
+            unreachable();
         }
     }
 
@@ -291,9 +334,9 @@ void Worker::run(const Goals & _topGoals)
 
     for (auto & i : _topGoals) {
         topGoals.insert(i);
-        if (auto goal = dynamic_cast<DerivationGoal *>(i.get())) {
+        if (auto goal = dynamic_cast<DerivationCreationAndRealisationGoal *>(i.get())) {
             topPaths.push_back(DerivedPath::Built {
-                .drvPath = makeConstantStorePathRef(goal->drvPath),
+                .drvPath = goal->drvReq,
                 .outputs = goal->wantedOutputs,
             });
         } else
@@ -338,31 +381,27 @@ void Worker::run(const Goals & _topGoals)
         /* Wait for input. */
         if (!children.empty() || !waitingForAWhile.empty())
             waitForInput();
-        else {
-            if (awake.empty() && 0U == settings.maxBuildJobs)
-            {
-                if (getMachines().empty())
-                   throw Error(
-                        R"(
-                        Unable to start any build;
-                        either increase '--max-jobs' or enable remote builds.
+        else if (awake.empty() && 0U == settings.maxBuildJobs) {
+            if (getMachines().empty())
+               throw Error(
+                    R"(
+                    Unable to start any build;
+                    either increase '--max-jobs' or enable remote builds.
 
-                        For more information run 'man nix.conf' and search for '/machines'.
-                        )"
-                    );
-                else
-                   throw Error(
-                        R"(
-                        Unable to start any build;
-                        remote machines may not have all required system features.
+                    For more information run 'man nix.conf' and search for '/machines'.
+                    )"
+                );
+            else
+               throw Error(
+                    R"(
+                    Unable to start any build;
+                    remote machines may not have all required system features.
 
-                        For more information run 'man nix.conf' and search for '/machines'.
-                        )"
-                    );
+                    For more information run 'man nix.conf' and search for '/machines'.
+                    )"
+                );
 
-            }
-            assert(!awake.empty());
-        }
+        } else assert(!awake.empty());
     }
 
     /* If --keep-going is not set, it's possible that the main goal
@@ -530,7 +569,7 @@ bool Worker::pathContentsGood(const StorePath & path)
     else {
         auto current = hashPath(
             {store.getFSAccessor(), CanonPath(store.printStorePath(path))},
-            FileIngestionMethod::Recursive, info->narHash.algo).first;
+            FileIngestionMethod::NixArchive, info->narHash.algo).first;
         Hash nullHash(HashAlgorithm::SHA256);
         res = info->narHash == nullHash || info->narHash == current;
     }
@@ -555,6 +594,24 @@ GoalPtr upcast_goal(std::shared_ptr<PathSubstitutionGoal> subGoal)
 GoalPtr upcast_goal(std::shared_ptr<DrvOutputSubstitutionGoal> subGoal)
 {
     return subGoal;
+}
+
+GoalPtr upcast_goal(std::shared_ptr<DerivationGoal> subGoal)
+{
+    return subGoal;
+}
+
+std::optional<std::pair<std::reference_wrapper<const DerivationGoal>, std::reference_wrapper<const SingleDerivedPath>>> tryGetConcreteDrvGoal(GoalPtr waitee)
+{
+    auto * odg = dynamic_cast<DerivationCreationAndRealisationGoal *>(&*waitee);
+    if (!odg) return std::nullopt;
+    /* If we failed to obtain the concrete drv, we won't have created
+       the concrete derivation goal. */
+    if (!odg->concreteDrvGoal) return std::nullopt;
+    return {{
+        std::cref(*odg->concreteDrvGoal),
+        std::cref(*odg->drvReq),
+    }};
 }
 
 }

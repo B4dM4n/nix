@@ -1,4 +1,7 @@
-source ../common/vars-and-functions.sh
+source ../common/vars.sh
+source ../common/functions.sh
+
+TODO_NixOS
 
 # The new Linux mount interface does not seem to support remounting
 # OverlayFS mount points.
@@ -31,7 +34,7 @@ requireEnvironment () {
 }
 
 addConfig () {
-    echo "$1" >> "$NIX_CONF_DIR/nix.conf"
+    echo "$1" >> "$test_nix_conf"
 }
 
 setupConfig () {
@@ -66,7 +69,7 @@ mountOverlayfs () {
     || skipTest "overlayfs is not supported"
 
   cleanupOverlay () {
-    umount "$storeBRoot/nix/store"
+    umount -n "$storeBRoot/nix/store"
     rm -r $storeVolume/workdir
   }
   trap cleanupOverlay EXIT
@@ -89,10 +92,6 @@ initLowerStore () {
   # Build something in lower store
   drvPath=$(nix-instantiate --store $storeA ../hermetic.nix --arg withFinalRefs true --arg busybox "$busybox" --arg seed 1)
   pathInLowerStore=$(nix-store --store "$storeA" --realise $drvPath)
-}
-
-execUnshare () {
-  exec unshare --mount --map-root-user "$SHELL" "$@"
 }
 
 addTextToStore() {

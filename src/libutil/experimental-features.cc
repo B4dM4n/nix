@@ -24,7 +24,7 @@ struct ExperimentalFeatureDetails
  * feature, we either have no issue at all if few features are not added
  * at the end of the list, or a proper merge conflict if they are.
  */
-constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::VerifiedFetches);
+constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::BLAKE3Hashes);
 
 constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails = {{
     {
@@ -66,7 +66,7 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
             an impure derivation cannot also be
             [content-addressed](#xp-feature-ca-derivations).
 
-            This is a more explicit alternative to using [`builtins.currentTime`](@docroot@/language/builtin-constants.md#builtins-currentTime).
+            This is a more explicit alternative to using [`builtins.currentTime`](@docroot@/language/builtins.md#builtins-currentTime).
         )",
         .trackingUrl = "https://github.com/NixOS/nix/milestone/42",
     },
@@ -125,6 +125,8 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
 
             runCommand "foo"
               {
+                 # Optional: let Nix know "foo" requires the experimental feature
+                 requiredSystemFeatures = [ "recursive-nix" ];
                  buildInputs = [ nix jq ];
                  NIX_PATH = "nixpkgs=${<nixpkgs>}";
               }
@@ -293,6 +295,22 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
             Enables verification of git commit signatures through the [`fetchGit`](@docroot@/language/builtins.md#builtins-fetchGit) built-in.
         )",
         .trackingUrl = "https://github.com/NixOS/nix/milestone/48",
+    },
+    {
+        .tag = Xp::PipeOperators,
+        .name = "pipe-operators",
+        .description = R"(
+            Add `|>` and `<|` operators to the Nix language.
+        )",
+        .trackingUrl = "https://github.com/NixOS/nix/milestone/55",
+    },
+    {
+        .tag = Xp::BLAKE3Hashes,
+        .name = "blake3-hashes",
+        .description = R"(
+            Enables support for BLAKE3 hashes.
+        )",
+        .trackingUrl = "",
     },
 }};
 

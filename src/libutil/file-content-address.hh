@@ -2,8 +2,6 @@
 ///@file
 
 #include "source-accessor.hh"
-#include "fs-sink.hh"
-#include "util.hh"
 
 namespace nix {
 
@@ -35,14 +33,14 @@ enum struct FileSerialisationMethod : uint8_t {
      * See `file-system-object/content-address.md#serial-nix-archive` in
      * the manual.
      */
-    Recursive,
+    NixArchive,
 };
 
 /**
  * Parse a `FileSerialisationMethod` by name. Choice of:
  *
  *  - `flat`: `FileSerialisationMethod::Flat`
- *  - `nar`: `FileSerialisationMethod::Recursive`
+ *  - `nar`: `FileSerialisationMethod::NixArchive`
  *
  * Opposite of `renderFileSerialisationMethod`.
  */
@@ -67,12 +65,13 @@ void dumpPath(
 /**
  * Restore a serialisation of the given file system object.
  *
- * @TODO use an arbitrary `FileSystemObjectSink`.
+ * \todo use an arbitrary `FileSystemObjectSink`.
  */
 void restorePath(
     const Path & path,
     Source & source,
-    FileSerialisationMethod method);
+    FileSerialisationMethod method,
+    bool startFsync = false);
 
 
 /**
@@ -107,15 +106,17 @@ enum struct FileIngestionMethod : uint8_t {
     Flat,
 
     /**
-     * Hash `FileSerialisationMethod::Recursive` serialisation.
+     * Hash `FileSerialisationMethod::NixArchive` serialisation.
      *
      * See `file-system-object/content-address.md#serial-flat` in the
      * manual.
      */
-    Recursive,
+    NixArchive,
 
     /**
      * Git hashing.
+     *
+     * Part of `ExperimentalFeature::GitHashing`.
      *
      * See `file-system-object/content-address.md#serial-git` in the
      * manual.
@@ -127,7 +128,7 @@ enum struct FileIngestionMethod : uint8_t {
  * Parse a `FileIngestionMethod` by name. Choice of:
  *
  *  - `flat`: `FileIngestionMethod::Flat`
- *  - `nar`: `FileIngestionMethod::Recursive`
+ *  - `nar`: `FileIngestionMethod::NixArchive`
  *  - `git`: `FileIngestionMethod::Git`
  *
  * Opposite of `renderFileIngestionMethod`.

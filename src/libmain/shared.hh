@@ -8,12 +8,8 @@
 #include "common-args.hh"
 #include "path.hh"
 #include "derived-path.hh"
-#include "exit.hh"
 
 #include <signal.h>
-
-#include <locale>
-
 
 namespace nix {
 
@@ -73,11 +69,6 @@ struct LegacyArgs : public MixCommonArgs, public RootArgs
     bool processArgs(const Strings & args, bool finish) override;
 };
 
-
-/**
- * Show the manual page for the specified program.
- */
-void showManPage(const std::string & name);
 
 /**
  * The constructor of this class starts a pager if standard output is a

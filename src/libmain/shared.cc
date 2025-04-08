@@ -8,7 +8,6 @@
 #include "signals.hh"
 
 #include <algorithm>
-#include <cctype>
 #include <exception>
 #include <iostream>
 
@@ -23,6 +22,8 @@
 
 #include <openssl/crypto.h>
 
+#include "exit.hh"
+#include "strings.hh"
 
 namespace nix {
 
@@ -314,16 +315,6 @@ void printVersion(const std::string & programName)
     throw Exit();
 }
 
-
-void showManPage(const std::string & name)
-{
-    restoreProcessContext();
-    setEnv("MANPATH", settings.nixManDir.c_str());
-    execlp("man", "man", name.c_str(), nullptr);
-    throw SysError("command 'man %1%' failed", name.c_str());
-}
-
-
 int handleExceptions(const std::string & programName, std::function<void()> fun)
 {
     ReceiveInterrupts receiveInterrupts; // FIXME: need better place for this
@@ -370,7 +361,7 @@ RunPager::RunPager()
     if (!pager) pager = getenv("PAGER");
     if (pager && ((std::string) pager == "" || (std::string) pager == "cat")) return;
 
-    stopProgressBar();
+    logger->stop();
 
     Pipe toPager;
     toPager.create();
@@ -411,7 +402,7 @@ RunPager::~RunPager()
         }
 #endif
     } catch (...) {
-        ignoreException();
+        ignoreExceptionInDestructor();
     }
 }
 

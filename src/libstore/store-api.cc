@@ -19,7 +19,10 @@
 #include "signals.hh"
 #include "users.hh"
 
+#include <filesystem>
 #include <nlohmann/json.hpp>
+
+#include "strings.hh"
 
 using json = nlohmann::json;
 
@@ -121,7 +124,7 @@ StorePath StoreDirConfig::makeFixedOutputPath(std::string_view name, const Fixed
     if (info.method == FileIngestionMethod::Git && info.hash.algo != HashAlgorithm::SHA1)
         throw Error("Git file ingestion must use SHA-1 hash");
 
-    if (info.hash.algo == HashAlgorithm::SHA256 && info.method == FileIngestionMethod::Recursive) {
+    if (info.hash.algo == HashAlgorithm::SHA256 && info.method == FileIngestionMethod::NixArchive) {
         return makeStorePath(makeType(*this, "source", info.references), info.hash, name);
     } else {
         if (!info.references.empty()) {
@@ -168,7 +171,7 @@ std::pair<StorePath, Hash> StoreDirConfig::computeStorePath(
     PathFilter & filter) const
 {
     auto [h, size] = hashPath(path, method.getFileIngestionMethod(), hashAlgo, filter);
-    if (size && *size >= settings.warnLargePathThreshold)
+    if (settings.warnLargePathThreshold && size && *size >= settings.warnLargePathThreshold)
         warn("hashed large path '%s' (%s)", path, renderSize(*size));
     return {
         makeFixedOutputPathFromCA(
@@ -199,51 +202,55 @@ StorePath Store::addToStore(
     case FileIngestionMethod::Flat:
         fsm = FileSerialisationMethod::Flat;
         break;
-    case FileIngestionMethod::Recursive:
-        fsm = FileSerialisationMethod::Recursive;
+    case FileIngestionMethod::NixArchive:
+        fsm = FileSerialisationMethod::NixArchive;
         break;
     case FileIngestionMethod::Git:
         // Use NAR; Git is not a serialization method
-        fsm = FileSerialisationMethod::Recursive;
+        fsm = FileSerialisationMethod::NixArchive;
         break;
     }
-    auto source = sinkToSource([&](Sink & sink) {
-        dumpPath(path, sink, fsm, filter);
+    std::optional<StorePath> storePath;
+    auto sink = sourceToSink([&](Source & source) {
+        LengthSource lengthSource(source);
+        storePath = addToStoreFromDump(lengthSource, name, fsm, method, hashAlgo, references, repair);
+        if (settings.warnLargePathThreshold && lengthSource.total >= settings.warnLargePathThreshold)
+            warn("copied large path '%s' to the store (%s)", path, renderSize(lengthSource.total));
     });
-    LengthSource lengthSource(*source);
-    auto storePath = addToStoreFromDump(lengthSource, name, fsm, method, hashAlgo, references, repair);
-    if (lengthSource.total >= settings.warnLargePathThreshold)
-        warn("copied large path '%s' to the store (%s)", path, renderSize(lengthSource.total));
-    return storePath;
+    dumpPath(path, *sink, fsm, filter);
+    sink->finish();
+    return storePath.value();
 }
 
 void Store::addMultipleToStore(
-    PathsSource & pathsToCopy,
+    PathsSource && pathsToCopy,
     Activity & act,
     RepairFlag repair,
     CheckSigsFlag checkSigs)
 {
     std::atomic<size_t> nrDone{0};
     std::atomic<size_t> nrFailed{0};
-    std::atomic<uint64_t> bytesExpected{0};
     std::atomic<uint64_t> nrRunning{0};
 
     using PathWithInfo = std::pair<ValidPathInfo, std::unique_ptr<Source>>;
 
+    uint64_t bytesExpected = 0;
+
     std::map<StorePath, PathWithInfo *> infosMap;
     StorePathSet storePathsToAdd;
     for (auto & thingToAdd : pathsToCopy) {
+        bytesExpected += thingToAdd.first.narSize;
         infosMap.insert_or_assign(thingToAdd.first.path, &thingToAdd);
         storePathsToAdd.insert(thingToAdd.first.path);
     }
 
-    auto showProgress = [&]() {
-        act.progress(nrDone, pathsToCopy.size(), nrRunning, nrFailed);
+    act.setExpected(actCopyPath, bytesExpected);
+
+    auto showProgress = [&, nrTotal = pathsToCopy.size()]() {
+        act.progress(nrDone, nrTotal, nrRunning, nrFailed);
     };
 
-    ThreadPool pool;
-
-    processGraph<StorePath>(pool,
+    processGraph<StorePath>(
         storePathsToAdd,
 
         [&](const StorePath & path) {
@@ -255,9 +262,6 @@ void Store::addMultipleToStore(
                 showProgress();
                 return StorePathSet();
             }
-
-            bytesExpected += info.narSize;
-            act.setExpected(actCopyPath, bytesExpected);
 
             return info.references;
         },
@@ -355,7 +359,7 @@ ValidPathInfo Store::addToStoreSlow(
     RegularFileSink fileSink { caHashSink };
     TeeSink unusualHashTee { narHashSink, caHashSink };
 
-    auto & narSink = method == FileIngestionMethod::Recursive && hashAlgo != HashAlgorithm::SHA256
+    auto & narSink = method == ContentAddressMethod::Raw::NixArchive && hashAlgo != HashAlgorithm::SHA256
         ? static_cast<Sink &>(unusualHashTee)
         : narHashSink;
 
@@ -383,9 +387,9 @@ ValidPathInfo Store::addToStoreSlow(
        finish. */
     auto [narHash, narSize] = narHashSink.finish();
 
-    auto hash = method == FileIngestionMethod::Recursive && hashAlgo == HashAlgorithm::SHA256
+    auto hash = method == ContentAddressMethod::Raw::NixArchive && hashAlgo == HashAlgorithm::SHA256
         ? narHash
-        : method == FileIngestionMethod::Git
+        : method == ContentAddressMethod::Raw::Git
         ? git::dumpHash(hashAlgo, srcPath).hash
         : caHashSink.finish().first;
 
@@ -817,14 +821,25 @@ StorePathSet Store::queryValidPaths(const StorePathSet & paths, SubstituteFlag m
     auto doQuery = [&](const StorePath & path) {
         checkInterrupt();
         queryPathInfo(path, {[path, &state_, &wakeup](std::future<ref<const ValidPathInfo>> fut) {
-            auto state(state_.lock());
+            bool exists = false;
+            std::exception_ptr newExc{};
+
             try {
                 auto info = fut.get();
-                state->valid.insert(path);
+                exists = true;
             } catch (InvalidPath &) {
             } catch (...) {
-                state->exc = std::current_exception();
+                newExc = std::current_exception();
             }
+
+            auto state(state_.lock());
+
+            if (exists)
+                state->valid.insert(path);
+
+            if (newExc)
+                state->exc = newExc;
+
             assert(state->left);
             if (!--state->left)
                 wakeup.notify_one();
@@ -917,7 +932,7 @@ StorePathSet Store::exportReferences(const StorePathSet & storePaths, const Stor
 const Store::Stats & Store::getStats()
 {
     {
-        auto state_(state.lock());
+        auto state_(state.readLock());
         stats.pathInfoCacheSize = state_->pathInfoCache.size();
     }
     return stats;
@@ -1012,12 +1027,10 @@ std::map<StorePath, StorePath> copyPaths(
     }
     auto pathsMap = copyPaths(srcStore, dstStore, storePaths, repair, checkSigs, substitute);
 
-    ThreadPool pool;
-
     try {
         // Copy the realisation closure
         processGraph<Realisation>(
-            pool, Realisation::closure(srcStore, toplevelRealisations),
+            Realisation::closure(srcStore, toplevelRealisations),
             [&](const Realisation & current) -> std::set<Realisation> {
                 std::set<Realisation> children;
                 for (const auto & [drvOutput, _] : current.dependentRealisations) {
@@ -1039,7 +1052,7 @@ std::map<StorePath, StorePath> copyPaths(
         // not be within our control to change that, and we might still want
         // to at least copy the output paths.
         if (e.missingFeature == Xp::CaDerivations)
-            ignoreException();
+            ignoreExceptionExceptInterrupt();
         else
             throw;
     }
@@ -1092,9 +1105,6 @@ std::map<StorePath, StorePath> copyPaths(
         return storePathForDst;
     };
 
-    // total is accessed by each copy, which are each handled in separate threads
-    std::atomic<uint64_t> total = 0;
-
     for (auto & missingPath : sortedMissing) {
         auto info = srcStore.queryPathInfo(missingPath);
 
@@ -1104,9 +1114,10 @@ std::map<StorePath, StorePath> copyPaths(
         ValidPathInfo infoForDst = *info;
         infoForDst.path = storePathForDst;
 
-        auto source = sinkToSource([&](Sink & sink) {
+        auto source = sinkToSource([&, narSize = info->narSize](Sink & sink) {
             // We can reasonably assume that the copy will happen whenever we
             // read the path, so log something about that at that point
+            uint64_t total = 0;
             auto srcUri = srcStore.getUri();
             auto dstUri = dstStore.getUri();
             auto storePathS = srcStore.printStorePath(missingPath);
@@ -1117,16 +1128,16 @@ std::map<StorePath, StorePath> copyPaths(
 
             LambdaSink progressSink([&](std::string_view data) {
                 total += data.size();
-                act.progress(total, info->narSize);
+                act.progress(total, narSize);
             });
             TeeSink tee { sink, progressSink };
 
             srcStore.narFromPath(missingPath, tee);
         });
-        pathsToCopy.push_back(std::pair{infoForDst, std::move(source)});
+        pathsToCopy.emplace_back(std::move(infoForDst), std::move(source));
     }
 
-    dstStore.addMultipleToStore(pathsToCopy, act, repair, checkSigs);
+    dstStore.addMultipleToStore(std::move(pathsToCopy), act, repair, checkSigs);
 
     return pathsMap;
 }
@@ -1299,11 +1310,11 @@ ref<Store> openStore(StoreReference && storeURI)
                 /* If /nix doesn't exist, there is no daemon socket, and
                    we're not root, then automatically set up a chroot
                    store in ~/.local/share/nix/root. */
-                auto chrootStore = getDataDir() + "/nix/root";
+                auto chrootStore = getDataDir() + "/root";
                 if (!pathExists(chrootStore)) {
                     try {
                         createDirs(chrootStore);
-                    } catch (Error & e) {
+                    } catch (SystemError & e) {
                         return std::make_shared<LocalStore>(params);
                     }
                     warn("'%s' does not exist, so Nix will use '%s' as a chroot store", stateDir, chrootStore);
@@ -1316,7 +1327,7 @@ ref<Store> openStore(StoreReference && storeURI)
                 return std::make_shared<LocalStore>(params);
         },
         [&](const StoreReference::Specified & g) {
-            for (auto implem : *Implementations::registered)
+            for (const auto & implem : *Implementations::registered)
                 if (implem.uriSchemes.count(g.scheme))
                     return implem.create(g.scheme, g.authority, params);
 
@@ -1347,7 +1358,7 @@ std::list<ref<Store>> getDefaultSubstituters()
             }
         };
 
-        for (auto uri : settings.substituters.get())
+        for (const auto & uri : settings.substituters.get())
             addStore(uri);
 
         stores.sort([](ref<Store> & a, ref<Store> & b) {

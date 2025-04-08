@@ -1,4 +1,4 @@
-#include "libfetchers/attrs.hh"
+#include "attrs.hh"
 #include "primops.hh"
 #include "eval-inline.hh"
 #include "eval-settings.hh"
@@ -10,6 +10,8 @@
 #include "url.hh"
 #include "value-to-json.hh"
 #include "fetch-to-store.hh"
+
+#include <nlohmann/json.hpp>
 
 #include <ctime>
 #include <iomanip>
@@ -31,9 +33,8 @@ void emitTreeAttrs(
 
     // FIXME: support arbitrary input attributes.
 
-    auto narHash = input.getNarHash();
-    assert(narHash);
-    attrs.alloc("narHash").mkString(narHash->to_string(HashFormat::SRI, true));
+    if (auto narHash = input.getNarHash())
+        attrs.alloc("narHash").mkString(narHash->to_string(HashFormat::SRI, true));
 
     if (input.getType() == "git")
         attrs.alloc("submodules").mkBool(
@@ -76,6 +77,7 @@ struct FetchTreeParams {
     bool emptyRevFallback = false;
     bool allowNameArgument = false;
     bool isFetchGit = false;
+    bool isFinal = false;
 };
 
 static void fetchTree(
@@ -85,27 +87,29 @@ static void fetchTree(
     Value & v,
     const FetchTreeParams & params = FetchTreeParams{}
 ) {
-    fetchers::Input input;
+    fetchers::Input input { state.fetchSettings };
     NixStringContext context;
     std::optional<std::string> type;
+    auto fetcher = params.isFetchGit ? "fetchGit" : "fetchTree";
     if (params.isFetchGit) type = "git";
 
     state.forceValue(*args[0], pos);
 
     if (args[0]->type() == nAttrs) {
-        state.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.fetchTree");
+        state.forceAttrs(*args[0], pos, fmt("while evaluating the argument passed to '%s'", fetcher));
 
         fetchers::Attrs attrs;
 
         if (auto aType = args[0]->attrs()->get(state.sType)) {
             if (type)
                 state.error<EvalError>(
-                    "unexpected attribute 'type'"
+                    "unexpected argument 'type'"
                 ).atPos(pos).debugThrow();
-            type = state.forceStringNoCtx(*aType->value, aType->pos, "while evaluating the `type` attribute passed to builtins.fetchTree");
+            type = state.forceStringNoCtx(*aType->value, aType->pos,
+                fmt("while evaluating the `type` argument passed to '%s'", fetcher));
         } else if (!type)
             state.error<EvalError>(
-                "attribute 'type' is missing in call to 'fetchTree'"
+                "argument 'type' is missing in call to '%s'", fetcher
             ).atPos(pos).debugThrow();
 
         attrs.emplace("type", type.value());
@@ -122,15 +126,20 @@ static void fetchTree(
             }
             else if (attr.value->type() == nBool)
                 attrs.emplace(state.symbols[attr.name], Explicit<bool>{attr.value->boolean()});
-            else if (attr.value->type() == nInt)
-                attrs.emplace(state.symbols[attr.name], uint64_t(attr.value->integer()));
-            else if (state.symbols[attr.name] == "publicKeys") {
+            else if (attr.value->type() == nInt) {
+                auto intValue = attr.value->integer().value;
+
+                if (intValue < 0)
+                    state.error<EvalError>("negative value given for '%s' argument '%s': %d", fetcher, state.symbols[attr.name], intValue).atPos(pos).debugThrow();
+
+                attrs.emplace(state.symbols[attr.name], uint64_t(intValue));
+            } else if (state.symbols[attr.name] == "publicKeys") {
                 experimentalFeatureSettings.require(Xp::VerifiedFetches);
                 attrs.emplace(state.symbols[attr.name], printValueAsJSON(state, true, *attr.value, pos, context).dump());
             }
             else
-                state.error<TypeError>("fetchTree argument '%s' is %s while a string, Boolean or integer is expected",
-                    state.symbols[attr.name], showType(*attr.value)).debugThrow();
+                state.error<TypeError>("argument '%s' to '%s' is %s while a string, Boolean or integer is expected",
+                    state.symbols[attr.name], fetcher, showType(*attr.value)).debugThrow();
         }
 
         if (params.isFetchGit && !attrs.contains("exportIgnore") && (!attrs.contains("submodules") || !*fetchers::maybeGetBoolAttr(attrs, "submodules"))) {
@@ -145,14 +154,14 @@ static void fetchTree(
         if (!params.allowNameArgument)
             if (auto nameIter = attrs.find("name"); nameIter != attrs.end())
                 state.error<EvalError>(
-                    "attribute 'name' isn’t supported in call to 'fetchTree'"
+                    "argument 'name' isn’t supported in call to '%s'", fetcher
                 ).atPos(pos).debugThrow();
 
-        input = fetchers::Input::fromAttrs(std::move(attrs));
+        input = fetchers::Input::fromAttrs(state.fetchSettings, std::move(attrs));
     } else {
         auto url = state.coerceToString(pos, *args[0], context,
-                "while evaluating the first argument passed to the fetcher",
-                false, false).toOwned();
+            fmt("while evaluating the first argument passed to '%s'", fetcher),
+            false, false).toOwned();
 
         if (params.isFetchGit) {
             fetchers::Attrs attrs;
@@ -161,31 +170,39 @@ static void fetchTree(
             if (!attrs.contains("exportIgnore") && (!attrs.contains("submodules") || !*fetchers::maybeGetBoolAttr(attrs, "submodules"))) {
                 attrs.emplace("exportIgnore", Explicit<bool>{true});
             }
-            input = fetchers::Input::fromAttrs(std::move(attrs));
+            input = fetchers::Input::fromAttrs(state.fetchSettings, std::move(attrs));
         } else {
             if (!experimentalFeatureSettings.isEnabled(Xp::Flakes))
                 state.error<EvalError>(
-                    "passing a string argument to 'fetchTree' requires the 'flakes' experimental feature"
+                    "passing a string argument to '%s' requires the 'flakes' experimental feature", fetcher
                 ).atPos(pos).debugThrow();
-            input = fetchers::Input::fromURL(url);
+            input = fetchers::Input::fromURL(state.fetchSettings, url);
         }
     }
 
-    if (!evalSettings.pureEval && !input.isDirect() && experimentalFeatureSettings.isEnabled(Xp::Flakes))
+    if (!state.settings.pureEval && !input.isDirect() && experimentalFeatureSettings.isEnabled(Xp::Flakes))
         input = lookupInRegistries(state.store, input).first;
 
-    if (evalSettings.pureEval && !input.isLocked()) {
-        auto fetcher = "fetchTree";
-        if (params.isFetchGit)
-            fetcher = "fetchGit";
-
-        state.error<EvalError>(
-            "in pure evaluation mode, '%s' will not fetch unlocked input '%s'",
-            fetcher, input.to_string()
-        ).atPos(pos).debugThrow();
+    if (state.settings.pureEval && !input.isLocked()) {
+        if (input.getNarHash())
+            warn(
+                "Input '%s' is unlocked (e.g. lacks a Git revision) but does have a NAR hash. "
+                "This is deprecated since such inputs are verifiable but may not be reproducible.",
+                input.to_string());
+        else
+            state.error<EvalError>(
+                "in pure evaluation mode, '%s' will not fetch unlocked input '%s'",
+                fetcher, input.to_string()).atPos(pos).debugThrow();
     }
 
     state.checkURI(input.toURLString());
+
+    if (params.isFinal) {
+        input.attrs.insert_or_assign("__final", Explicit<bool>(true));
+    } else {
+        if (input.isFinal())
+            throw Error("input '%s' is not allowed to use the '__final' attribute", input.to_string());
+    }
 
     auto [storePath, input2] = input.fetchToStore(state.store);
 
@@ -240,7 +257,7 @@ static RegisterPrimOp primop_fetchTree({
       The following source types and associated input attributes are supported.
 
       <!-- TODO: It would be soooo much more predictable to work with (and
-      document) if `fetchTree` was a curried call with the first paramter for
+      document) if `fetchTree` was a curried call with the first parameter for
       `type` or an attribute like `builtins.fetchTree.git`! -->
 
       - `"file"`
@@ -350,6 +367,12 @@ static RegisterPrimOp primop_fetchTree({
 
           Default: `false`
 
+        - `lfs` (Bool, optional)
+
+          Fetch any [Git LFS](https://git-lfs.com/) files.
+
+          Default: `false`
+
         - `allRefs` (Bool, optional)
 
           By default, this has no effect. This becomes relevant only once `shallow` cloning is disabled.
@@ -383,7 +406,7 @@ static RegisterPrimOp primop_fetchTree({
       - `"mercurial"`
 
      *input* can also be a [URL-like reference](@docroot@/command-ref/new-cli/nix3-flake.md#flake-references).
-     The additional input types and the URL-like syntax requires the [`flakes` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-flakes) to be enabled.
+     The additional input types and the URL-like syntax requires the [`flakes` experimental feature](@docroot@/development/experimental-features.md#xp-feature-flakes) to be enabled.
 
       > **Example**
       >
@@ -423,6 +446,18 @@ static RegisterPrimOp primop_fetchTree({
     .experimentalFeature = Xp::FetchTree,
 });
 
+void prim_fetchFinalTree(EvalState & state, const PosIdx pos, Value * * args, Value & v)
+{
+    fetchTree(state, pos, args, v, {.isFinal = true});
+}
+
+static RegisterPrimOp primop_fetchFinalTree({
+    .name = "fetchFinalTree",
+    .args = {"input"},
+    .fun = prim_fetchFinalTree,
+    .internal = true,
+});
+
 static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v,
     const std::string & who, bool unpack, std::string name)
 {
@@ -431,7 +466,10 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
 
     state.forceValue(*args[0], pos);
 
-    if (args[0]->type() == nAttrs) {
+    bool isArgAttrs = args[0]->type() == nAttrs;
+    bool nameAttrPassed = false;
+
+    if (isArgAttrs) {
 
         for (auto & attr : *args[0]->attrs()) {
             std::string_view n(state.symbols[attr.name]);
@@ -439,8 +477,10 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
                 url = state.forceStringNoCtx(*attr.value, attr.pos, "while evaluating the url we should fetch");
             else if (n == "sha256")
                 expectedHash = newHashAllowEmpty(state.forceStringNoCtx(*attr.value, attr.pos, "while evaluating the sha256 of the content we should fetch"), HashAlgorithm::SHA256);
-            else if (n == "name")
+            else if (n == "name") {
+                nameAttrPassed = true;
                 name = state.forceStringNoCtx(*attr.value, attr.pos, "while evaluating the name of the content we should fetch");
+            }
             else
                 state.error<EvalError>("unsupported argument '%s' to '%s'", n, who)
                 .atPos(pos).debugThrow();
@@ -453,14 +493,27 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
         url = state.forceStringNoCtx(*args[0], pos, "while evaluating the url we should fetch");
 
     if (who == "fetchTarball")
-        url = evalSettings.resolvePseudoUrl(*url);
+        url = state.settings.resolvePseudoUrl(*url);
 
     state.checkURI(*url);
 
     if (name == "")
         name = baseNameOf(*url);
 
-    if (evalSettings.pureEval && !expectedHash)
+    try {
+        checkName(name);
+    } catch (BadStorePathName & e) {
+        auto resolution =
+            nameAttrPassed ? HintFmt("Please change the value for the 'name' attribute passed to '%s', so that it can create a valid store path.", who) :
+            isArgAttrs ? HintFmt("Please add a valid 'name' attribute to the argument for '%s', so that it can create a valid store path.", who) :
+            HintFmt("Please pass an attribute set with 'url' and 'name' attributes to '%s',  so that it can create a valid store path.", who);
+
+        state.error<EvalError>(
+            std::string("invalid store path name when fetching URL '%s': %s. %s"), *url, Uncolored(e.message()), Uncolored(resolution.str()))
+        .atPos(pos).debugThrow();
+    }
+
+    if (state.settings.pureEval && !expectedHash)
         state.error<EvalError>("in pure evaluation mode, '%s' requires a 'sha256' argument", who).atPos(pos).debugThrow();
 
     // early exit if pinned and already in the store
@@ -468,7 +521,7 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
         auto expectedPath = state.store->makeFixedOutputPath(
             name,
             FixedOutputInfo {
-                .method = unpack ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat,
+                .method = unpack ? FileIngestionMethod::NixArchive : FileIngestionMethod::Flat,
                 .hash = *expectedHash,
                 .references = {}
             });
@@ -483,7 +536,11 @@ static void fetch(EvalState & state, const PosIdx pos, Value * * args, Value & v
     //       https://github.com/NixOS/nix/issues/4313
     auto storePath =
         unpack
-        ? fetchToStore(*state.store, fetchers::downloadTarball(*url).accessor, FetchMode::Copy, name)
+        ? fetchToStore(
+            *state.store,
+            fetchers::downloadTarball(state.store, state.fetchSettings, *url),
+            FetchMode::Copy,
+            name)
         : fetchers::downloadFile(state.store, *url, name).storePath;
 
     if (expectedHash) {
@@ -511,9 +568,19 @@ static void prim_fetchurl(EvalState & state, const PosIdx pos, Value * * args, V
 
 static RegisterPrimOp primop_fetchurl({
     .name = "__fetchurl",
-    .args = {"url"},
+    .args = {"arg"},
     .doc = R"(
       Download the specified URL and return the path of the downloaded file.
+      `arg` can be either a string denoting the URL, or an attribute set with the following attributes:
+
+      - `url`
+
+        The URL of the file to download.
+
+      - `name` (default: the last path component of the URL)
+
+        A name for the file in the store. This can be useful if the URL has any
+        characters that are invalid for the store.
 
       Not available in [restricted evaluation mode](@docroot@/command-ref/conf-file.md#conf-restrict-eval).
     )",
@@ -531,11 +598,11 @@ static RegisterPrimOp primop_fetchTarball({
     .doc = R"(
       Download the specified URL, unpack it and return the path of the
       unpacked tree. The file must be a tape archive (`.tar`) compressed
-      with `gzip`, `bzip2` or `xz`. The top-level path component of the
-      files in the tarball is removed, so it is best if the tarball
-      contains a single directory at top level. The typical use of the
-      function is to obtain external Nix expression dependencies, such as
-      a particular version of Nixpkgs, e.g.
+      with `gzip`, `bzip2` or `xz`. If the tarball consists of a
+      single directory, then the top-level path component of the files
+      in the tarball is removed. The typical use of the function is to
+      obtain external Nix expression dependencies, such as a
+      particular version of Nixpkgs, e.g.
 
       ```nix
       with import (fetchTarball https://github.com/NixOS/nixpkgs/archive/nixos-14.12.tar.gz) {};
@@ -630,6 +697,13 @@ static RegisterPrimOp primop_fetchGit({
 
         Make a shallow clone when fetching the Git tree.
         When this is enabled, the options `ref` and `allRefs` have no effect anymore.
+
+      - `lfs` (default: `false`)
+
+        A boolean that when `true` specifies that [Git LFS] files should be fetched.
+
+        [Git LFS]: https://git-lfs.com/
+
       - `allRefs`
 
         Whether to fetch all references (eg. branches and tags) of the repository.
@@ -642,12 +716,12 @@ static RegisterPrimOp primop_fetchGit({
 
         Whether to check `rev` for a signature matching `publicKey` or `publicKeys`.
         If `verifyCommit` is enabled, then `fetchGit` cannot use a local repository with uncommitted changes.
-        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+        Requires the [`verified-fetches` experimental feature](@docroot@/development/experimental-features.md#xp-feature-verified-fetches).
 
       - `publicKey`
 
         The public key against which `rev` is verified if `verifyCommit` is enabled.
-        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+        Requires the [`verified-fetches` experimental feature](@docroot@/development/experimental-features.md#xp-feature-verified-fetches).
 
       - `keytype` (default: `"ssh-ed25519"`)
 
@@ -659,7 +733,7 @@ static RegisterPrimOp primop_fetchGit({
         - `"ssh-ed25519"`
         - `"ssh-ed25519-sk"`
         - `"ssh-rsa"`
-        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+        Requires the [`verified-fetches` experimental feature](@docroot@/development/experimental-features.md#xp-feature-verified-fetches).
 
       - `publicKeys`
 
@@ -673,7 +747,7 @@ static RegisterPrimOp primop_fetchGit({
         }
         ```
 
-        Requires the [`verified-fetches` experimental feature](@docroot@/contributing/experimental-features.md#xp-feature-verified-fetches).
+        Requires the [`verified-fetches` experimental feature](@docroot@/development/experimental-features.md#xp-feature-verified-fetches).
 
 
       Here are some examples of how to use `fetchGit`.

@@ -15,13 +15,8 @@
 
 #if __linux__
 # include <mutex>
-# include <sys/resource.h>
 # include "cgroup.hh"
 # include "namespaces.hh"
-#endif
-
-#ifndef _WIN32
-# include <sys/mount.h>
 #endif
 
 namespace nix {
@@ -33,11 +28,7 @@ unsigned int getMaxCPU()
         auto cgroupFS = getCgroupFS();
         if (!cgroupFS) return 0;
 
-        auto cgroups = getCgroups("/proc/self/cgroup");
-        auto cgroup = cgroups[""];
-        if (cgroup == "") return 0;
-
-        auto cpuFile = *cgroupFS + "/" + cgroup + "/cpu.max";
+        auto cpuFile = *cgroupFS + "/" + getCurrentCgroup() + "/cpu.max";
 
         auto cpuMax = readFile(cpuFile);
         auto cpuMaxParts = tokenizeString<std::vector<std::string>>(cpuMax, " \n");
@@ -50,7 +41,7 @@ unsigned int getMaxCPU()
         auto period = cpuMaxParts[1];
         if (quota != "max")
                 return std::ceil(std::stoi(quota) / std::stof(period));
-    } catch (Error &) { ignoreException(lvlDebug); }
+    } catch (Error &) { ignoreExceptionInDestructor(lvlDebug); }
     #endif
 
     return 0;
@@ -60,11 +51,11 @@ unsigned int getMaxCPU()
 //////////////////////////////////////////////////////////////////////
 
 
+#ifndef _WIN32
 size_t savedStackSize = 0;
 
 void setStackSize(size_t stackSize)
 {
-    #ifndef _WIN32
     struct rlimit limit;
     if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur < stackSize) {
         savedStackSize = limit.rlim_cur;
@@ -82,31 +73,8 @@ void setStackSize(size_t stackSize)
             );
         }
     }
-    #else
-    ULONG_PTR stackLow, stackHigh;
-    GetCurrentThreadStackLimits(&stackLow, &stackHigh);
-    ULONG maxStackSize = stackHigh - stackLow;
-    ULONG currStackSize = 0;
-    // This retrieves the current promised stack size
-    SetThreadStackGuarantee(&currStackSize);
-    if (currStackSize < stackSize) {
-        savedStackSize = currStackSize;
-        ULONG newStackSize = std::min(static_cast<ULONG>(stackSize), maxStackSize);
-        if (SetThreadStackGuarantee(&newStackSize) == 0) {
-            logger->log(
-                lvlError,
-                HintFmt(
-                    "Failed to increase stack size from %1% to %2% (maximum allowed stack size: %3%): %4%",
-                    savedStackSize,
-                    stackSize,
-                    maxStackSize,
-                    std::to_string(GetLastError())
-                ).str()
-            );
-        }
-    }
-    #endif
 }
+#endif
 
 void restoreProcessContext(bool restoreMounts)
 {
@@ -138,7 +106,7 @@ std::optional<Path> getSelfExe()
 {
     static auto cached = []() -> std::optional<Path>
     {
-        #if __linux__
+        #if __linux__ || __GNU__
         return readLink("/proc/self/exe");
         #elif __APPLE__
         char buf[1024];

@@ -4,7 +4,7 @@ source common.sh
 
 set -o pipefail
 
-source lang/framework.sh
+source characterisation/framework.sh
 
 # specialize function a bit
 function diffAndAccept() {
@@ -37,12 +37,14 @@ nix-instantiate --eval -E 'let x = { repeating = x; tracing = builtins.trace x t
   2>&1 | grepQuiet -F 'trace: { repeating = «repeated»; tracing = «potential infinite recursion»; }'
 
 nix-instantiate --eval -E 'builtins.warn "Hello" 123' 2>&1 | grepQuiet 'warning: Hello'
+# shellcheck disable=SC2016 # The ${} in this is Nix, not shell
 nix-instantiate --eval -E 'builtins.addErrorContext "while doing ${"something"} interesting" (builtins.warn "Hello" 123)' 2>/dev/null | grepQuiet 123
 
 # warn does not accept non-strings for now
 expectStderr 1 nix-instantiate --eval -E 'let x = builtins.warn { x = x; } true; in x' \
   | grepQuiet "expected a string but found a set"
 expectStderr 1 nix-instantiate --eval --abort-on-warn -E 'builtins.warn "Hello" 123' | grepQuiet Hello
+# shellcheck disable=SC2016 # The ${} in this is Nix, not shell
 NIX_ABORT_ON_WARN=1 expectStderr 1 nix-instantiate --eval -E 'builtins.addErrorContext "while doing ${"something"} interesting" (builtins.warn "Hello" 123)' | grepQuiet "while doing something interesting"
 
 set +x
@@ -50,11 +52,25 @@ set +x
 badDiff=0
 badExitCode=0
 
+# Extra post-processing that's specific to each test case
+postprocess() {
+    if [[ -e "lang/$1.postprocess" ]]; then
+        (
+            # We could allow arbitrary interpreters in .postprocess, but that
+            # just exposes us to the complexity of not having /usr/bin/env in
+            # the sandbox. So let's just hardcode bash for now.
+            set -x;
+            bash "lang/$1.postprocess" "lang/$1"
+        )
+    fi
+}
+
 for i in lang/parse-fail-*.nix; do
     echo "parsing $i (should fail)";
     i=$(basename "$i" .nix)
     if expectStderr 1 nix-instantiate --parse - < "lang/$i.nix" > "lang/$i.err"
     then
+        postprocess "$i"
         diffAndAccept "$i" err err.exp
     else
         echo "FAIL: $i shouldn't parse"
@@ -71,6 +87,7 @@ for i in lang/parse-okay-*.nix; do
             2> "lang/$i.err"
     then
         sed "s!$(pwd)!/pwd!g" "lang/$i.out" "lang/$i.err"
+        postprocess "$i"
         diffAndAccept "$i" out exp
         diffAndAccept "$i" err err.exp
     else
@@ -91,9 +108,11 @@ for i in lang/eval-fail-*.nix; do
         fi
     )"
     if
+        # shellcheck disable=SC2086 # word splitting of flags is intended
         expectStderr 1 nix-instantiate $flags "lang/$i.nix" \
             | sed "s!$(pwd)!/pwd!g" > "lang/$i.err"
     then
+        postprocess "$i"
         diffAndAccept "$i" err err.exp
     else
         echo "FAIL: $i shouldn't evaluate"
@@ -109,6 +128,7 @@ for i in lang/eval-okay-*.nix; do
         if expect 0 nix-instantiate --eval --xml --no-location --strict \
                 "lang/$i.nix" > "lang/$i.out.xml"
         then
+            postprocess "$i"
             diffAndAccept "$i" out.xml exp.xml
         else
             echo "FAIL: $i should evaluate"
@@ -129,6 +149,7 @@ for i in lang/eval-okay-*.nix; do
                 2> "lang/$i.err"
         then
             sed -i "s!$(pwd)!/pwd!g" "lang/$i.out" "lang/$i.err"
+            postprocess "$i"
             diffAndAccept "$i" out exp
             diffAndAccept "$i" err err.exp
         else
@@ -138,32 +159,4 @@ for i in lang/eval-okay-*.nix; do
     fi
 done
 
-if test -n "${_NIX_TEST_ACCEPT-}"; then
-    if (( "$badDiff" )); then
-        echo 'Output did mot match, but accepted output as the persisted expected output.'
-        echo 'That means the next time the tests are run, they should pass.'
-    else
-        echo 'NOTE: Environment variable _NIX_TEST_ACCEPT is defined,'
-        echo 'indicating the unexpected output should be accepted as the expected output going forward,'
-        echo 'but no tests had unexpected output so there was no expected output to update.'
-    fi
-    if (( "$badExitCode" )); then
-        exit "$badExitCode"
-    else
-        skipTest "regenerating golden masters"
-    fi
-else
-    if (( "$badDiff" )); then
-        echo ''
-        echo 'You can rerun this test with:'
-        echo ''
-        echo '    _NIX_TEST_ACCEPT=1 make tests/functional/lang.sh.test'
-        echo ''
-        echo 'to regenerate the files containing the expected output,'
-        echo 'and then view the git diff to decide whether a change is'
-        echo 'good/intentional or bad/unintentional.'
-        echo 'If the diff contains arbitrary or impure information,'
-        echo 'please improve the normalization that the test applies to the output.'
-    fi
-    exit $(( "$badExitCode" + "$badDiff" ))
-fi
+characterisationTestExit

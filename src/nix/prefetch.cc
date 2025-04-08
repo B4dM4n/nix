@@ -4,7 +4,7 @@
 #include "store-api.hh"
 #include "filetransfer.hh"
 #include "finally.hh"
-#include "progress-bar.hh"
+#include "loggers.hh"
 #include "tarfile.hh"
 #include "attr-path.hh"
 #include "eval-inline.hh"
@@ -12,6 +12,7 @@
 #include "posix-source-accessor.hh"
 #include "misc-store-flags.hh"
 #include "terminal.hh"
+#include "man-pages.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -57,7 +58,9 @@ std::tuple<StorePath, Hash> prefetchFile(
         bool unpack,
         bool executable)
 {
-    auto ingestionMethod = unpack || executable ? FileIngestionMethod::Recursive : FileIngestionMethod::Flat;
+    ContentAddressMethod method = unpack || executable
+        ? ContentAddressMethod::Raw::NixArchive
+        : ContentAddressMethod::Raw::Flat;
 
     /* Figure out a name in the Nix store. */
     if (!name) {
@@ -73,11 +76,10 @@ std::tuple<StorePath, Hash> prefetchFile(
        the store. */
     if (expectedHash) {
         hashAlgo = expectedHash->algo;
-        storePath = store->makeFixedOutputPath(*name, FixedOutputInfo {
-            .method = ingestionMethod,
-            .hash = *expectedHash,
-            .references = {},
-        });
+        storePath = store->makeFixedOutputPathFromCA(*name, ContentAddressWithReferences::fromParts(
+            method,
+            *expectedHash,
+            {}));
         if (store->isValidPath(*storePath))
             hash = expectedHash;
         else
@@ -113,14 +115,15 @@ std::tuple<StorePath, Hash> prefetchFile(
             createDirs(unpacked);
             unpackTarfile(tmpFile.string(), unpacked);
 
+            auto entries = std::filesystem::directory_iterator{unpacked};
             /* If the archive unpacks to a single file/directory, then use
                that as the top-level. */
-            auto entries = std::filesystem::directory_iterator{unpacked};
-            auto file_count = std::distance(entries, std::filesystem::directory_iterator{});
-            if (file_count == 1)
-                tmpFile = entries->path();
-            else
+            tmpFile = entries->path();
+            auto fileCount = std::distance(entries, std::filesystem::directory_iterator{});
+            if (fileCount != 1) {
+                /* otherwise, use the directory itself */
                 tmpFile = unpacked;
+            }
         }
 
         Activity act(*logger, lvlChatty, actUnknown,
@@ -128,7 +131,7 @@ std::tuple<StorePath, Hash> prefetchFile(
 
         auto info = store->addToStoreSlow(
             *name, PosixSourceAccessor::createAtRoot(tmpFile),
-            ingestionMethod, hashAlgo, {}, expectedHash);
+            method, hashAlgo, {}, expectedHash);
         storePath = info.path;
         assert(info.ca);
         hash = info.ca->hash;
@@ -187,13 +190,10 @@ static int main_nix_prefetch_url(int argc, char * * argv)
         if (args.size() > 2)
             throw UsageError("too many arguments");
 
-        Finally f([]() { stopProgressBar(); });
-
-        if (isTTY())
-          startProgressBar();
+        setLogFormat("bar");
 
         auto store = openStore();
-        auto state = std::make_unique<EvalState>(myArgs.lookupPath, store);
+        auto state = std::make_unique<EvalState>(myArgs.lookupPath, store, fetchSettings, evalSettings);
 
         Bindings & autoArgs = *myArgs.getAutoArgs(*state);
 
@@ -244,7 +244,7 @@ static int main_nix_prefetch_url(int argc, char * * argv)
         auto [storePath, hash] = prefetchFile(
             store, resolveMirrorUrl(*state, url), name, ha, expectedHash, unpack, executable);
 
-        stopProgressBar();
+        logger->stop();
 
         if (!printPath)
             printInfo("path is '%s'", store->printStorePath(storePath));

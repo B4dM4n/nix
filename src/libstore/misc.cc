@@ -1,5 +1,8 @@
+#include <unordered_set>
+
 #include "derivations.hh"
 #include "parsed-derivations.hh"
+#include "derivation-options.hh"
 #include "globals.hh"
 #include "store-api.hh"
 #include "thread-pool.hh"
@@ -8,6 +11,7 @@
 #include "callback.hh"
 #include "closure.hh"
 #include "filetransfer.hh"
+#include "strings.hh"
 
 namespace nix {
 
@@ -219,8 +223,9 @@ void Store::queryMissing(const std::vector<DerivedPath> & targets,
 
             auto drv = make_ref<Derivation>(derivationFromPath(drvPath));
             ParsedDerivation parsedDrv(StorePath(drvPath), *drv);
+            DerivationOptions drvOptions = DerivationOptions::fromParsedDerivation(parsedDrv);
 
-            if (!knownOutputPaths && settings.useSubstitutes && parsedDrv.substitutesAllowed()) {
+            if (!knownOutputPaths && settings.useSubstitutes && drvOptions.substitutesAllowed()) {
                 experimentalFeatureSettings.require(Xp::CaDerivations);
 
                 // If there are unknown output paths, attempt to find if the
@@ -250,7 +255,7 @@ void Store::queryMissing(const std::vector<DerivedPath> & targets,
                 }
             }
 
-            if (knownOutputPaths && settings.useSubstitutes && parsedDrv.substitutesAllowed()) {
+            if (knownOutputPaths && settings.useSubstitutes && drvOptions.substitutesAllowed()) {
                 auto drvState = make_ref<Sync<DrvState>>(DrvState(invalid.size()));
                 for (auto & output : invalid)
                     pool.enqueue(std::bind(checkOutput, drvPath, drv, output, drvState));

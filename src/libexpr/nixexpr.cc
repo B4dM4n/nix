@@ -1,5 +1,4 @@
 #include "nixexpr.hh"
-#include "derivations.hh"
 #include "eval.hh"
 #include "symbol-table.hh"
 #include "util.hh"
@@ -7,6 +6,8 @@
 
 #include <cstdlib>
 #include <sstream>
+
+#include "strings-inline.hh"
 
 namespace nix {
 
@@ -24,7 +25,7 @@ std::ostream & operator <<(std::ostream & str, const SymbolStr & symbol)
 
 void Expr::show(const SymbolTable & symbols, std::ostream & str) const
 {
-    abort();
+    unreachable();
 }
 
 void ExprInt::show(const SymbolTable & symbols, std::ostream & str) const
@@ -81,7 +82,9 @@ void ExprAttrs::showBindings(const SymbolTable & symbols, std::ostream & str) co
         return sa < sb;
     });
     std::vector<Symbol> inherits;
-    std::map<ExprInheritFrom *, std::vector<Symbol>> inheritsFrom;
+    // We can use the displacement as a proxy for the order in which the symbols were parsed.
+    // The assignment of displacements should be deterministic, so that showBindings is deterministic.
+    std::map<Displacement, std::vector<Symbol>> inheritsFrom;
     for (auto & i : sorted) {
         switch (i->second.kind) {
         case AttrDef::Kind::Plain:
@@ -92,7 +95,7 @@ void ExprAttrs::showBindings(const SymbolTable & symbols, std::ostream & str) co
         case AttrDef::Kind::InheritedFrom: {
             auto & select = dynamic_cast<ExprSelect &>(*i->second.e);
             auto & from = dynamic_cast<ExprInheritFrom &>(*select.e);
-            inheritsFrom[&from].push_back(i->first);
+            inheritsFrom[from.displ].push_back(i->first);
             break;
         }
         }
@@ -104,7 +107,7 @@ void ExprAttrs::showBindings(const SymbolTable & symbols, std::ostream & str) co
     }
     for (const auto & [from, syms] : inheritsFrom) {
         str << "inherit (";
-        (*inheritFromExprs)[from->displ]->show(symbols, str);
+        (*inheritFromExprs)[from]->show(symbols, str);
         str << ")";
         for (auto sym : syms) str << " " << symbols[sym];
         str << "; ";
@@ -268,7 +271,7 @@ std::string showAttrPath(const SymbolTable & symbols, const AttrPath & attrPath)
 
 void Expr::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
 {
-    abort();
+    unreachable();
 }
 
 void ExprInt::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
@@ -307,7 +310,7 @@ void ExprVar::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & 
     const StaticEnv * curEnv;
     Level level;
     int withLevel = -1;
-    for (curEnv = env.get(), level = 0; curEnv; curEnv = curEnv->up, level++) {
+    for (curEnv = env.get(), level = 0; curEnv; curEnv = curEnv->up.get(), level++) {
         if (curEnv->isWith) {
             if (withLevel == -1) withLevel = level;
         } else {
@@ -328,7 +331,7 @@ void ExprVar::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & 
             "undefined variable '%1%'",
             es.symbols[name]
         ).atPos(pos).debugThrow();
-    for (auto * e = env.get(); e && !fromWith; e = e->up)
+    for (auto * e = env.get(); e && !fromWith; e = e->up.get())
         fromWith = e->isWith;
     this->level = withLevel;
 }
@@ -376,7 +379,7 @@ std::shared_ptr<const StaticEnv> ExprAttrs::bindInheritSources(
     // and displacement, and nothing else is allowed to access it. ideally we'd
     // not even *have* an expr that grabs anything from this env since it's fully
     // invisible, but the evaluator does not allow for this yet.
-    auto inner = std::make_shared<StaticEnv>(nullptr, env.get(), 0);
+    auto inner = std::make_shared<StaticEnv>(nullptr, env, 0);
     for (auto from : *inheritFromExprs)
         from->bindVars(es, env);
 
@@ -390,7 +393,7 @@ void ExprAttrs::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> 
 
     if (recursive) {
         auto newEnv = [&] () -> std::shared_ptr<const StaticEnv> {
-            auto newEnv = std::make_shared<StaticEnv>(nullptr, env.get(), attrs.size());
+            auto newEnv = std::make_shared<StaticEnv>(nullptr, env, attrs.size());
 
             Displacement displ = 0;
             for (auto & i : attrs)
@@ -437,7 +440,7 @@ void ExprLambda::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv>
         es.exprEnvs.insert(std::make_pair(this, env));
 
     auto newEnv = std::make_shared<StaticEnv>(
-        nullptr, env.get(),
+        nullptr, env,
         (hasFormals() ? formals->formals.size() : 0) +
         (!arg ? 0 : 1));
 
@@ -471,7 +474,7 @@ void ExprCall::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
 void ExprLet::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
 {
     auto newEnv = [&] () -> std::shared_ptr<const StaticEnv> {
-        auto newEnv = std::make_shared<StaticEnv>(nullptr, env.get(), attrs->attrs.size());
+        auto newEnv = std::make_shared<StaticEnv>(nullptr, env, attrs->attrs.size());
 
         Displacement displ = 0;
         for (auto & i : attrs->attrs)
@@ -497,7 +500,7 @@ void ExprWith::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
         es.exprEnvs.insert(std::make_pair(this, env));
 
     parentWith = nullptr;
-    for (auto * e = env.get(); e && !parentWith; e = e->up)
+    for (auto * e = env.get(); e && !parentWith; e = e->up.get())
         parentWith = e->isWith;
 
     /* Does this `with' have an enclosing `with'?  If so, record its
@@ -506,14 +509,14 @@ void ExprWith::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> &
     const StaticEnv * curEnv;
     Level level;
     prevWith = 0;
-    for (curEnv = env.get(), level = 1; curEnv; curEnv = curEnv->up, level++)
+    for (curEnv = env.get(), level = 1; curEnv; curEnv = curEnv->up.get(), level++)
         if (curEnv->isWith) {
             prevWith = level;
             break;
         }
 
     attrs->bindVars(es, env);
-    auto newEnv = std::make_shared<StaticEnv>(this, env.get());
+    auto newEnv = std::make_shared<StaticEnv>(this, env);
     body->bindVars(es, newEnv);
 }
 
@@ -582,6 +585,22 @@ std::string ExprLambda::showNamePos(const EvalState & state) const
     return fmt("%1% at %2%", id, state.positions[pos]);
 }
 
+void ExprLambda::setDocComment(DocComment docComment) {
+    // RFC 145 specifies that the innermost doc comment wins.
+    // See https://github.com/NixOS/rfcs/blob/master/rfcs/0145-doc-strings.md#ambiguous-placement
+    if (!this->docComment) {
+        this->docComment = docComment;
+
+        // Curried functions are defined by putting a function directly
+        // in the body of another function. To render docs for those, we
+        // need to propagate the doc comment to the innermost function.
+        //
+        // If we have our own comment, we've already propagated it, so this
+        // belongs in the same conditional.
+        body->setDocComment(docComment);
+    }
+};
+
 
 
 /* Position table. */
@@ -624,6 +643,52 @@ size_t SymbolTable::totalSize() const
     size_t n = 0;
     dump([&] (const std::string & s) { n += s.size(); });
     return n;
+}
+
+std::string DocComment::getInnerText(const PosTable & positions) const {
+    auto beginPos = positions[begin];
+    auto endPos = positions[end];
+    auto docCommentStr = beginPos.getSnippetUpTo(endPos).value_or("");
+
+    // Strip "/**" and "*/"
+    constexpr size_t prefixLen = 3;
+    constexpr size_t suffixLen = 2;
+    std::string docStr = docCommentStr.substr(prefixLen, docCommentStr.size() - prefixLen - suffixLen);
+    if (docStr.empty())
+        return {};
+    // Turn the now missing "/**" into indentation
+    docStr = "   " + docStr;
+    // Strip indentation (for the whole, potentially multi-line string)
+    docStr = stripIndentation(docStr);
+    return docStr;
+}
+
+
+
+/* ‘Cursed or’ handling.
+ *
+ * In parser.y, every use of expr_select in a production must call one of the
+ * two below functions.
+ *
+ * To be removed by https://github.com/NixOS/nix/pull/11121
+ */
+
+void ExprCall::resetCursedOr()
+{
+    cursedOrEndPos.reset();
+}
+
+void ExprCall::warnIfCursedOr(const SymbolTable & symbols, const PosTable & positions)
+{
+    if (cursedOrEndPos.has_value()) {
+        std::ostringstream out;
+        out << "at " << positions[pos] << ": "
+               "This expression uses `or` as an identifier in a way that will change in a future Nix release.\n"
+               "Wrap this entire expression in parentheses to preserve its current meaning:\n"
+               "    (" << positions[pos].getSnippetUpTo(positions[*cursedOrEndPos]).value_or("could not read expression") << ")\n"
+               "Give feedback at https://github.com/NixOS/nix/pull/11121";
+        warn(out.str());
+    }
 }
 
 }

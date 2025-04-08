@@ -15,9 +15,11 @@ declare -a storesBad=(
     "$storeBadRoot" "$storeBadLower" "$storeBadUpper"
 )
 
+TODO_NixOS
+
 for i in "${storesBad[@]}"; do
     echo $i
-    unshare --mount --map-root-user bash <<EOF
+    execUnshare <<EOF
         source common.sh
         setupStoreDirs
         mountOverlayfs

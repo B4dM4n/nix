@@ -7,6 +7,9 @@
 #include "split.hh"
 #include "common-protocol.hh"
 #include "common-protocol-impl.hh"
+#include "strings-inline.hh"
+#include "json-utils.hh"
+
 #include <boost/container/small_vector.hpp>
 #include <nlohmann/json.hpp>
 
@@ -150,7 +153,7 @@ StorePath writeDerivation(Store & store,
         })
         : ({
             StringSource s { contents };
-            store.addToStoreFromDump(s, suffix, FileSerialisationMethod::Flat, TextIngestionMethod {}, HashAlgorithm::SHA256, references, repair);
+            store.addToStoreFromDump(s, suffix, FileSerialisationMethod::Flat, ContentAddressMethod::Raw::Text, HashAlgorithm::SHA256, references, repair);
         });
 }
 
@@ -274,7 +277,7 @@ static DerivationOutput parseDerivationOutput(
 {
     if (hashAlgoStr != "") {
         ContentAddressMethod method = ContentAddressMethod::parsePrefix(hashAlgoStr);
-        if (method == TextIngestionMethod {})
+        if (method == ContentAddressMethod::Raw::Text)
             xpSettings.require(Xp::DynamicDerivations);
         const auto hashAlgo = parseHashAlgo(hashAlgoStr);
         if (hashS == "impure") {
@@ -297,7 +300,7 @@ static DerivationOutput parseDerivationOutput(
         } else {
             xpSettings.require(Xp::CaDerivations);
             if (pathS != "")
-                throw FormatError("content-addressed derivation output should not specify output path");
+                throw FormatError("content-addressing derivation output should not specify output path");
             return DerivationOutput::CAFloating {
                 .method = std::move(method),
                 .hashAlgo = std::move(hashAlgo),
@@ -840,16 +843,6 @@ DrvHash hashDerivationModulo(Store & store, const Derivation & drv, bool maskOut
         };
     }
 
-    if (type.isImpure()) {
-        std::map<std::string, Hash> outputHashes;
-        for (const auto & [outputName, _] : drv.outputs)
-            outputHashes.insert_or_assign(outputName, impureOutputHash);
-        return DrvHash {
-            .hashes = outputHashes,
-            .kind = DrvHash::Kind::Deferred,
-        };
-    }
-
     auto kind = std::visit(overloaded {
         [](const DerivationType::InputAddressed & ia) {
             /* This might be a "pesimistically" deferred output, so we don't
@@ -862,7 +855,7 @@ DrvHash hashDerivationModulo(Store & store, const Derivation & drv, bool maskOut
                 : DrvHash::Kind::Deferred;
         },
         [](const DerivationType::Impure &) -> DrvHash::Kind {
-            assert(false);
+            return DrvHash::Kind::Deferred;
         }
     }, drv.type().raw);
 
@@ -1014,29 +1007,31 @@ std::string hashPlaceholder(const OutputNameView outputName)
     return "/" + hashString(HashAlgorithm::SHA256, concatStrings("nix-output:", outputName)).to_string(HashFormat::Nix32, false);
 }
 
-
-
-
-static void rewriteDerivation(Store & store, BasicDerivation & drv, const StringMap & rewrites)
+void BasicDerivation::applyRewrites(const StringMap & rewrites)
 {
-    debug("Rewriting the derivation");
+    if (rewrites.empty()) return;
 
-    for (auto & rewrite : rewrites) {
+    debug("rewriting the derivation");
+
+    for (auto & rewrite : rewrites)
         debug("rewriting %s as %s", rewrite.first, rewrite.second);
-    }
 
-    drv.builder = rewriteStrings(drv.builder, rewrites);
-    for (auto & arg : drv.args) {
+    builder = rewriteStrings(builder, rewrites);
+    for (auto & arg : args)
         arg = rewriteStrings(arg, rewrites);
-    }
 
     StringPairs newEnv;
-    for (auto & envVar : drv.env) {
+    for (auto & envVar : env) {
         auto envName = rewriteStrings(envVar.first, rewrites);
         auto envValue = rewriteStrings(envVar.second, rewrites);
         newEnv.emplace(envName, envValue);
     }
-    drv.env = newEnv;
+    env = std::move(newEnv);
+}
+
+static void rewriteDerivation(Store & store, BasicDerivation & drv, const StringMap & rewrites)
+{
+    drv.applyRewrites(rewrites);
 
     auto hashModulo = hashDerivationModulo(store, Derivation(drv), true);
     for (auto & [outputName, output] : drv.outputs) {
@@ -1249,7 +1244,7 @@ DerivationOutput DerivationOutput::fromJSON(
     auto methodAlgo = [&]() -> std::pair<ContentAddressMethod, HashAlgorithm> {
         auto & method_ = getString(valueAt(json, "method"));
         ContentAddressMethod method = ContentAddressMethod::parse(method_);
-        if (method == TextIngestionMethod {})
+        if (method == ContentAddressMethod::Raw::Text)
             xpSettings.require(Xp::DynamicDerivations);
 
         auto & hashAlgo_ = getString(valueAt(json, "hashAlgo"));

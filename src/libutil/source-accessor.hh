@@ -4,6 +4,7 @@
 
 #include "canon-path.hh"
 #include "hash.hh"
+#include "ref.hh"
 
 namespace nix {
 
@@ -87,12 +88,13 @@ struct SourceAccessor : std::enable_shared_from_this<SourceAccessor>
 
         Unlike `DT_UNKNOWN`, this must not be used for deferring the lookup of types.
       */
-      tMisc
+      tChar, tBlock, tSocket, tFifo,
+      tUnknown
     };
 
     struct Stat
     {
-        Type type = tMisc;
+        Type type = tUnknown;
 
         /**
          * For regular files only: the size of the file. Not all
@@ -111,6 +113,9 @@ struct SourceAccessor : std::enable_shared_from_this<SourceAccessor>
          * file in the NAR. Only returned by NAR accessors.
          */
         std::optional<uint64_t> narOffset;
+
+        bool isNotNARSerialisable();
+        std::string typeString();
     };
 
     Stat lstat(const CanonPath & path);
@@ -151,9 +156,9 @@ struct SourceAccessor : std::enable_shared_from_this<SourceAccessor>
         return number == x.number;
     }
 
-    bool operator < (const SourceAccessor & x) const
+    auto operator <=> (const SourceAccessor & x) const
     {
-        return number < x.number;
+        return number <=> x.number;
     }
 
     void setPathDisplay(std::string displayPrefix, std::string displaySuffix = "");
@@ -208,5 +213,13 @@ ref<SourceAccessor> getFSSourceAccessor();
  * `root`.
  */
 ref<SourceAccessor> makeFSSourceAccessor(std::filesystem::path root);
+
+ref<SourceAccessor> makeMountedSourceAccessor(std::map<CanonPath, ref<SourceAccessor>> mounts);
+
+/**
+ * Construct an accessor that presents a "union" view of a vector of
+ * underlying accessors. Earlier accessors take precedence over later.
+ */
+ref<SourceAccessor> makeUnionSourceAccessor(std::vector<ref<SourceAccessor>> && accessors);
 
 }

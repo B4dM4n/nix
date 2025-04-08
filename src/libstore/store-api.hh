@@ -18,14 +18,10 @@
 
 #include <nlohmann/json_fwd.hpp>
 #include <atomic>
-#include <limits>
 #include <map>
-#include <unordered_map>
-#include <unordered_set>
 #include <memory>
 #include <string>
 #include <chrono>
-#include <variant>
 
 
 namespace nix {
@@ -205,7 +201,7 @@ protected:
         LRUCache<std::string, PathInfoCacheValue> pathInfoCache;
     };
 
-    Sync<State> state;
+    SharedSync<State> state;
 
     std::shared_ptr<NarInfoDiskCache> diskCache;
 
@@ -220,6 +216,10 @@ public:
 
     virtual ~Store() { }
 
+    /**
+     * @todo move to `StoreConfig` one we store enough information in
+     * those to recover the scheme and authority in all cases.
+     */
     virtual std::string getUri() = 0;
 
     /**
@@ -260,11 +260,11 @@ public:
 
     /**
      * Query the set of all valid paths. Note that for some store
-     * backends, the name part of store paths may be replaced by 'x'
-     * (i.e. you'll get /nix/store/<hash>-x rather than
-     * /nix/store/<hash>-<name>). Use queryPathInfo() to obtain the
+     * backends, the name part of store paths may be replaced by `x`
+     * (i.e. you'll get `/nix/store/<hash>-x` rather than
+     * `/nix/store/<hash>-<name>`). Use queryPathInfo() to obtain the
      * full store path. FIXME: should return a set of
-     * std::variant<StorePath, HashPart> to get rid of this hack.
+     * `std::variant<StorePath, HashPart>` to get rid of this hack.
      */
     virtual StorePathSet queryAllValidPaths()
     { unsupported("queryAllValidPaths"); }
@@ -425,7 +425,7 @@ public:
         CheckSigsFlag checkSigs = CheckSigs);
 
     virtual void addMultipleToStore(
-        PathsSource & pathsToCopy,
+        PathsSource && pathsToCopy,
         Activity & act,
         RepairFlag repair = NoRepair,
         CheckSigsFlag checkSigs = CheckSigs);
@@ -441,7 +441,7 @@ public:
     virtual StorePath addToStore(
         std::string_view name,
         const SourcePath & path,
-        ContentAddressMethod method = FileIngestionMethod::Recursive,
+        ContentAddressMethod method = ContentAddressMethod::Raw::NixArchive,
         HashAlgorithm hashAlgo = HashAlgorithm::SHA256,
         const StorePathSet & references = StorePathSet(),
         PathFilter & filter = defaultPathFilter,
@@ -455,7 +455,7 @@ public:
     ValidPathInfo addToStoreSlow(
         std::string_view name,
         const SourcePath & path,
-        ContentAddressMethod method = FileIngestionMethod::Recursive,
+        ContentAddressMethod method = ContentAddressMethod::Raw::NixArchive,
         HashAlgorithm hashAlgo = HashAlgorithm::SHA256,
         const StorePathSet & references = StorePathSet(),
         std::optional<Hash> expectedCAHash = {});
@@ -470,7 +470,7 @@ public:
      *
      * @param dumpMethod What serialisation format is `dump`, i.e. how
      * to deserialize it. Must either match hashMethod or be
-     * `FileSerialisationMethod::Recursive`.
+     * `FileSerialisationMethod::NixArchive`.
      *
      * @param hashMethod How content addressing? Need not match be the
      * same as `dumpMethod`.
@@ -480,8 +480,8 @@ public:
     virtual StorePath addToStoreFromDump(
         Source & dump,
         std::string_view name,
-        FileSerialisationMethod dumpMethod = FileSerialisationMethod::Recursive,
-        ContentAddressMethod hashMethod = FileIngestionMethod::Recursive,
+        FileSerialisationMethod dumpMethod = FileSerialisationMethod::NixArchive,
+        ContentAddressMethod hashMethod = ContentAddressMethod::Raw::NixArchive,
         HashAlgorithm hashAlgo = HashAlgorithm::SHA256,
         const StorePathSet & references = StorePathSet(),
         RepairFlag repair = NoRepair) = 0;
@@ -715,7 +715,7 @@ public:
 
     /**
      * Given a store path, return the realisation actually used in the realisation of this path:
-     * - If the path is a content-addressed derivation, try to resolve it
+     * - If the path is a content-addressing derivation, try to resolve it
      * - Otherwise, find one of its derivers
      */
     std::optional<StorePath> getBuildDerivationPath(const StorePath &);
@@ -901,7 +901,7 @@ struct Implementations
     {
         if (!registered) registered = new std::vector<StoreFactory>();
         StoreFactory factory{
-            .uriSchemes = T::uriSchemes(),
+            .uriSchemes = TConfig::uriSchemes(),
             .create =
                 ([](auto scheme, auto uri, auto & params)
                  -> std::shared_ptr<Store>

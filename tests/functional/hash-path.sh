@@ -3,7 +3,7 @@
 source common.sh
 
 try () {
-    printf "%s" "$2" > $TEST_ROOT/vector
+    printf "%s" "$2" > "$TEST_ROOT/vector"
     hash="$(nix-hash --flat ${FORMAT+--$FORMAT} --type "$1" "$TEST_ROOT/vector")"
     if ! (( "${NO_TEST_CLASSIC-}" )) && test "$hash" != "$3"; then
         echo "try nix-hash: hash $1, expected $3, got $hash"
@@ -61,7 +61,7 @@ NO_TEST_NIX_COMMAND=1 try sha512 "abc" "ddaf35a193617abacc417349ae20413112e6fa4e
 NO_TEST_CLASSIC=1 try sha512 "abc" "sha512-3a81oZNherrMQXNJriBBMRLm+k6JqX6iCp7u5ktV05ohkpkqJ0/BqDa6PCOj/uu9RU1EI2Q86A4qmslPpUyknw=="
 
 try2 () {
-    hash=$(nix-hash --type "$1" $TEST_ROOT/hash-path)
+    hash=$(nix-hash --type "$1" "$TEST_ROOT/hash-path")
     if test "$hash" != "$2"; then
         echo "try nix-hash; hash $1, expected $2, got $hash"
         exit 1
@@ -73,22 +73,51 @@ try2 () {
     fi
 }
 
-rm -rf $TEST_ROOT/hash-path
-mkdir $TEST_ROOT/hash-path
-echo "Hello World" > $TEST_ROOT/hash-path/hello
+rm -rf "$TEST_ROOT/hash-path"
+mkdir "$TEST_ROOT/hash-path"
+echo "Hello World" > "$TEST_ROOT/hash-path/hello"
 
 try2 md5 "ea9b55537dd4c7e104515b2ccfaf4100"
 
 # Execute bit matters.
-chmod +x $TEST_ROOT/hash-path/hello
+chmod +x "$TEST_ROOT/hash-path/hello"
 try2 md5 "20f3ffe011d4cfa7d72bfabef7882836"
 
 # Mtime and other bits don't.
-touch -r . $TEST_ROOT/hash-path/hello
-chmod 744 $TEST_ROOT/hash-path/hello
+touch -r . "$TEST_ROOT/hash-path/hello"
+chmod 744 "$TEST_ROOT/hash-path/hello"
 try2 md5 "20f3ffe011d4cfa7d72bfabef7882836"
 
 # File type (e.g., symlink) does.
-rm $TEST_ROOT/hash-path/hello
-ln -s x $TEST_ROOT/hash-path/hello
+rm "$TEST_ROOT/hash-path/hello"
+ln -s x "$TEST_ROOT/hash-path/hello"
 try2 md5 "f78b733a68f5edbdf9413899339eaa4a"
+
+# Flat mode supports process substitution
+h=$(nix hash path --mode flat --type sha256 --base32 <(printf "SMASH THE STATE"))
+[[ 0d9n3r2i4m1zgy0wpqbsyabsfzgs952066bfp8gwvcg4mkr4r5g8 == "$h" ]]
+
+# Flat mode supports process substitution (hash file)
+h=$(nix hash file --type sha256 --base32 <(printf "SMASH THE STATE"))
+[[ 0d9n3r2i4m1zgy0wpqbsyabsfzgs952066bfp8gwvcg4mkr4r5g8 == "$h" ]]
+
+# Symlinks in the ancestry are ok and don't affect the result
+mkdir -p "$TEST_ROOT/simple" "$TEST_ROOT/try/to/mess/with/it"
+echo hi > "$TEST_ROOT/simple/hi"
+ln -s "$TEST_ROOT/simple" "$TEST_ROOT/try/to/mess/with/it/simple-link"
+h=$(nix hash path --type sha256 --base32 "$TEST_ROOT/simple/hi")
+[[ 1xmr8jicvzszfzpz46g37mlpvbzjl2wpwvl2b05psipssyp1sm8h == "$h" ]]
+h=$(nix hash path --type sha256 --base32 "$TEST_ROOT/try/to/mess/with/it/simple-link/hi")
+[[ 1xmr8jicvzszfzpz46g37mlpvbzjl2wpwvl2b05psipssyp1sm8h == "$h" ]]
+
+# nix hash --mode nar does not canonicalize a symlink argument.
+#   Otherwise it can't generate a NAR whose root is a symlink.
+#   If you want to follow the symlink, pass $(realpath -s ...) instead.
+ln -s /non-existent-48cujwe8ndf4as0bne "$TEST_ROOT/symlink-to-nowhere"
+h=$(nix hash path --mode nar --type sha256 --base32 "$TEST_ROOT/symlink-to-nowhere")
+[[ 1bl5ry3x1fcbwgr5c2x50bn572iixh4j1p6ax5isxly2ddgn8pbp == "$h" ]]  # manually verified hash
+if [[ -e /bin ]]; then
+    ln -s /bin "$TEST_ROOT/symlink-to-bin"
+    h=$(nix hash path --mode nar --type sha256 --base32 "$TEST_ROOT/symlink-to-bin")
+    [[ 0z2mdmkd43l0ijdxfbj1y8vzli15yh9b09n3a3rrygmjshbyypsw == "$h" ]] # manually verified hash
+fi

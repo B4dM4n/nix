@@ -2,6 +2,7 @@
 ///@file
 
 #include "parsed-derivations.hh"
+#include "derivation-options.hh"
 #ifndef _WIN32
 #  include "user-lock.hh"
 #endif
@@ -56,6 +57,10 @@ struct InitialOutput {
 
 /**
  * A goal for building some or all of the outputs of a derivation.
+ *
+ * The derivation must already be present, either in the store in a drv
+ * or in memory. If the derivation itself needs to be gotten first, a
+ * `DerivationCreationAndRealisationGoal` goal must be used instead.
  */
 struct DerivationGoal : public Goal
 {
@@ -80,7 +85,7 @@ struct DerivationGoal : public Goal
     /**
      * Mapping from input derivations + output names to actual store
      * paths. This is filled in by waiteeDone() as each dependency
-     * finishes, before inputsRealised() is reached.
+     * finishes, before `trace("all inputs realised")` is reached.
      */
     std::map<std::pair<StorePath, std::string>, StorePath> inputDrvOutputs;
 
@@ -143,6 +148,7 @@ struct DerivationGoal : public Goal
     std::unique_ptr<Derivation> drv;
 
     std::unique_ptr<ParsedDerivation> parsedDrv;
+    std::unique_ptr<DerivationOptions> drvOptions;
 
     /**
      * The remainder is state held during the build.
@@ -194,9 +200,6 @@ struct DerivationGoal : public Goal
      */
     std::optional<DerivationType> derivationType;
 
-    typedef void (DerivationGoal::*GoalState)();
-    GoalState state;
-
     BuildMode buildMode;
 
     std::unique_ptr<MaintainCount<uint64_t>> mcExpectedBuilds, mcRunningBuilds;
@@ -229,8 +232,6 @@ struct DerivationGoal : public Goal
 
     std::string key() override;
 
-    void work() override;
-
     /**
      * Add wanted outputs to an already existing derivation goal.
      */
@@ -239,18 +240,14 @@ struct DerivationGoal : public Goal
     /**
      * The states.
      */
-    void getDerivation();
-    void loadDerivation();
-    void haveDerivation();
-    void outputsSubstitutionTried();
-    void gaveUpOnSubstitution();
-    void closureRepaired();
-    void inputsRealised();
-    void tryToBuild();
-    virtual void tryLocalBuild();
-    void buildDone();
+    Co init() override;
+    Co haveDerivation();
+    Co gaveUpOnSubstitution();
+    Co tryToBuild();
+    virtual Co tryLocalBuild();
+    Co buildDone();
 
-    void resolvedFinished();
+    Co resolvedFinished();
 
     /**
      * Is the build hook willing to perform the build?
@@ -331,11 +328,11 @@ struct DerivationGoal : public Goal
      */
     virtual void killChild();
 
-    void repairClosure();
+    Co repairClosure();
 
     void started();
 
-    void done(
+    Done done(
         BuildResult::Status status,
         SingleDrvOutputs builtOutputs = {},
         std::optional<Error> ex = {});

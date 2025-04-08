@@ -4,6 +4,8 @@ source common.sh
 
 needLocalStore "“min-free” and “max-free” are daemon options"
 
+TODO_NixOS
+
 clearStore
 
 garbage1=$(nix store add-path --name garbage1 ./nar-access.sh)
@@ -21,7 +23,7 @@ fifoLock=$TEST_ROOT/fifoLock
 mkfifo "$fifoLock"
 
 expr=$(cat <<EOF
-with import ./config.nix; mkDerivation {
+with import ${config_nix}; mkDerivation {
   name = "gc-A";
   buildCommand = ''
     set -x
@@ -49,7 +51,7 @@ EOF
 )
 
 expr2=$(cat <<EOF
-with import ./config.nix; mkDerivation {
+with import ${config_nix}; mkDerivation {
   name = "gc-B";
   buildCommand = ''
     set -x

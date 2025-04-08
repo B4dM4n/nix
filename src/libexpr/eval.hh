@@ -9,14 +9,15 @@
 #include "symbol-table.hh"
 #include "config.hh"
 #include "experimental-features.hh"
+#include "position.hh"
+#include "pos-table.hh"
 #include "source-accessor.hh"
 #include "search-path.hh"
 #include "repl-exit-status.hh"
+#include "ref.hh"
 
 #include <map>
 #include <optional>
-#include <unordered_map>
-#include <mutex>
 #include <functional>
 
 namespace nix {
@@ -29,6 +30,8 @@ namespace nix {
 constexpr size_t maxPrimOpArity = 8;
 
 class Store;
+namespace fetchers { struct Settings; }
+struct EvalSettings;
 class EvalState;
 class StorePath;
 struct SingleDerivedPath;
@@ -38,11 +41,25 @@ namespace eval_cache {
     class EvalCache;
 }
 
+/**
+ * Increments a count on construction and decrements on destruction.
+ */
+class CallDepth {
+  size_t & count;
+
+public:
+  CallDepth(size_t & count) : count(count) {
+    ++count;
+  }
+  ~CallDepth() {
+    --count;
+  }
+};
 
 /**
  * Function that implements a primop.
  */
-typedef void (* PrimOpFun) (EvalState & state, const PosIdx pos, Value * * args, Value & v);
+using PrimOpFun = void(EvalState & state, const PosIdx pos, Value * * args, Value & v);
 
 /**
  * Info about a primitive operation, and its implementation
@@ -74,7 +91,7 @@ struct PrimOp
     const char * doc = nullptr;
 
     /**
-     * Add a trace item, `while calling the '<name>' builtin`
+     * Add a trace item, while calling the `<name>` builtin.
      *
      * This is used to remove the redundant item for `builtins.addErrorContext`.
      */
@@ -83,12 +100,17 @@ struct PrimOp
     /**
      * Implementation of the primop.
      */
-    std::function<std::remove_pointer<PrimOpFun>::type> fun;
+    std::function<PrimOpFun> fun;
 
     /**
      * Optional experimental for this to be gated on.
      */
     std::optional<ExperimentalFeature> experimentalFeature;
+
+    /**
+     * If true, this primop is not exposed to the user.
+     */
+    bool internal = false;
 
     /**
      * Validity check to be performed by functions that introduce primops,
@@ -122,11 +144,9 @@ struct Constant
     bool impureOnly = false;
 };
 
-#if HAVE_BOEHMGC
-    typedef std::map<std::string, Value *, std::less<std::string>, traceable_allocator<std::pair<const std::string, Value *> > > ValMap;
-#else
-    typedef std::map<std::string, Value *> ValMap;
-#endif
+typedef std::map<std::string, Value *, std::less<std::string>, traceable_allocator<std::pair<const std::string, Value *> > > ValMap;
+
+typedef std::unordered_map<PosIdx, DocComment> DocCommentMap;
 
 struct Env
 {
@@ -146,12 +166,6 @@ std::string printValue(EvalState & state, Value & v);
 std::ostream & operator << (std::ostream & os, const ValueType t);
 
 
-/**
- * Initialise the Boehm GC, if applicable.
- */
-void initGC();
-
-
 struct RegexCache;
 
 std::shared_ptr<RegexCache> makeRegexCache();
@@ -167,13 +181,18 @@ struct DebugTrace {
 class EvalState : public std::enable_shared_from_this<EvalState>
 {
 public:
+    const fetchers::Settings & fetchSettings;
+    const EvalSettings & settings;
     SymbolTable symbols;
     PosTable positions;
 
     const Symbol sWith, sOutPath, sDrvPath, sType, sMeta, sName, sValue,
         sSystem, sOverrides, sOutputs, sOutputName, sIgnoreNulls,
         sFile, sLine, sColumn, sFunctor, sToString,
-        sRight, sWrong, sStructuredAttrs, sBuilder, sArgs,
+        sRight, sWrong, sStructuredAttrs,
+        sAllowedReferences, sAllowedRequisites, sDisallowedReferences, sDisallowedRequisites,
+        sMaxSize, sMaxClosureSize,
+        sBuilder, sArgs,
         sContentAddressed, sImpure,
         sOutputHash, sOutputHashAlgo, sOutputHashMode,
         sRecurseForDerivations,
@@ -306,31 +325,29 @@ private:
 
     /* Cache for calls to addToStore(); maps source paths to the store
        paths. */
-    std::map<SourcePath, StorePath> srcToStore;
+    Sync<std::unordered_map<SourcePath, StorePath>> srcToStore;
 
     /**
      * A cache from path names to parse trees.
      */
-#if HAVE_BOEHMGC
-    typedef std::map<SourcePath, Expr *, std::less<SourcePath>, traceable_allocator<std::pair<const SourcePath, Expr *>>> FileParseCache;
-#else
-    typedef std::map<SourcePath, Expr *> FileParseCache;
-#endif
+    typedef std::unordered_map<SourcePath, Expr *, std::hash<SourcePath>, std::equal_to<SourcePath>, traceable_allocator<std::pair<const SourcePath, Expr *>>> FileParseCache;
     FileParseCache fileParseCache;
 
     /**
      * A cache from path names to values.
      */
-#if HAVE_BOEHMGC
-    typedef std::map<SourcePath, Value, std::less<SourcePath>, traceable_allocator<std::pair<const SourcePath, Value>>> FileEvalCache;
-#else
-    typedef std::map<SourcePath, Value> FileEvalCache;
-#endif
+    typedef std::unordered_map<SourcePath, Value, std::hash<SourcePath>, std::equal_to<SourcePath>, traceable_allocator<std::pair<const SourcePath, Value>>> FileEvalCache;
     FileEvalCache fileEvalCache;
+
+    /**
+     * Associate source positions of certain AST nodes with their preceding doc comment, if they have one.
+     * Grouped by file.
+     */
+    std::unordered_map<SourcePath, DocCommentMap> positionToDocComment;
 
     LookupPath lookupPath;
 
-    std::map<std::string, std::optional<std::string>> lookupPathResolved;
+    std::map<std::string, std::optional<SourcePath>> lookupPathResolved;
 
     /**
      * Cache used by prim_match().
@@ -354,6 +371,8 @@ public:
     EvalState(
         const LookupPath & _lookupPath,
         ref<Store> store,
+        const fetchers::Settings & fetchSettings,
+        const EvalSettings & settings,
         std::shared_ptr<Store> buildStore = nullptr);
     ~EvalState();
 
@@ -371,6 +390,15 @@ public:
     SourcePath rootPath(PathView path);
 
     /**
+     * Return a `SourcePath` that refers to `path` in the store.
+     *
+     * For now, this has to also be within the root filesystem for
+     * backwards compat, but for Windows and maybe also pure eval, we'll
+     * probably want to do something different.
+     */
+    SourcePath storePath(const StorePath & path);
+
+    /**
      * Allow access to a path.
      */
     void allowPath(const Path & path);
@@ -382,22 +410,16 @@ public:
     void allowPath(const StorePath & storePath);
 
     /**
+     * Allow access to the closure of a store path.
+     */
+    void allowClosure(const StorePath & storePath);
+
+    /**
      * Allow access to a store path and return it as a string.
      */
     void allowAndSetStorePathString(const StorePath & storePath, Value & v);
 
     void checkURI(const std::string & uri);
-
-    /**
-     * When using a diverted store and 'path' is in the Nix store, map
-     * 'path' to the diverted location (e.g. /nix/store/foo is mapped
-     * to /home/alice/my-nix/nix/store/foo). However, this is only
-     * done if the context is not empty, since otherwise we're
-     * probably trying to read from the actual /nix/store. This is
-     * intended to distinguish between import-from-derivation and
-     * sources stored in the actual /nix/store.
-     */
-    Path toRealPath(const Path & path, const NixStringContext & context);
 
     /**
      * Parse a Nix expression from the specified file.
@@ -433,9 +455,9 @@ public:
      *
      * If the specified search path element is a URI, download it.
      *
-     * If it is not found, return `std::nullopt`
+     * If it is not found, return `std::nullopt`.
      */
-    std::optional<std::string> resolveLookupPathPath(
+    std::optional<SourcePath> resolveLookupPathPath(
         const LookupPath::Path & elem,
         bool initAccessControl = false);
 
@@ -578,6 +600,11 @@ public:
     std::shared_ptr<StaticEnv> staticBaseEnv; // !!! should be private
 
     /**
+     * Internal primops not exposed to the user.
+     */
+    std::unordered_map<std::string, Value *, std::hash<std::string>, std::equal_to<std::string>, traceable_allocator<std::pair<const std::string, Value *>>> internalPrimOps;
+
+    /**
      * Name and documentation about every constant.
      *
      * Constants from primops are hard to crawl, and their docs will go
@@ -599,7 +626,18 @@ private:
 
 public:
 
+    /**
+     * Retrieve a specific builtin, equivalent to evaluating `builtins.${name}`.
+     * @param name The attribute name of the builtin to retrieve.
+     * @throws EvalError if the builtin does not exist.
+     */
     Value & getBuiltin(const std::string & name);
+
+    /**
+     * Retrieve the `builtins` attrset, equivalent to evaluating the reference `builtins`.
+     * Always returns an attribute set value.
+     */
+    Value & getBuiltins();
 
     struct Doc
     {
@@ -614,6 +652,12 @@ public:
         const char * doc;
     };
 
+    /**
+     * Retrieve the documentation for a value. This will evaluate the value if
+     * it is a thunk, and it will partially apply __functor if applicable.
+     *
+     * @param v The value to get the documentation for.
+     */
     std::optional<Doc> getDoc(Value & v);
 
 private:
@@ -639,27 +683,40 @@ private:
 public:
 
     /**
+     * Check that the call depth is within limits, and increment it, until the returned object is destroyed.
+     */
+    inline CallDepth addCallDepth(const PosIdx pos);
+
+    /**
      * Do a deep equality test between two values.  That is, list
      * elements and attributes are compared recursively.
      */
     bool eqValues(Value & v1, Value & v2, const PosIdx pos, std::string_view errorCtx);
 
+    /**
+     * Like `eqValues`, but throws an `AssertionError` if not equal.
+     *
+     * WARNING:
+     * Callers should call `eqValues` first and report if `assertEqValues` behaves
+     * incorrectly. (e.g. if it doesn't throw if eqValues returns false or vice versa)
+     */
+    void assertEqValues(Value & v1, Value & v2, const PosIdx pos, std::string_view errorCtx);
+
     bool isFunctor(Value & fun);
 
-    // FIXME: use std::span
-    void callFunction(Value & fun, size_t nrArgs, Value * * args, Value & vRes, const PosIdx pos);
+    void callFunction(Value & fun, std::span<Value *> args, Value & vRes, const PosIdx pos);
 
     void callFunction(Value & fun, Value & arg, Value & vRes, const PosIdx pos)
     {
         Value * args[] = {&arg};
-        callFunction(fun, 1, args, vRes, pos);
+        callFunction(fun, args, vRes, pos);
     }
 
     /**
      * Automatically call a function for which each argument has a
      * default value or has a binding in the `args` map.
      */
-    void autoCallFunction(Bindings & args, Value & fun, Value & res);
+    void autoCallFunction(const Bindings & args, Value & fun, Value & res);
 
     /**
      * Allocation primitives.
@@ -761,12 +818,22 @@ public:
      */
     [[nodiscard]] StringMap realiseContext(const NixStringContext & context, StorePathSet * maybePaths = nullptr, bool isIFD = true);
 
+    /**
+     * Realise the given string with context, and return the string with outputs instead of downstream output placeholders.
+     * @param[in] str the string to realise
+     * @param[out] paths all referenced store paths will be added to this set
+     * @return the realised string
+     * @throw EvalError if the value is not a string, path or derivation (see `coerceToString`)
+     */
+    std::string realiseString(Value & str, StorePathSet * storePathsOutMaybe, bool isIFD = true, const PosIdx pos = noPos);
+
     /* Call the binary path filter predicate used builtins.path etc. */
     bool callPathFilter(
         Value * filterFun,
         const SourcePath & path,
-        std::string_view pathArg,
         PosIdx pos);
+
+    DocComment getDocCommentForPos(PosIdx pos);
 
 private:
 
@@ -850,8 +917,10 @@ std::string showType(const Value & v);
 
 /**
  * If `path` refers to a directory, then append "/default.nix".
+ *
+ * @param addDefaultNix Whether to append "/default.nix" after resolving symlinks.
  */
-SourcePath resolveExprPath(SourcePath path);
+SourcePath resolveExprPath(SourcePath path, bool addDefaultNix = true);
 
 /**
  * Whether a URI is allowed, assuming restrictEval is enabled

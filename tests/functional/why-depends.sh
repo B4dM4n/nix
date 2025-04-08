@@ -2,9 +2,9 @@
 
 source common.sh
 
-clearStore
+clearStoreIfPossible
 
-cp ./dependencies.nix ./dependencies.builder0.sh ./config.nix $TEST_HOME
+cp ./dependencies.nix ./dependencies.builder0.sh "${config_nix}" $TEST_HOME
 
 cd $TEST_HOME
 

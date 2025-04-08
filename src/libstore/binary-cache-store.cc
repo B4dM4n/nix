@@ -39,15 +39,13 @@ BinaryCacheStore::BinaryCacheStore(const Params & params)
 
 void BinaryCacheStore::init()
 {
-    std::string cacheInfoFile = "nix-cache-info";
-
-    auto cacheInfo = getFile(cacheInfoFile);
+    auto cacheInfo = getNixCacheInfo();
     if (!cacheInfo) {
         upsertFile(cacheInfoFile, "StoreDir: " + storeDir + "\n", "text/x-nix-cache-info");
     } else {
         for (auto & line : tokenizeString<Strings>(*cacheInfo, "\n")) {
-            size_t colon= line.find(':');
-            if (colon ==std::string::npos) continue;
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
             auto name = line.substr(0, colon);
             auto value = trim(line.substr(colon + 1, std::string::npos));
             if (name == "StoreDir") {
@@ -61,6 +59,11 @@ void BinaryCacheStore::init()
             }
         }
     }
+}
+
+std::optional<std::string> BinaryCacheStore::getNixCacheInfo()
+{
+    return getFile(cacheInfoFile);
 }
 
 void BinaryCacheStore::upsertFile(const std::string & path,
@@ -322,7 +325,7 @@ StorePath BinaryCacheStore::addToStoreFromDump(
         if (static_cast<FileIngestionMethod>(dumpMethod) == hashMethod.getFileIngestionMethod())
             caHash = hashString(HashAlgorithm::SHA256, dump2.s);
         switch (dumpMethod) {
-        case FileSerialisationMethod::Recursive:
+        case FileSerialisationMethod::NixArchive:
             // The dump is already NAR in this case, just use it.
             nar = dump2.s;
             break;
@@ -339,7 +342,7 @@ StorePath BinaryCacheStore::addToStoreFromDump(
     } else {
         // Otherwise, we have to do th same hashing as NAR so our single
         // hash will suffice for both purposes.
-        if (dumpMethod != FileSerialisationMethod::Recursive || hashAlgo != HashAlgorithm::SHA256)
+        if (dumpMethod != FileSerialisationMethod::NixArchive || hashAlgo != HashAlgorithm::SHA256)
             unsupported("addToStoreFromDump");
     }
     StringSource narDump { nar };
