@@ -41,7 +41,10 @@ let
           overrides.${key}.sourceInfo
         else
           # FIXME: remove obsolete node.info.
-          fetchTree (node.info or { } // removeAttrs node.locked [ "dir" ]);
+          fetchTree (node.info or { } // removeAttrs node.locked [ "dir" ])
+          // {
+            inherit (node) locked;
+          };
 
       subdir = overrides.${key}.dir or node.locked.dir or "";
 
@@ -62,7 +65,7 @@ let
         # sourceInfo does not necessarily match the outPath of the flake,
         # as the flake may be in a subdirectory of a source.
         # This is shadowed in the next //
-        // sourceInfo
+        // removeAttrs sourceInfo [ "locked" ]
         // {
           # This shadows the sourceInfo.outPath
           inherit outPath;
