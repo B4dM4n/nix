@@ -82,7 +82,8 @@ let
           inherit outputs;
           inherit sourceInfo;
           _type = "flake";
-        };
+        }
+        // (if key == lockFile.root then { inherit lockFile; } else { });
 
     in
     if node.flake or true then
