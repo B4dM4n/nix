@@ -19,6 +19,7 @@
 #include "nix/util/url.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/tarball.hh"
+#include "nix/fetchers/input-cache.hh"
 
 #include "parser-tab.hh"
 
@@ -246,6 +247,30 @@ EvalState::EvalState(
     }
     , repair(NoRepair)
     , emptyBindings(0)
+    , storeFS(
+        makeMountedSourceAccessor(
+            {
+                {CanonPath::root, makeEmptySourceAccessor()},
+                /* In the pure eval case, we can simply require
+                   valid paths. However, in the *impure* eval
+                   case this gets in the way of the union
+                   mechanism, because an invalid access in the
+                   upper layer will *not* be caught by the union
+                   source accessor, but instead abort the entire
+                   lookup.
+
+                   This happens when the store dir in the
+                   ambient file system has a path (e.g. because
+                   another Nix store there), but the relocated
+                   store does not.
+
+                   TODO make the various source accessors doing
+                   access control all throw the same type of
+                   exception, and make union source accessor
+                   catch it, so we don't need to do this hack.
+                 */
+                {CanonPath(store->storeDir), store->getFSAccessor(settings.pureEval)},
+            }))
     , rootFS(
         ({
             /* In pure eval mode, we provide a filesystem that only
@@ -261,11 +286,6 @@ EvalState::EvalState(
 
             auto realStoreDir = dirOf(store->toRealPath(StorePath::dummy));
             if (settings.pureEval || store->storeDir != realStoreDir) {
-                auto storeFS = makeMountedSourceAccessor(
-                    {
-                        {CanonPath::root, makeEmptySourceAccessor()},
-                        {CanonPath(store->storeDir), makeFSSourceAccessor(realStoreDir)}
-                    });
                 accessor = settings.pureEval
                     ? storeFS
                     : makeUnionSourceAccessor({accessor, storeFS});
@@ -291,6 +311,7 @@ EvalState::EvalState(
     )}
     , store(store)
     , buildStore(buildStore ? buildStore : store)
+    , inputCache(fetchers::InputCache::create())
     , debugRepl(nullptr)
     , debugStop(false)
     , trylevel(0)
@@ -1133,6 +1154,7 @@ void EvalState::resetFileCache()
 {
     fileEvalCache.clear();
     fileParseCache.clear();
+    inputCache->clear();
 }
 
 
@@ -1424,7 +1446,7 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             } else {
                 state.forceAttrs(*vAttrs, pos, "while selecting an attribute");
                 if (!(j = vAttrs->attrs()->get(name))) {
-                    std::set<std::string> allAttrNames;
+                    StringSet allAttrNames;
                     for (auto & attr : *vAttrs->attrs())
                         allAttrNames.insert(std::string(state.symbols[attr.name]));
                     auto suggestions = Suggestions::bestMatches(allAttrNames, state.symbols[name]);
@@ -1581,7 +1603,7 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                        user. */
                     for (auto & i : *args[0]->attrs())
                         if (!lambda.formals->has(i.name)) {
-                            std::set<std::string> formalNames;
+                            StringSet formalNames;
                             for (auto & formal : lambda.formals->formals)
                                 formalNames.insert(std::string(symbols[formal.name]));
                             auto suggestions = Suggestions::bestMatches(formalNames, symbols[i.name]);

@@ -25,7 +25,7 @@ struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
         unsigned int def,
         const std::string & name,
         const std::string & description,
-        const std::set<std::string> & aliases = {})
+        const StringSet & aliases = {})
         : BaseSetting<unsigned int>(def, true, name, description, aliases)
     {
         options->addSetting(this);
@@ -43,7 +43,7 @@ struct DerivationGroupsSetting : public BaseSetting<Strings>
         const Strings & def,
         const std::string & name,
         const std::string & description,
-        const std::set<std::string> & aliases = {})
+        const StringSet & aliases = {})
         : BaseSetting<Strings>(def, true, name, description, aliases)
     {
         options->addSetting(this);
@@ -53,7 +53,7 @@ struct DerivationGroupsSetting : public BaseSetting<Strings>
 };
 
 const uint32_t maxIdsPerBuild =
-    #if __linux__
+    #ifdef __linux__
     1 << 16
     #else
     1
@@ -486,7 +486,7 @@ public:
         )", {}, true, Xp::AutoAllocateUids};
 
     Setting<uint32_t> startId{this,
-        #if __linux__
+        #ifdef __linux__
         0x34000000,
         #else
         56930,
@@ -495,7 +495,7 @@ public:
         "The first UID and GID to use for dynamic ID allocation."};
 
     Setting<uint32_t> uidCount{this,
-        #if __linux__
+        #ifdef __linux__
         maxIdsPerBuild * 128,
         #else
         128,
@@ -503,7 +503,7 @@ public:
         "id-count",
         "The number of UIDs/GIDs to use for dynamic ID allocation."};
 
-    #if __linux__
+    #ifdef __linux__
     Setting<bool> useCgroups{
         this, false, "use-cgroups",
         R"(
@@ -615,7 +615,7 @@ public:
 
     Setting<SandboxMode> sandboxMode{
         this,
-        #if __linux__
+        #ifdef __linux__
           smEnabled
         #else
           smDisabled
@@ -690,7 +690,7 @@ public:
         )"};
 #endif
 
-#if __linux__
+#ifdef __linux__
     Setting<std::string> sandboxShmSize{
         this, "50%", "sandbox-dev-shm-size",
         R"(
@@ -727,7 +727,7 @@ public:
     Setting<PathSet> allowedImpureHostPrefixes{this, {}, "allowed-impure-host-deps",
         "Which prefixes to allow derivations to ask for access to (primarily for Darwin)."};
 
-#if __APPLE__
+#ifdef __APPLE__
     Setting<bool> darwinLogSandboxViolations{this, false, "darwin-log-sandbox-violations",
         "Whether to log Darwin sandbox access violations to the system log."};
 #endif
@@ -1085,7 +1085,7 @@ public:
         // Don't document the machine-specific default value
         false};
 
-#if __linux__
+#ifdef __linux__
     Setting<bool> filterSyscalls{
         this, true, "filter-syscalls",
         R"(

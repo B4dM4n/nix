@@ -179,7 +179,7 @@ public:
         using ptr = std::shared_ptr<Flag>;
 
         std::string longName;
-        std::set<std::string> aliases;
+        StringSet aliases;
         char shortName = 0;
         std::string description;
         std::string category;
@@ -263,7 +263,7 @@ protected:
     virtual Strings::iterator rewriteArgs(Strings & args, Strings::iterator pos)
     { return pos; }
 
-    std::set<std::string> hiddenCategories;
+    StringSet hiddenCategories;
 
     /**
      * Called after all command line flags before the first non-flag
@@ -393,8 +393,30 @@ public:
 
     nlohmann::json toJSON() override;
 
+    enum struct AliasStatus {
+        /** Aliases that don't go away */
+        AcceptedShorthand,
+        /** Aliases that will go away */
+        Deprecated,
+    };
+
+    /** An alias, except for the original syntax, which is in the map key. */
+    struct AliasInfo {
+        AliasStatus status;
+        std::vector<std::string> replacement;
+    };
+
+    /**
+     * A list of aliases (remapping a deprecated/shorthand subcommand
+     * to something else).
+     */
+    std::map<std::string, AliasInfo> aliases;
+
+    Strings::iterator rewriteArgs(Strings & args, Strings::iterator pos) override;
+
 protected:
     std::string commandName = "";
+    bool aliasUsed = false;
 };
 
 Strings argvToStrings(int argc, char * * argv);

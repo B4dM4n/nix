@@ -67,7 +67,7 @@ subdir('source/release-notes')
 subdir('source')
 
 # Hacky way to figure out if `nix` is an `ExternalProgram` or
-# `Exectuable`. Only the latter can occur in custom target input lists.
+# `Executable`. Only the latter can occur in custom target input lists.
 if nix.full_path().startswith(meson.build_root())
   nix_input = nix
 else
@@ -281,7 +281,6 @@ nix3_manpages = [
   'nix3-store',
   'nix3-store-optimise',
   'nix3-store-path-from-hash-part',
-  'nix3-store-ping',
   'nix3-store-prefetch-file',
   'nix3-store-repair',
   'nix3-store-sign',

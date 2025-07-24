@@ -1,6 +1,6 @@
 #include "nix/cmd/command.hh"
 #include "nix/main/shared.hh"
-#include "nix/store/store-api.hh"
+#include "nix/store/store-open.hh"
 #include "nix/util/thread-pool.hh"
 #include "nix/util/signals.hh"
 #include "nix/store/keys.hh"
@@ -37,7 +37,7 @@ struct CmdVerify : StorePathsCommand
             .shortName = 's',
             .description = "Use signatures from the specified store.",
             .labels = {"store-uri"},
-            .handler = {[&](std::string s) { substituterUris.push_back(s); }}
+            .handler = {[&](std::string s) { substituterUris.push_back(s); }},
         });
 
         addFlag({
@@ -45,7 +45,7 @@ struct CmdVerify : StorePathsCommand
             .shortName = 'n',
             .description = "Require that each path is signed by at least *n* different keys.",
             .labels = {"n"},
-            .handler = {&sigsNeeded}
+            .handler = {&sigsNeeded},
         });
     }
 

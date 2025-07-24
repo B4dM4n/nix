@@ -78,7 +78,7 @@ int Pid::kill()
         /* On BSDs, killing a process group will return EPERM if all
            processes in the group are zombies (or something like
            that). So try to detect and ignore that situation. */
-#if __FreeBSD__ || __APPLE__
+#if defined(__FreeBSD__) || defined(__APPLE__)
         if (errno != EPERM || ::kill(pid, 0) != 0)
 #endif
             logError(SysError("killing process %d", pid).info());
@@ -190,7 +190,7 @@ static pid_t doFork(bool allowVfork, ChildWrapperFunction & fun)
 }
 
 
-#if __linux__
+#ifdef __linux__
 static int childEntry(void * arg)
 {
     auto & fun = *reinterpret_cast<ChildWrapperFunction*>(arg);
@@ -202,6 +202,7 @@ static int childEntry(void * arg)
 
 pid_t startProcess(std::function<void()> fun, const ProcessOptions & options)
 {
+    auto newLogger = makeSimpleLogger();
     ChildWrapperFunction wrapper = [&] {
         if (!options.allowVfork) {
             /* Set a simple logger, while releasing (not destroying)
@@ -210,10 +211,10 @@ pid_t startProcess(std::function<void()> fun, const ProcessOptions & options)
                ~ProgressBar() tries to join a thread that doesn't
                exist. */
             logger.release();
-            logger = makeSimpleLogger();
+            logger = std::move(newLogger);
         }
         try {
-#if __linux__
+#ifdef __linux__
             if (options.dieWithParent && prctl(PR_SET_PDEATHSIG, SIGKILL) == -1)
                 throw SysError("setting death signal");
 #endif

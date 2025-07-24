@@ -63,7 +63,7 @@ struct ConfigFile
 };
 
 /**
- * The contents of a flake.nix file.
+ * A flake in context
  */
 struct Flake
 {
@@ -115,7 +115,7 @@ struct Flake
     }
 };
 
-Flake getFlake(EvalState & state, const FlakeRef & flakeRef, bool useRegistries);
+Flake getFlake(EvalState & state, const FlakeRef & flakeRef, fetchers::UseRegistries useRegistries);
 
 /**
  * Fingerprint of a locked flake; used as a cache key.

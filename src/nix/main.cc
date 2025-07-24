@@ -7,7 +7,8 @@
 #include "nix/store/globals.hh"
 #include "nix/cmd/legacy.hh"
 #include "nix/main/shared.hh"
-#include "nix/store/store-api.hh"
+#include "nix/store/store-open.hh"
+#include "nix/store/store-registration.hh"
 #include "nix/store/filetransfer.hh"
 #include "nix/util/finally.hh"
 #include "nix/main/loggers.hh"
@@ -36,7 +37,7 @@
 # include <netinet/in.h>
 #endif
 
-#if __linux__
+#ifdef __linux__
 # include "nix/util/namespaces.hh"
 #endif
 
@@ -49,19 +50,6 @@ void chrootHelper(int argc, char * * argv);
 #include "nix/util/strings.hh"
 
 namespace nix {
-
-enum struct AliasStatus {
-    /** Aliases that don't go away */
-    AcceptedShorthand,
-    /** Aliases that will go away */
-    Deprecated,
-};
-
-/** An alias, except for the original syntax, which is in the map key. */
-struct AliasInfo {
-    AliasStatus status;
-    std::vector<std::string> replacement;
-};
 
 /* Check if we have a non-loopback/link-local network interface. */
 static bool haveInternet()
@@ -153,53 +141,33 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs, virtual RootArgs
             .handler = {[&]() { refresh = true; }},
             .experimentalFeature = Xp::NixCommand,
         });
-    }
 
-    std::map<std::string, AliasInfo> aliases = {
-        {"add-to-store", { AliasStatus::Deprecated, {"store", "add-path"}}},
-        {"cat-nar", { AliasStatus::Deprecated, {"nar", "cat"}}},
-        {"cat-store", { AliasStatus::Deprecated, {"store", "cat"}}},
-        {"copy-sigs", { AliasStatus::Deprecated, {"store", "copy-sigs"}}},
-        {"dev-shell", { AliasStatus::Deprecated, {"develop"}}},
-        {"diff-closures", { AliasStatus::Deprecated, {"store", "diff-closures"}}},
-        {"dump-path", { AliasStatus::Deprecated, {"store", "dump-path"}}},
-        {"hash-file", { AliasStatus::Deprecated, {"hash", "file"}}},
-        {"hash-path", { AliasStatus::Deprecated, {"hash", "path"}}},
-        {"ls-nar", { AliasStatus::Deprecated, {"nar", "ls"}}},
-        {"ls-store", { AliasStatus::Deprecated, {"store", "ls"}}},
-        {"make-content-addressable", { AliasStatus::Deprecated, {"store", "make-content-addressed"}}},
-        {"optimise-store", { AliasStatus::Deprecated, {"store", "optimise"}}},
-        {"ping-store", { AliasStatus::Deprecated, {"store", "info"}}},
-        {"sign-paths", { AliasStatus::Deprecated, {"store", "sign"}}},
-        {"shell", { AliasStatus::AcceptedShorthand, {"env", "shell"}}},
-        {"show-derivation", { AliasStatus::Deprecated, {"derivation", "show"}}},
-        {"show-config", { AliasStatus::Deprecated, {"config", "show"}}},
-        {"to-base16", { AliasStatus::Deprecated, {"hash", "to-base16"}}},
-        {"to-base32", { AliasStatus::Deprecated, {"hash", "to-base32"}}},
-        {"to-base64", { AliasStatus::Deprecated, {"hash", "to-base64"}}},
-        {"verify", { AliasStatus::Deprecated, {"store", "verify"}}},
-        {"doctor", { AliasStatus::Deprecated, {"config", "check"}}},
+        aliases = {
+            {"add-to-store", { AliasStatus::Deprecated, {"store", "add-path"}}},
+            {"cat-nar", { AliasStatus::Deprecated, {"nar", "cat"}}},
+            {"cat-store", { AliasStatus::Deprecated, {"store", "cat"}}},
+            {"copy-sigs", { AliasStatus::Deprecated, {"store", "copy-sigs"}}},
+            {"dev-shell", { AliasStatus::Deprecated, {"develop"}}},
+            {"diff-closures", { AliasStatus::Deprecated, {"store", "diff-closures"}}},
+            {"dump-path", { AliasStatus::Deprecated, {"store", "dump-path"}}},
+            {"hash-file", { AliasStatus::Deprecated, {"hash", "file"}}},
+            {"hash-path", { AliasStatus::Deprecated, {"hash", "path"}}},
+            {"ls-nar", { AliasStatus::Deprecated, {"nar", "ls"}}},
+            {"ls-store", { AliasStatus::Deprecated, {"store", "ls"}}},
+            {"make-content-addressable", { AliasStatus::Deprecated, {"store", "make-content-addressed"}}},
+            {"optimise-store", { AliasStatus::Deprecated, {"store", "optimise"}}},
+            {"ping-store", { AliasStatus::Deprecated, {"store", "info"}}},
+            {"sign-paths", { AliasStatus::Deprecated, {"store", "sign"}}},
+            {"shell", { AliasStatus::AcceptedShorthand, {"env", "shell"}}},
+            {"show-derivation", { AliasStatus::Deprecated, {"derivation", "show"}}},
+            {"show-config", { AliasStatus::Deprecated, {"config", "show"}}},
+            {"to-base16", { AliasStatus::Deprecated, {"hash", "to-base16"}}},
+            {"to-base32", { AliasStatus::Deprecated, {"hash", "to-base32"}}},
+            {"to-base64", { AliasStatus::Deprecated, {"hash", "to-base64"}}},
+            {"verify", { AliasStatus::Deprecated, {"store", "verify"}}},
+            {"doctor", { AliasStatus::Deprecated, {"config", "check"}}},
+        };
     };
-
-    bool aliasUsed = false;
-
-    Strings::iterator rewriteArgs(Strings & args, Strings::iterator pos) override
-    {
-        if (aliasUsed || command || pos == args.end()) return pos;
-        auto arg = *pos;
-        auto i = aliases.find(arg);
-        if (i == aliases.end()) return pos;
-        auto & info = i->second;
-        if (info.status == AliasStatus::Deprecated) {
-            warn("'%s' is a deprecated alias for '%s'",
-                arg, concatStringsSep(" ", info.replacement));
-        }
-        pos = args.erase(pos);
-        for (auto j = info.replacement.rbegin(); j != info.replacement.rend(); ++j)
-            pos = args.insert(pos, *j);
-        aliasUsed = true;
-        return pos;
-    }
 
     std::string description() override
     {
@@ -226,13 +194,12 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs, virtual RootArgs
         res["args"] = toJSON();
 
         auto stores = nlohmann::json::object();
-        for (auto & implem : *Implementations::registered) {
-            auto storeConfig = implem.getConfig();
-            auto storeName = storeConfig->name();
+        for (auto & [storeName, implem] : Implementations::registered()) {
             auto & j = stores[storeName];
-            j["doc"] = storeConfig->doc();
-            j["settings"] = storeConfig->toJSON();
-            j["experimentalFeature"] = storeConfig->experimentalFeature();
+            j["doc"] = implem.doc;
+            j["uri-schemes"] = implem.uriSchemes;
+            j["settings"] = implem.getConfig()->toJSON();
+            j["experimentalFeature"] = implem.experimentalFeature;
         }
         res["stores"] = std::move(stores);
         res["fetchers"] = fetchers::dumpRegisterInputSchemeInfo();
@@ -384,7 +351,7 @@ void mainWrapped(int argc, char * * argv)
         "__build-remote",
     });
 
-    #if __linux__
+    #ifdef __linux__
     if (isRootUser()) {
         try {
             saveMountNamespace();
@@ -406,7 +373,7 @@ void mainWrapped(int argc, char * * argv)
     }
 
     {
-        auto legacy = (*RegisterLegacyCommand::commands)[programName];
+        auto legacy = RegisterLegacyCommand::commands()[programName];
         if (legacy) return legacy(argc, argv);
     }
 

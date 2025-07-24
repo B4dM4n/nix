@@ -58,7 +58,7 @@ static void canonicalisePathMetaData_(
 {
     checkInterrupt();
 
-#if __APPLE__
+#ifdef __APPLE__
     /* Remove flags, in particular UF_IMMUTABLE which would prevent
        the file from being garbage-collected. FIXME: Use
        setattrlist() to remove other attributes as well. */
@@ -136,7 +136,7 @@ static void canonicalisePathMetaData_(
 #endif
 
     if (S_ISDIR(st.st_mode)) {
-        for (auto & i : std::filesystem::directory_iterator{path}) {
+        for (auto & i : DirectoryIterator{path}) {
             checkInterrupt();
             canonicalisePathMetaData_(
                 i.path().string(),

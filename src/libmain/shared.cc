@@ -26,7 +26,7 @@
 #include "nix/util/strings.hh"
 
 #include "main-config-private.hh"
-
+#include "nix/expr/config.hh"
 
 namespace nix {
 
@@ -144,7 +144,7 @@ void initNix(bool loadConfig)
     if (sigaction(SIGUSR1, &act, 0)) throw SysError("handling SIGUSR1");
 #endif
 
-#if __APPLE__
+#ifdef __APPLE__
     /* HACK: on darwin, we need can’t use sigprocmask with SIGWINCH.
      * Instead, add a dummy sigaction handler, and signalHandlerThread
      * can handle the rest. */
@@ -231,7 +231,7 @@ LegacyArgs::LegacyArgs(const std::string & programName,
             .handler = {[=](std::string s) {
                 auto n = string2IntWithUnitPrefix<uint64_t>(s);
                 settings.set(dest, std::to_string(n));
-            }}
+            }},
         });
     };
 

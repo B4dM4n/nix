@@ -9,7 +9,7 @@
 #include "nix/fetchers/registry.hh"
 #include "nix/flake/flakeref.hh"
 #include "nix/flake/settings.hh"
-#include "nix/store/store-api.hh"
+#include "nix/store/store-open.hh"
 #include "nix/cmd/command.hh"
 #include "nix/fetchers/tarball.hh"
 #include "nix/fetchers/fetch-to-store.hh"
@@ -18,7 +18,6 @@
 
 namespace nix {
 
-namespace fs { using namespace std::filesystem; }
 
 fetchers::Settings fetchSettings;
 
@@ -63,7 +62,7 @@ MixEvalArgs::MixEvalArgs()
         .description = "Pass the value *expr* as the argument *name* to Nix functions.",
         .category = category,
         .labels = {"name", "expr"},
-        .handler = {[&](std::string name, std::string expr) { autoArgs.insert_or_assign(name, AutoArg{AutoArgExpr{expr}}); }}
+        .handler = {[&](std::string name, std::string expr) { autoArgs.insert_or_assign(name, AutoArg{AutoArgExpr{expr}}); }},
     });
 
     addFlag({
@@ -80,7 +79,7 @@ MixEvalArgs::MixEvalArgs()
         .category = category,
         .labels = {"name", "path"},
         .handler = {[&](std::string name, std::string path) { autoArgs.insert_or_assign(name, AutoArg{AutoArgFile{path}}); }},
-        .completer = completePath
+        .completer = completePath,
     });
 
     addFlag({
@@ -105,7 +104,7 @@ MixEvalArgs::MixEvalArgs()
         .labels = {"path"},
         .handler = {[&](std::string s) {
             lookupPath.elements.emplace_back(LookupPath::Elem::parse(s));
-        }}
+        }},
     });
 
     addFlag({
@@ -123,15 +122,15 @@ MixEvalArgs::MixEvalArgs()
         .category = category,
         .labels = {"original-ref", "resolved-ref"},
         .handler = {[&](std::string _from, std::string _to) {
-            auto from = parseFlakeRef(fetchSettings, _from, fs::current_path().string());
-            auto to = parseFlakeRef(fetchSettings, _to, fs::current_path().string());
+            auto from = parseFlakeRef(fetchSettings, _from, std::filesystem::current_path().string());
+            auto to = parseFlakeRef(fetchSettings, _to, std::filesystem::current_path().string());
             fetchers::Attrs extraAttrs;
             if (to.subdir != "") extraAttrs["dir"] = to.subdir;
             fetchers::overrideRegistry(from.input, to.input, extraAttrs);
         }},
         .completer = {[&](AddCompletions & completions, size_t, std::string_view prefix) {
             completeFlakeRef(completions, openStore(), prefix);
-        }}
+        }},
     });
 
     addFlag({

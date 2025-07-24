@@ -7,6 +7,7 @@
 #include "nix/store/local-store.hh"
 #include "nix/store/remote-store.hh"
 #include "nix/store/remote-store-connection.hh"
+#include "nix/store/store-open.hh"
 #include "nix/util/serialise.hh"
 #include "nix/util/archive.hh"
 #include "nix/store/globals.hh"
@@ -34,11 +35,11 @@
 #include <grp.h>
 #include <fcntl.h>
 
-#if __linux__
+#ifdef __linux__
 #include "nix/util/cgroup.hh"
 #endif
 
-#if __APPLE__ || __FreeBSD__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/ucred.h>
 #endif
 
@@ -244,7 +245,7 @@ static PeerInfo getPeerInfo(int remote)
  */
 static ref<Store> openUncachedStore()
 {
-    Store::Params params; // FIXME: get params from somewhere
+    Store::Config::Params params; // FIXME: get params from somewhere
     // Disable caching since the client already does that.
     params["path-info-cache-size"] = "0";
     return openStore(settings.storeUri, params);
@@ -317,7 +318,7 @@ static void daemonLoop(std::optional<TrustedFlag> forceTrustClientOpt)
     //  Get rid of children automatically; don't let them become zombies.
     setSigChldAction(true);
 
-    #if __linux__
+    #ifdef __linux__
     if (settings.useCgroups) {
         experimentalFeatureSettings.require(Xp::Cgroups);
 
