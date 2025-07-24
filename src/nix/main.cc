@@ -38,7 +38,7 @@
 #endif
 
 #ifdef __linux__
-# include "nix/util/namespaces.hh"
+# include "nix/util/linux-namespaces.hh"
 #endif
 
 #ifndef _WIN32
@@ -459,6 +459,8 @@ void mainWrapped(int argc, char * * argv)
     } catch (UsageError &) {
         if (!args.helpRequested && !args.completions) throw;
     }
+
+    applyJSONLogger();
 
     if (args.helpRequested) {
         std::vector<std::string> subcommand;

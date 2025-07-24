@@ -15,6 +15,7 @@
 #include "nix/store/derivations.hh"
 #include "nix/util/args.hh"
 #include "nix/util/git.hh"
+#include "nix/util/logging.hh"
 
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
 # include "nix/util/monitor-fd.hh"
@@ -947,14 +948,12 @@ static void performOp(TunnelLogger * logger, ref<Store> store,
     case WorkerProto::Op::QueryMissing: {
         auto targets = WorkerProto::Serialise<DerivedPaths>::read(*store, rconn);
         logger->startWork();
-        StorePathSet willBuild, willSubstitute, unknown;
-        uint64_t downloadSize, narSize;
-        store->queryMissing(targets, willBuild, willSubstitute, unknown, downloadSize, narSize);
+        auto missing = store->queryMissing(targets);
         logger->stopWork();
-        WorkerProto::write(*store, wconn, willBuild);
-        WorkerProto::write(*store, wconn, willSubstitute);
-        WorkerProto::write(*store, wconn, unknown);
-        conn.to << downloadSize << narSize;
+        WorkerProto::write(*store, wconn, missing.willBuild);
+        WorkerProto::write(*store, wconn, missing.willSubstitute);
+        WorkerProto::write(*store, wconn, missing.unknown);
+        conn.to << missing.downloadSize << missing.narSize;
         break;
     }
 
@@ -1050,6 +1049,7 @@ void processConnection(
     if (!recursive) {
         prevLogger_ = std::move(logger);
         logger = std::move(tunnelLogger_);
+        applyJSONLogger();
     }
 
     unsigned int opCount = 0;

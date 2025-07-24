@@ -3,6 +3,8 @@
 
 #include "nix/util/types.hh"
 #include "nix/util/configuration.hh"
+#include "nix/util/ref.hh"
+#include "nix/util/sync.hh"
 
 #include <map>
 #include <limits>
@@ -10,6 +12,8 @@
 #include <sys/types.h>
 
 namespace nix::fetchers {
+
+struct Cache;
 
 struct Settings : public Config
 {
@@ -24,7 +28,7 @@ struct Settings : public Config
           space-separated `host=token` values.  The specific token
           used is selected by matching the `host` portion against the
           "host" specification of the input. The `host` portion may
-          contain a path element which will match against the prefix
+          contain a path element which matches against the prefix
           URL for the input. (eg: `github.com/org=token`). The actual use
           of the `token` value is determined by the type of resource
           being accessed:
@@ -91,11 +95,11 @@ struct Settings : public Config
     Setting<bool> trustTarballsFromGitForges{
         this, true, "trust-tarballs-from-git-forges",
         R"(
-          If enabled (the default), Nix will consider tarballs from
+          If enabled (the default), Nix considers tarballs from
           GitHub and similar Git forges to be locked if a Git revision
           is specified,
           e.g. `github:NixOS/patchelf/7c2f768bf9601268a4e71c2ebe91e2011918a70f`.
-          This requires Nix to trust that the provider will return the
+          This requires Nix to trust that the provider returns the
           correct contents for the specified Git revision.
 
           If disabled, such tarballs are only considered locked if a
@@ -110,6 +114,11 @@ struct Settings : public Config
           When empty, disables the global flake registry.
         )",
         {}, true, Xp::Flakes};
+
+    ref<Cache> getCache() const;
+
+private:
+    mutable Sync<std::shared_ptr<Cache>> _cache;
 };
 
 }
