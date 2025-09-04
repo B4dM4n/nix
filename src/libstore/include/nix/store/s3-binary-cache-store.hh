@@ -1,9 +1,13 @@
 #pragma once
 ///@file
 
-#include "nix/store/binary-cache-store.hh"
+#include "nix/store/config.hh"
 
-#include <atomic>
+#if NIX_WITH_S3_SUPPORT
+
+#  include "nix/store/binary-cache-store.hh"
+
+#  include <atomic>
 
 namespace nix {
 
@@ -124,4 +128,6 @@ public:
     virtual const Stats & getS3Stats() = 0;
 };
 
-}
+} // namespace nix
+
+#endif

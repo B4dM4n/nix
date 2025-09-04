@@ -14,6 +14,7 @@ overrides:
 fetchTreeFinal:
 
 let
+  inherit (builtins) mapAttrs;
 
   lockFile = builtins.fromJSON lockFileStr;
 
@@ -35,20 +36,19 @@ let
         (resolveInput lockFile.nodes.${nodeName}.inputs.${builtins.head path})
         (builtins.tail path);
 
-  allNodes = builtins.mapAttrs (
+  allNodes = mapAttrs (
     key: node:
     let
+      hasOverride = overrides ? ${key};
+      isRelative = node.locked.type or null == "path" && builtins.substring 0 1 node.locked.path != "/";
 
       parentNode = allNodes.${getInputByPath lockFile.root node.parent};
 
       sourceInfo =
-        if overrides ? ${key} then
+        if hasOverride then
           overrides.${key}.sourceInfo
-        else if node.locked.type == "path" && builtins.substring 0 1 node.locked.path != "/" then
+        else if isRelative then
           parentNode.sourceInfo
-          // {
-            outPath = parentNode.outPath + ("/" + node.locked.path);
-          }
         else
           # FIXME: remove obsolete node.info.
           # Note: lock file entries are always final.
@@ -56,11 +56,15 @@ let
 
       subdir = overrides.${key}.dir or node.locked.dir or "";
 
-      outPath = sourceInfo + ((if subdir == "" then "" else "/") + subdir);
+      outPath =
+        if !hasOverride && isRelative then
+          parentNode.outPath + (if node.locked.path == "" then "" else "/" + node.locked.path)
+        else
+          sourceInfo.outPath + (if subdir == "" then "" else "/" + subdir);
 
       flake = import (outPath + "/flake.nix");
 
-      inputs = builtins.mapAttrs (inputName: inputSpec: allNodes.${resolveInput inputSpec}) (
+      inputs = mapAttrs (inputName: inputSpec: allNodes.${resolveInput inputSpec}.result) (
         node.inputs or { }
       );
 
@@ -85,12 +89,17 @@ let
         };
 
     in
-    if node.flake or true then
-      assert builtins.isFunction flake.outputs;
-      result
-    else
-      sourceInfo
+    {
+      result =
+        if node.flake or true then
+          assert builtins.isFunction flake.outputs;
+          result
+        else
+          sourceInfo // { inherit sourceInfo outPath; };
+
+      inherit outPath sourceInfo;
+    }
   ) lockFile.nodes;
 
 in
-allNodes.${lockFile.root}
+allNodes.${lockFile.root}.result

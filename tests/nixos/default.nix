@@ -31,7 +31,7 @@ let
         nixpkgs.pkgs = nixpkgsFor.${system}.native;
         nix.checkAllErrors = false;
         # TODO: decide which packaging stage to use. `nix-cli` is efficient, but not the same as the user-facing `everything.nix` package (`default`). Perhaps a good compromise is `everything.nix` + `noTests` defined above?
-        nix.package = nixpkgsFor.${system}.native.nixComponents.nix-cli;
+        nix.package = nixpkgsFor.${system}.native.nixComponents2.nix-cli;
 
         # Evaluate VMs faster
         documentation.enable = false;
@@ -77,7 +77,15 @@ let
     { lib, pkgs, ... }:
     {
       imports = [ checkOverrideNixVersion ];
-      nix.package = lib.mkForce pkgs.nixVersions.nix_2_3;
+      nix.package = lib.mkForce (
+        pkgs.nixVersions.nix_2_3.overrideAttrs (o: {
+          meta = o.meta // {
+            # This version shouldn't be used by end-users, but we run tests against
+            # it to ensure we don't break protocol compatibility.
+            knownVulnerabilities = [ ];
+          };
+        })
+      );
     };
 
   otherNixes.nix_2_13.setNixPackage =
@@ -88,6 +96,8 @@ let
         nixpkgs-23-11.legacyPackages.${pkgs.stdenv.hostPlatform.system}.nixVersions.nix_2_13.overrideAttrs
           (o: {
             meta = o.meta // {
+              # This version shouldn't be used by end-users, but we run tests against
+              # it to ensure we don't break protocol compatibility.
               knownVulnerabilities = [ ];
             };
           })
@@ -98,7 +108,9 @@ let
     { lib, pkgs, ... }:
     {
       imports = [ checkOverrideNixVersion ];
-      nix.package = lib.mkForce pkgs.nixVersions.nix_2_18;
+      nix.package =
+        lib.mkForce
+          nixpkgs-23-11.legacyPackages.${pkgs.stdenv.hostPlatform.system}.nixVersions.nix_2_18;
     };
 
 in

@@ -17,7 +17,7 @@ struct CmdStoreGC : StoreCommand, MixDryRun
             .longName = "max",
             .description = "Stop after freeing *n* bytes of disk space.",
             .labels = {"n"},
-            .handler = {&options.maxFreed}
+            .handler = {&options.maxFreed},
         });
     }
 
@@ -29,8 +29,8 @@ struct CmdStoreGC : StoreCommand, MixDryRun
     std::string doc() override
     {
         return
-          #include "store-gc.md"
-          ;
+#include "store-gc.md"
+            ;
     }
 
     void run(ref<Store> store) override

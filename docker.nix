@@ -38,59 +38,57 @@ let
     ]
     ++ extraPkgs;
 
-  users =
-    {
+  users = {
 
-      root = {
-        uid = 0;
-        shell = "${pkgs.bashInteractive}/bin/bash";
-        home = "/root";
-        gid = 0;
-        groups = [ "root" ];
-        description = "System administrator";
-      };
-
-      nobody = {
-        uid = 65534;
-        shell = "${pkgs.shadow}/bin/nologin";
-        home = "/var/empty";
-        gid = 65534;
-        groups = [ "nobody" ];
-        description = "Unprivileged account (don't use!)";
-      };
-
-    }
-    // lib.optionalAttrs (uid != 0) {
-      "${uname}" = {
-        uid = uid;
-        shell = "${pkgs.bashInteractive}/bin/bash";
-        home = "/home/${uname}";
-        gid = gid;
-        groups = [ "${gname}" ];
-        description = "Nix user";
-      };
-    }
-    // lib.listToAttrs (
-      map (n: {
-        name = "nixbld${toString n}";
-        value = {
-          uid = 30000 + n;
-          gid = 30000;
-          groups = [ "nixbld" ];
-          description = "Nix build user ${toString n}";
-        };
-      }) (lib.lists.range 1 32)
-    );
-
-  groups =
-    {
-      root.gid = 0;
-      nixbld.gid = 30000;
-      nobody.gid = 65534;
-    }
-    // lib.optionalAttrs (gid != 0) {
-      "${gname}".gid = gid;
+    root = {
+      uid = 0;
+      shell = "${pkgs.bashInteractive}/bin/bash";
+      home = "/root";
+      gid = 0;
+      groups = [ "root" ];
+      description = "System administrator";
     };
+
+    nobody = {
+      uid = 65534;
+      shell = "${pkgs.shadow}/bin/nologin";
+      home = "/var/empty";
+      gid = 65534;
+      groups = [ "nobody" ];
+      description = "Unprivileged account (don't use!)";
+    };
+
+  }
+  // lib.optionalAttrs (uid != 0) {
+    "${uname}" = {
+      uid = uid;
+      shell = "${pkgs.bashInteractive}/bin/bash";
+      home = "/home/${uname}";
+      gid = gid;
+      groups = [ "${gname}" ];
+      description = "Nix user";
+    };
+  }
+  // lib.listToAttrs (
+    map (n: {
+      name = "nixbld${toString n}";
+      value = {
+        uid = 30000 + n;
+        gid = 30000;
+        groups = [ "nixbld" ];
+        description = "Nix build user ${toString n}";
+      };
+    }) (lib.lists.range 1 32)
+  );
+
+  groups = {
+    root.gid = 0;
+    nixbld.gid = 30000;
+    nobody.gid = 65534;
+  }
+  // lib.optionalAttrs (gid != 0) {
+    "${gname}".gid = gid;
+  };
 
   userToPasswd = (
     k:
@@ -155,7 +153,7 @@ let
 
   nixConfContents =
     (lib.concatStringsSep "\n" (
-      lib.mapAttrsFlatten (
+      lib.mapAttrsToList (
         n: v:
         let
           vStr = if builtins.isList v then lib.concatStringsSep " " v else v;
@@ -173,7 +171,12 @@ let
       channel = pkgs.runCommand "channel-nixos" { inherit bundleNixpkgs; } ''
         mkdir $out
         if [ "$bundleNixpkgs" ]; then
-          ln -s ${nixpkgs} $out/nixpkgs
+          ln -s ${
+            builtins.path {
+              path = nixpkgs;
+              name = "source";
+            }
+          } $out/nixpkgs
           echo "[]" > $out/manifest.nix
         fi
       '';
@@ -275,7 +278,6 @@ let
 
           ln -s ${profile} $out/nix/var/nix/profiles/default-1-link
           ln -s /nix/var/nix/profiles/default-1-link $out/nix/var/nix/profiles/default
-          ln -s /nix/var/nix/profiles/default $out${userHome}/.nix-profile
 
           ln -s ${channel} $out/nix/var/nix/profiles/per-user/${uname}/channels-1-link
           ln -s /nix/var/nix/profiles/per-user/${uname}/channels-1-link $out/nix/var/nix/profiles/per-user/${uname}/channels
@@ -327,7 +329,7 @@ pkgs.dockerTools.buildLayeredImageWithNixDb {
   '';
 
   config = {
-    Cmd = [ "${userHome}/.nix-profile/bin/bash" ];
+    Cmd = [ (lib.getExe pkgs.bashInteractive) ];
     User = "${toString uid}:${toString gid}";
     Env = [
       "USER=${uname}"
