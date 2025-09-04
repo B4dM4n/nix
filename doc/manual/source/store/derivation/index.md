@@ -162,7 +162,7 @@ There are two types of placeholder, corresponding to the two cases where this pr
 
 > **Explanation**
 >
-> In general, we need to realise [realise] a [store object] in order to be sure to have a store object for it.
+> In general, we need to [realise] a [store object] in order to be sure to have a store object for it.
 > But for these two cases this is either impossible or impractical:
 >
 > - In the output case this is impossible:
@@ -189,7 +189,7 @@ This ensures that there is a canonical [store path] used to refer to the derivat
 > **Note**
 >
 > Currently, the canonical encoding for every derivation is the "ATerm" format,
-> but this is subject to change for types derivations which are not yet stable.
+> but this is subject to change for the types of derivations which are not yet stable.
 
 Regardless of the format used, when serializing a derivation to a store object, that store object will be content-addressed.
 
@@ -282,7 +282,7 @@ type DerivingPath = ConstantPath | OutputPath;
 
 Under this extended model, `DerivingPath`s are thus inductively built up from a root `ConstantPath`, wrapped with zero or more outer `OutputPath`s.
 
-### Encoding {#deriving-path-encoding}
+### Encoding {#deriving-path-encoding-higher-order}
 
 The encoding is adjusted in the natural way, encoding the `drv` field recursively using the same deriving path encoding.
 The result of this is that it is possible to have a chain of `^<output-name>` at the end of the final string, as opposed to just a single one.

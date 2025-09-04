@@ -3,15 +3,16 @@
 
 namespace nix {
 
-namespace fs { using namespace std::filesystem; }
+namespace fs {
+using namespace std::filesystem;
+}
 
-void builtinUnpackChannel(
-    const BasicDerivation & drv,
-    const std::map<std::string, Path> & outputs)
+void builtinUnpackChannel(const BasicDerivation & drv, const std::map<std::string, Path> & outputs)
 {
     auto getAttr = [&](const std::string & name) -> const std::string & {
         auto i = drv.env.find(name);
-        if (i == drv.env.end()) throw Error("attribute '%s' missing", name);
+        if (i == drv.env.end())
+            throw Error("attribute '%s' missing", name);
         return i->second;
     };
 
@@ -29,13 +30,9 @@ void builtinUnpackChannel(
 
     size_t fileCount;
     std::string fileName;
-    try {
-        auto entries = fs::directory_iterator{out};
-        fileName = entries->path().string();
-        fileCount = std::distance(fs::begin(entries), fs::end(entries));
-    } catch (fs::filesystem_error &) {
-        throw SysError("failed to read directory %1%", out.string());
-    }
+    auto entries = DirectoryIterator{out};
+    fileName = entries->path().string();
+    fileCount = std::distance(entries.begin(), entries.end());
 
     if (fileCount != 1)
         throw Error("channel tarball '%s' contains more than one file", src);
@@ -48,4 +45,4 @@ void builtinUnpackChannel(
     }
 }
 
-}
+} // namespace nix

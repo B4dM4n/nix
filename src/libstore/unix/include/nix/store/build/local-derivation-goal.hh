@@ -38,6 +38,11 @@ struct LocalDerivationGoal : public DerivationGoal
     Path topTmpDir;
 
     /**
+     * The file descriptor of the temporary directory.
+     */
+    AutoCloseFD tmpDirFd;
+
+    /**
      * The path of the temporary directory in the sandbox.
      */
     Path tmpDirInSandbox;
@@ -96,13 +101,18 @@ struct LocalDerivationGoal : public DerivationGoal
     /**
      * Stuff we need to pass to initChild().
      */
-    struct ChrootPath {
+    struct ChrootPath
+    {
         Path source;
         bool optional;
+
         ChrootPath(Path source = "", bool optional = false)
-            : source(source), optional(optional)
-        { }
+            : source(source)
+            , optional(optional)
+        {
+        }
     };
+
     typedef map<Path, ChrootPath> PathsInChroot; // maps target path to source path
     PathsInChroot pathsInChroot;
 
@@ -132,8 +142,15 @@ struct LocalDerivationGoal : public DerivationGoal
      */
     OutputPathMap scratchOutputs;
 
-    uid_t sandboxUid() { return usingUserNamespace ? (!buildUser || buildUser->getUIDCount() == 1 ? 1000 : 0) : buildUser->getUID(); }
-    gid_t sandboxGid() { return usingUserNamespace ? (!buildUser || buildUser->getUIDCount() == 1 ? 100  : 0) : buildUser->getGID(); }
+    uid_t sandboxUid()
+    {
+        return usingUserNamespace ? (!buildUser || buildUser->getUIDCount() == 1 ? 1000 : 0) : buildUser->getUID();
+    }
+
+    gid_t sandboxGid()
+    {
+        return usingUserNamespace ? (!buildUser || buildUser->getUIDCount() == 1 ? 100 : 0) : buildUser->getGID();
+    }
 
     const static Path homeDir;
 
@@ -172,6 +189,7 @@ struct LocalDerivationGoal : public DerivationGoal
     {
         return inputPaths.count(path) || addedPaths.count(path);
     }
+
     bool isAllowed(const DrvOutput & id)
     {
         return addedDrvOutputs.count(id);
@@ -239,8 +257,21 @@ struct LocalDerivationGoal : public DerivationGoal
 
     /**
      * Make a file owned by the builder.
+     *
+     * SAFETY: this function is prone to TOCTOU as it receives a path and not a descriptor.
+     * It's only safe to call in a child of a directory only visible to the owner.
      */
     void chownToBuilder(const Path & path);
+
+    /**
+     * Make a file owned by the builder addressed by its file descriptor.
+     */
+    void chownToBuilder(int fd, const Path & path);
+
+    /**
+     * Create a file in `tmpDir` owned by the builder.
+     */
+    void writeBuilderFile(const std::string & name, std::string_view contents);
 
     int getChildStatus() override;
 
@@ -316,4 +347,4 @@ struct LocalDerivationGoal : public DerivationGoal
     StorePath makeFallbackPath(OutputNameView outputName);
 };
 
-}
+} // namespace nix

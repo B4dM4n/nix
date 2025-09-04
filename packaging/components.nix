@@ -54,12 +54,12 @@ let
     preConfigure =
       prevAttrs.preConfigure or ""
       +
-        # Update the repo-global .version file.
-        # Symlink ./.version points there, but by default only workDir is writable.
-        ''
-          chmod u+w ./.version
-          echo ${finalAttrs.version} > ./.version
-        '';
+      # Update the repo-global .version file.
+      # Symlink ./.version points there, but by default only workDir is writable.
+      ''
+        chmod u+w ./.version
+        echo ${finalAttrs.version} > ./.version
+      '';
   };
 
   localSourceLayer =
@@ -148,7 +148,8 @@ let
     nativeBuildInputs = [
       meson
       ninja
-    ] ++ prevAttrs.nativeBuildInputs or [ ];
+    ]
+    ++ prevAttrs.nativeBuildInputs or [ ];
     mesonCheckFlags = prevAttrs.mesonCheckFlags or [ ] ++ [
       "--print-errorlogs"
     ];
@@ -171,6 +172,17 @@ let
 
   mesonLibraryLayer = finalAttrs: prevAttrs: {
     outputs = prevAttrs.outputs or [ "out" ] ++ [ "dev" ];
+  };
+
+  fixupStaticLayer = finalAttrs: prevAttrs: {
+    postFixup =
+      prevAttrs.postFixup or ""
+      + lib.optionalString (stdenv.hostPlatform.isStatic) ''
+        # HACK: Otherwise the result will have the entire buildInputs closure
+        # injected by the pkgsStatic stdenv
+        # <https://github.com/NixOS/nixpkgs/issues/83667>
+        rm -f $out/nix-support/propagated-build-inputs
+      '';
   };
 
   # Work around weird `--as-needed` linker behavior with BSD, see
@@ -307,6 +319,7 @@ in
     scope.sourceLayer
     setVersionLayer
     mesonLayer
+    fixupStaticLayer
     scope.mesonComponentOverrides
   ];
   mkMesonExecutable = mkPackageBuilder [
@@ -316,6 +329,7 @@ in
     setVersionLayer
     mesonLayer
     mesonBuildLayer
+    fixupStaticLayer
     scope.mesonComponentOverrides
   ];
   mkMesonLibrary = mkPackageBuilder [
@@ -326,6 +340,7 @@ in
     setVersionLayer
     mesonBuildLayer
     mesonLibraryLayer
+    fixupStaticLayer
     scope.mesonComponentOverrides
   ];
 

@@ -22,9 +22,8 @@ FileSerialisationMethod parseFileSerialisationMethod(std::string_view input)
     if (ret)
         return *ret;
     else
-        throw UsageError("Unknown file serialiation method '%s', expect `flat` or `nar`");
+        throw UsageError("Unknown file serialiation method '%s', expect `flat` or `nar`", input);
 }
-
 
 FileIngestionMethod parseFileIngestionMethod(std::string_view input)
 {
@@ -35,10 +34,9 @@ FileIngestionMethod parseFileIngestionMethod(std::string_view input)
         if (ret)
             return static_cast<FileIngestionMethod>(*ret);
         else
-            throw UsageError("Unknown file ingestion method '%s', expect `flat`, `nar`, or `git`");
+            throw UsageError("Unknown file ingestion method '%s', expect `flat`, `nar`, or `git`", input);
     }
 }
-
 
 std::string_view renderFileSerialisationMethod(FileSerialisationMethod method)
 {
@@ -52,14 +50,12 @@ std::string_view renderFileSerialisationMethod(FileSerialisationMethod method)
     }
 }
 
-
 std::string_view renderFileIngestionMethod(FileIngestionMethod method)
 {
     switch (method) {
     case FileIngestionMethod::Flat:
     case FileIngestionMethod::NixArchive:
-        return renderFileSerialisationMethod(
-            static_cast<FileSerialisationMethod>(method));
+        return renderFileSerialisationMethod(static_cast<FileSerialisationMethod>(method));
     case FileIngestionMethod::Git:
         return "git";
     default:
@@ -67,12 +63,7 @@ std::string_view renderFileIngestionMethod(FileIngestionMethod method)
     }
 }
 
-
-void dumpPath(
-    const SourcePath & path,
-    Sink & sink,
-    FileSerialisationMethod method,
-    PathFilter & filter)
+void dumpPath(const SourcePath & path, Sink & sink, FileSerialisationMethod method, PathFilter & filter)
 {
     switch (method) {
     case FileSerialisationMethod::Flat:
@@ -84,16 +75,11 @@ void dumpPath(
     }
 }
 
-
-void restorePath(
-    const Path & path,
-    Source & source,
-    FileSerialisationMethod method,
-    bool startFsync)
+void restorePath(const Path & path, Source & source, FileSerialisationMethod method, bool startFsync)
 {
     switch (method) {
     case FileSerialisationMethod::Flat:
-        writeFile(path, source, 0666, startFsync);
+        writeFile(path, source, 0666, startFsync ? FsSync::Yes : FsSync::No);
         break;
     case FileSerialisationMethod::NixArchive:
         restorePath(path, source, startFsync);
@@ -101,22 +87,15 @@ void restorePath(
     }
 }
 
-
-HashResult hashPath(
-    const SourcePath & path,
-    FileSerialisationMethod method, HashAlgorithm ha,
-    PathFilter & filter)
+HashResult hashPath(const SourcePath & path, FileSerialisationMethod method, HashAlgorithm ha, PathFilter & filter)
 {
-    HashSink sink { ha };
+    HashSink sink{ha};
     dumpPath(path, sink, method, filter);
     return sink.finish();
 }
 
-
-std::pair<Hash, std::optional<uint64_t>> hashPath(
-    const SourcePath & path,
-    FileIngestionMethod method, HashAlgorithm ht,
-    PathFilter & filter)
+std::pair<Hash, std::optional<uint64_t>>
+hashPath(const SourcePath & path, FileIngestionMethod method, HashAlgorithm ht, PathFilter & filter)
 {
     switch (method) {
     case FileIngestionMethod::Flat:
@@ -130,4 +109,4 @@ std::pair<Hash, std::optional<uint64_t>> hashPath(
     assert(false);
 }
 
-}
+} // namespace nix

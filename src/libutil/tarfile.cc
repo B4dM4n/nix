@@ -48,7 +48,7 @@ void checkLibArchive(archive * archive, int err, const std::string & reason)
 }
 
 constexpr auto defaultBufferSize = std::size_t{65536};
-}
+} // namespace
 
 void TarArchive::check(int err, const std::string & reason)
 {
@@ -182,6 +182,10 @@ time_t unpackTarfileToSink(TarArchive & archive, ExtendedFileSystemObjectSink & 
 {
     time_t lastModified = 0;
 
+    /* Only allocate the buffer once. Use the heap because 131 KiB is a bit too
+       much for the stack. */
+    std::vector<unsigned char> buf(128 * 1024);
+
     for (;;) {
         // FIXME: merge with extract_archive
         struct archive_entry * entry;
@@ -216,7 +220,6 @@ time_t unpackTarfileToSink(TarArchive & archive, ExtendedFileSystemObjectSink & 
                     crf.isExecutable();
 
                 while (true) {
-                    std::vector<unsigned char> buf(128 * 1024);
                     auto n = archive_read_data(archive.archive, buf.data(), buf.size());
                     if (n < 0)
                         throw Error("cannot read file '%s' from tarball", path);
@@ -248,4 +251,4 @@ time_t unpackTarfileToSink(TarArchive & archive, ExtendedFileSystemObjectSink & 
     return lastModified;
 }
 
-}
+} // namespace nix

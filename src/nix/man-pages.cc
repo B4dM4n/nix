@@ -1,4 +1,5 @@
 #include "man-pages.hh"
+#include "cli-config-private.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/current-process.hh"
 #include "nix/util/environment-variables.hh"
@@ -26,4 +27,4 @@ void showManPage(const std::string & name)
     throw SysError("command 'man %1%' failed", name.c_str());
 }
 
-}
+} // namespace nix
