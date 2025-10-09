@@ -3,13 +3,11 @@
 #include "nix/store/path.hh"
 #include "nix/util/hash.hh"
 #include "nix/store/content-address.hh"
-#include "nix/store/globals.hh"
 #include "nix/util/configuration.hh"
 
 #include <map>
 #include <string>
 #include <variant>
-
 
 namespace nix {
 
@@ -18,22 +16,20 @@ struct SourcePath;
 MakeError(BadStorePath, Error);
 MakeError(BadStorePathName, BadStorePath);
 
-struct StoreDirConfig : public Config
+/**
+ * @todo This should just be inherited by `StoreConfig`. However, it
+ * would be a huge amount of churn if `Store` didn't have these methods
+ * anymore, forcing a bunch of code to go from `store.method(...)` to
+ * `store.config.method(...)`.
+ *
+ * @todo this should not have "config" in its name, because it no longer
+ * uses the configuration system for `storeDir` --- in fact, `storeDir`
+ * isn't even owned, but a mere reference. But doing that rename would
+ * cause a bunch of churn.
+ */
+struct StoreDirConfig
 {
-    using Config::Config;
-
-    StoreDirConfig() = delete;
-
-    virtual ~StoreDirConfig() = default;
-
-    const PathSetting storeDir_{this, settings.nixStore,
-        "store",
-        R"(
-          Logical location of the Nix store, usually
-          `/nix/store`. Note that you can only copy store paths
-          between stores if they have the same `store` setting.
-        )"};
-    const Path storeDir = storeDir_;
+    const Path & storeDir;
 
     // pure methods
 
@@ -56,7 +52,7 @@ struct StoreDirConfig : public Config
      * Display a set of paths in human-readable form (i.e., between quotes
      * and separated by commas).
      */
-    std::string showPaths(const StorePathSet & paths);
+    std::string showPaths(const StorePathSet & paths) const;
 
     /**
      * @return true if *path* is in the Nix store (but not the Nix
@@ -79,13 +75,10 @@ struct StoreDirConfig : public Config
     /**
      * Constructs a unique store path name.
      */
-    StorePath makeStorePath(std::string_view type,
-        std::string_view hash, std::string_view name) const;
-    StorePath makeStorePath(std::string_view type,
-        const Hash & hash, std::string_view name) const;
+    StorePath makeStorePath(std::string_view type, std::string_view hash, std::string_view name) const;
+    StorePath makeStorePath(std::string_view type, const Hash & hash, std::string_view name) const;
 
-    StorePath makeOutputPath(std::string_view id,
-        const Hash & hash, std::string_view name) const;
+    StorePath makeOutputPath(std::string_view id, const Hash & hash, std::string_view name) const;
 
     StorePath makeFixedOutputPath(std::string_view name, const FixedOutputInfo & info) const;
 
@@ -93,7 +86,7 @@ struct StoreDirConfig : public Config
 
     /**
      * Read-only variant of addToStore(). It returns the store
-     * path for the given file sytem object.
+     * path for the given file system object.
      */
     std::pair<StorePath, Hash> computeStorePath(
         std::string_view name,
@@ -104,4 +97,4 @@ struct StoreDirConfig : public Config
         PathFilter & filter = defaultPathFilter) const;
 };
 
-}
+} // namespace nix

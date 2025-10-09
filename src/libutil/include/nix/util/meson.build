@@ -1,6 +1,6 @@
 # Public headers directory
 
-include_dirs = [include_directories('../..')]
+include_dirs = [ include_directories('../..') ]
 
 headers = files(
   'abstract-setting-to-json.hh',
@@ -8,6 +8,9 @@ headers = files(
   'archive.hh',
   'args.hh',
   'args/root.hh',
+  'array-from-string-literal.hh',
+  'base-n.hh',
+  'base-nix-32.hh',
   'callback.hh',
   'canon-path.hh',
   'checked-arithmetic.hh',
@@ -39,10 +42,12 @@ headers = files(
   'hash.hh',
   'hilite.hh',
   'json-impls.hh',
+  'json-non-null.hh',
   'json-utils.hh',
   'logging.hh',
   'lru-cache.hh',
   'memory-source-accessor.hh',
+  'mounted-source-accessor.hh',
   'muxable-pipe.hh',
   'os-string.hh',
   'pool.hh',
@@ -52,19 +57,19 @@ headers = files(
   'posix-source-accessor.hh',
   'processes.hh',
   'ref.hh',
-  'references.hh',
   'regex-combinators.hh',
   'repair-flag.hh',
   'serialise.hh',
   'signals.hh',
   'signature/local-keys.hh',
   'signature/signer.hh',
+  'sort.hh',
   'source-accessor.hh',
   'source-path.hh',
   'split.hh',
   'std-hash.hh',
-  'strings.hh',
   'strings-inline.hh',
+  'strings.hh',
   'suggestions.hh',
   'sync.hh',
   'tarfile.hh',

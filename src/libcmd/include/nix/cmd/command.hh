@@ -18,7 +18,7 @@ extern char ** savedArgv;
 class EvalState;
 struct Pos;
 class Store;
-class LocalFSStore;
+struct LocalFSStore;
 
 static constexpr Command::Category catHelp = -1;
 static constexpr Command::Category catSecondary = 100;
@@ -285,13 +285,16 @@ struct StorePathCommand : public StorePathsCommand
 struct RegisterCommand
 {
     typedef std::map<std::vector<std::string>, std::function<ref<Command>()>> Commands;
-    static Commands * commands;
+
+    static Commands & commands()
+    {
+        static Commands commands;
+        return commands;
+    }
 
     RegisterCommand(std::vector<std::string> && name, std::function<ref<Command>()> command)
     {
-        if (!commands)
-            commands = new Commands;
-        commands->emplace(name, command);
+        commands().emplace(name, command);
     }
 
     static nix::Commands getCommandsFor(const std::vector<std::string> & prefix);
@@ -333,7 +336,7 @@ struct MixEnvironment : virtual Args
 
     StringSet keepVars;
     StringSet unsetVars;
-    std::map<std::string, std::string> setVars;
+    StringMap setVars;
     bool ignoreEnvironment;
 
     MixEnvironment();
@@ -363,7 +366,7 @@ void completeFlakeRefWithFragment(
     const Strings & defaultFlakeAttrPaths,
     std::string_view prefix);
 
-std::string showVersions(const std::set<std::string> & versions);
+std::string showVersions(const StringSet & versions);
 
 void printClosureDiff(
     ref<Store> store, const StorePath & beforePath, const StorePath & afterPath, std::string_view indent);
@@ -374,4 +377,41 @@ void printClosureDiff(
  */
 void createOutLinks(const std::filesystem::path & outLink, const BuiltPaths & buildables, LocalFSStore & store);
 
-}
+/** `outLink` parameter, `createOutLinksMaybe` method. See `MixOutLinkByDefault`. */
+struct MixOutLinkBase : virtual Args
+{
+    /** Prefix for any output symlinks. Empty means do not write an output symlink. */
+    Path outLink;
+
+    MixOutLinkBase(const std::string & defaultOutLink)
+        : outLink(defaultOutLink)
+    {
+    }
+
+    void createOutLinksMaybe(const std::vector<BuiltPathWithResult> & buildables, ref<Store> & store);
+};
+
+/** `--out-link`, `--no-link`, `createOutLinksMaybe` */
+struct MixOutLinkByDefault : MixOutLinkBase, virtual Args
+{
+    MixOutLinkByDefault()
+        : MixOutLinkBase("result")
+    {
+        addFlag({
+            .longName = "out-link",
+            .shortName = 'o',
+            .description = "Use *path* as prefix for the symlinks to the build results. It defaults to `result`.",
+            .labels = {"path"},
+            .handler = {&outLink},
+            .completer = completePath,
+        });
+
+        addFlag({
+            .longName = "no-link",
+            .description = "Do not create symlinks to the build results.",
+            .handler = {&outLink, Path("")},
+        });
+    }
+};
+
+} // namespace nix

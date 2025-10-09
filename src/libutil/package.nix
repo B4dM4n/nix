@@ -37,6 +37,8 @@ mkMesonLibrary (finalAttrs: {
     ./include/nix/util/meson.build
     ./linux/meson.build
     ./linux/include/nix/util/meson.build
+    ./freebsd/meson.build
+    ./freebsd/include/nix/util/meson.build
     ./unix/meson.build
     ./unix/include/nix/util/meson.build
     ./windows/meson.build
@@ -50,7 +52,8 @@ mkMesonLibrary (finalAttrs: {
     libblake3
     libsodium
     openssl
-  ] ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid;
+  ]
+  ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid;
 
   propagatedBuildInputs = [
     boost

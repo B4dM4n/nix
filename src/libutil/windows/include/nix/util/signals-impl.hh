@@ -22,7 +22,13 @@ inline void setInterruptThrown()
     /* Do nothing for now */
 }
 
-void inline checkInterrupt()
+static inline bool isInterrupted()
+{
+    /* Do nothing for now */
+    return false;
+}
+
+inline void checkInterrupt()
 {
     /* Do nothing for now */
 }
@@ -38,4 +44,4 @@ struct ReceiveInterrupts
     ~ReceiveInterrupts() {}
 };
 
-}
+} // namespace nix

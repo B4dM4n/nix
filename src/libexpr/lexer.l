@@ -1,3 +1,4 @@
+%option 8bit
 %option reentrant bison-bridge bison-locations
 %option align
 %option noyywrap
@@ -25,8 +26,7 @@
 #endif
 
 #include "nix/expr/nixexpr.hh"
-#include "parser-tab.hh"
-#include "nix/expr/lexer-helpers.hh"
+#include "lexer-helpers.hh"
 
 namespace nix {
   struct LexerState;
@@ -81,6 +81,10 @@ static void requireExperimentalFeature(const ExperimentalFeature & feature, cons
 }
 
 }
+
+using enum nix::Parser::token::token_kind_type;
+using YYSTYPE = nix::Parser::value_type;
+using YYLTYPE = nix::Parser::location_type;
 
 // yacc generates code that uses unannotated fallthrough.
 #pragma GCC diagnostic ignored "-Wimplicit-fallthrough"

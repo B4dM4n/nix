@@ -20,7 +20,8 @@ namespace nix {
  * references to its elements.
  */
 template<typename T, size_t ChunkSize>
-class ChunkedVector {
+class ChunkedVector
+{
 private:
     uint32_t size_ = 0;
     std::vector<std::vector<T>> chunks;
@@ -45,21 +46,30 @@ public:
         addChunk();
     }
 
-    uint32_t size() const { return size_; }
+    uint32_t size() const noexcept
+    {
+        return size_;
+    }
 
-    std::pair<T &, uint32_t> add(T value)
+    template<typename... Args>
+    std::pair<T &, uint32_t> add(Args &&... args)
     {
         const auto idx = size_++;
-        auto & chunk = [&] () -> auto & {
+        auto & chunk = [&]() -> auto & {
             if (auto & back = chunks.back(); back.size() < ChunkSize)
                 return back;
             return addChunk();
         }();
-        auto & result = chunk.emplace_back(std::move(value));
+        auto & result = chunk.emplace_back(std::forward<Args>(args)...);
         return {result, idx};
     }
 
-    const T & operator[](uint32_t idx) const
+    /**
+     * Unchecked subscript operator.
+     * @pre add must have been called at least idx + 1 times.
+     * @throws nothing
+     */
+    const T & operator[](uint32_t idx) const noexcept
     {
         return chunks[idx / ChunkSize][idx % ChunkSize];
     }
@@ -72,4 +82,4 @@ public:
                 fn(e);
     }
 };
-}
+} // namespace nix

@@ -29,6 +29,11 @@ void setInterruptThrown();
 /**
  * @note Does nothing on Windows
  */
+static inline bool isInterrupted();
+
+/**
+ * @note Does nothing on Windows
+ */
 inline void checkInterrupt();
 
 /**
@@ -36,10 +41,9 @@ inline void checkInterrupt();
  */
 MakeError(Interrupted, BaseError);
 
-
 struct InterruptCallback
 {
-    virtual ~InterruptCallback() { };
+    virtual ~InterruptCallback() {};
 };
 
 /**
@@ -48,8 +52,7 @@ struct InterruptCallback
  *
  * @note Does nothing on Windows
  */
-std::unique_ptr<InterruptCallback> createInterruptCallback(
-    std::function<void()> callback);
+std::unique_ptr<InterruptCallback> createInterruptCallback(std::function<void()> callback);
 
 /**
  * A RAII class that causes the current thread to receive SIGUSR1 when
@@ -60,6 +63,6 @@ std::unique_ptr<InterruptCallback> createInterruptCallback(
  */
 struct ReceiveInterrupts;
 
-}
+} // namespace nix
 
 #include "nix/util/signals-impl.hh"

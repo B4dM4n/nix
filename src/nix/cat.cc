@@ -6,28 +6,24 @@ using namespace nix;
 
 struct MixCat : virtual Args
 {
-    std::string path;
-
-    void cat(ref<SourceAccessor> accessor)
+    void cat(ref<SourceAccessor> accessor, CanonPath path)
     {
-        auto st = accessor->lstat(CanonPath(path));
+        auto st = accessor->lstat(path);
         if (st.type != SourceAccessor::Type::tRegular)
-            throw Error("path '%1%' is not a regular file", path);
+            throw Error("path '%1%' is not a regular file", path.abs());
         logger->stop();
 
-        writeFull(getStandardOutput(), accessor->readFile(CanonPath(path)));
+        writeFull(getStandardOutput(), accessor->readFile(path));
     }
 };
 
 struct CmdCatStore : StoreCommand, MixCat
 {
+    std::string path;
+
     CmdCatStore()
     {
-        expectArgs({
-            .label = "path",
-            .handler = {&path},
-            .completer = completePath
-        });
+        expectArgs({.label = "path", .handler = {&path}, .completer = completePath});
     }
 
     std::string description() override
@@ -38,13 +34,17 @@ struct CmdCatStore : StoreCommand, MixCat
     std::string doc() override
     {
         return
-          #include "store-cat.md"
-          ;
+#include "store-cat.md"
+            ;
     }
 
     void run(ref<Store> store) override
     {
-        cat(store->getFSAccessor());
+        auto [storePath, rest] = store->toStorePath(path);
+        auto accessor = store->getFSAccessor(storePath);
+        if (!accessor)
+            throw InvalidPath("path '%1%' is not a valid store path", store->printStorePath(storePath));
+        cat(ref{std::move(accessor)}, CanonPath{rest});
     }
 };
 
@@ -52,13 +52,11 @@ struct CmdCatNar : StoreCommand, MixCat
 {
     Path narPath;
 
+    std::string path;
+
     CmdCatNar()
     {
-        expectArgs({
-            .label = "nar",
-            .handler = {&narPath},
-            .completer = completePath
-        });
+        expectArgs({.label = "nar", .handler = {&narPath}, .completer = completePath});
         expectArg("path", &path);
     }
 
@@ -70,13 +68,13 @@ struct CmdCatNar : StoreCommand, MixCat
     std::string doc() override
     {
         return
-          #include "nar-cat.md"
-          ;
+#include "nar-cat.md"
+            ;
     }
 
     void run(ref<Store> store) override
     {
-        cat(makeNarAccessor(readFile(narPath)));
+        cat(makeNarAccessor(readFile(narPath)), CanonPath{path});
     }
 };
 

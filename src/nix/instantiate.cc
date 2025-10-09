@@ -3,28 +3,35 @@
 #include "nix/main/common-args.hh"
 #include "nix/main/shared.hh"
 #include "nix/store/store-api.hh"
-#include "nix/store/local-fs-store.hh"
 
 #include <nlohmann/json.hpp>
 
 using namespace nix;
 
-nlohmann::json builtPathsToJSON(const std::vector<BuiltPathWithResult> & buildables, Store & store)
+static nlohmann::json toJSON(Store & store, const SingleDerivedPath::Opaque & o)
+{
+    return store.printStorePath(o.path);
+}
+
+static nlohmann::json toJSON(Store & store, const SingleDerivedPath & sdp)
+{
+    return std::visit([&](const auto & buildable) { return toJSON(store, buildable); }, sdp.raw());
+}
+
+static nlohmann::json
+builtPathsWithResultToJSON(const std::vector<BuiltPathWithResult> & buildables, const Store & store)
 {
     auto res = nlohmann::json::array();
     for (auto & b : buildables) {
-        std::visit([&](const auto & t) {
-            res.push_back(t.toJSON(store));
-        }, b.path.raw());
+        auto j = b.path.toJSON(store);
+        res.push_back(j);
     }
     return res;
 }
 
 struct CmdInstantiate : virtual InstallablesCommand, virtual MixJSON
 {
-    CmdInstantiate()
-    {
-    }
+    CmdInstantiate() {}
 
     std::string description() override
     {
@@ -34,29 +41,31 @@ struct CmdInstantiate : virtual InstallablesCommand, virtual MixJSON
     std::string doc() override
     {
         return
-          #include "instantiate.md"
-          ;
+#include "instantiate.md"
+            ;
     }
 
     void run(ref<Store> store, Installables && installables) override
     {
         auto buildables = Installable::build(getEvalStore(), store, Realise::Derivation, installables, bmNormal);
 
-        if (auto store2 = store.dynamic_pointer_cast<LocalFSStore>())
-            for (const auto &buildable : buildables) {
-                std::visit(overloaded {
-                    [&](BuiltPath::Opaque bo) {
-                        throw Error("'%1%' is not a derivation", store2->printStorePath(bo.path));
+        if (json)
+            logger->cout("%s", builtPathsWithResultToJSON(buildables, *store).dump());
+        else {
+            logger->stop();
+            for (auto & buildable : buildables) {
+                std::visit(
+                    overloaded{
+                        [&](const BuiltPath::Opaque & bo) {
+                            throw Error("'%1%' is not a derivation", store->printStorePath(bo.path));
+                        },
+                        [&](const BuiltPath::Built & bfd) {
+                            logger->cout(store->printStorePath(bfd.drvPath->outPath()));
+                        },
                     },
-                    [&](BuiltPath::Built bfd) {
-                        if (!json) logger->cout(store2->printStorePath(bfd.drvPath->outPath()));
-                    },
-                }, buildable.path.raw());
+                    buildable.path.raw());
             }
-        else
-            throw Error("can only run on local stores");
-
-        if (json) logger->cout("%s", builtPathsToJSON(buildables, *store).dump());
+        }
     }
 };
 

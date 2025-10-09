@@ -54,11 +54,13 @@ MakeError(TypeError, EvalError);
 MakeError(UndefinedVarError, EvalError);
 MakeError(MissingArgumentError, EvalError);
 MakeError(InfiniteRecursionError, EvalError);
+MakeError(IFDError, EvalBaseError);
 
 struct InvalidPathError : public EvalError
 {
 public:
     Path path;
+
     InvalidPathError(EvalState & state, const Path & path)
         : EvalError(state, "path '%s' is not valid", path)
     {
@@ -118,4 +120,4 @@ public:
     [[gnu::noinline, gnu::noreturn]] void panic();
 };
 
-}
+} // namespace nix

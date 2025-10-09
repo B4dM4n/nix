@@ -15,6 +15,7 @@ enum struct FetchMode { DryRun, Copy };
  * Copy the `path` to the Nix store.
  */
 StorePath fetchToStore(
+    const fetchers::Settings & settings,
     Store & store,
     const SourcePath & path,
     FetchMode mode,
@@ -26,4 +27,4 @@ StorePath fetchToStore(
 fetchers::Cache::Key makeFetchToStoreCacheKey(
     const std::string & name, const std::string & fingerprint, ContentAddressMethod method, const std::string & path);
 
-}
+} // namespace nix

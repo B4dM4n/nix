@@ -19,7 +19,7 @@ struct StoreDirConfig;
 struct StorePathWithOutputs
 {
     StorePath path;
-    std::set<std::string> outputs;
+    StringSet outputs;
 
     std::string to_string(const StoreDirConfig & store) const;
 
@@ -45,4 +45,4 @@ class Store;
 
 StorePathWithOutputs followLinksToStorePathWithOutputs(const Store & store, std::string_view pathWithOutputs);
 
-}
+} // namespace nix

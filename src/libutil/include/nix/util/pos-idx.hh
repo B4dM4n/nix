@@ -8,7 +8,7 @@ namespace nix {
 
 class PosIdx
 {
-    friend struct LazyPosAcessors;
+    friend struct LazyPosAccessors;
     friend class PosTable;
     friend class std::hash<PosIdx>;
 
@@ -49,7 +49,7 @@ public:
 
 inline PosIdx noPos = {};
 
-}
+} // namespace nix
 
 namespace std {
 

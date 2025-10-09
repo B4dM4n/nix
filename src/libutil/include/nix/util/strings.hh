@@ -1,5 +1,7 @@
 #pragma once
 
+#include "nix/util/types.hh"
+
 #include <list>
 #include <set>
 #include <string_view>
@@ -9,11 +11,6 @@
 #include <boost/container/small_vector.hpp>
 
 namespace nix {
-
-/*
- * workaround for unavailable view() method (C++20) of std::ostringstream under MacOS with clang-16
- */
-std::string_view toView(const std::ostringstream & os);
 
 /**
  * String tokenizer.
@@ -30,7 +27,7 @@ template<class C>
 C tokenizeString(std::string_view s, std::string_view separators = " \t\n\r");
 
 extern template std::list<std::string> tokenizeString(std::string_view s, std::string_view separators);
-extern template std::set<std::string> tokenizeString(std::string_view s, std::string_view separators);
+extern template StringSet tokenizeString(std::string_view s, std::string_view separators);
 extern template std::vector<std::string> tokenizeString(std::string_view s, std::string_view separators);
 
 /**
@@ -44,7 +41,7 @@ template<typename C>
 C splitString(std::string_view s, std::string_view separators);
 
 extern template std::list<std::string> splitString(std::string_view s, std::string_view separators);
-extern template std::set<std::string> splitString(std::string_view s, std::string_view separators);
+extern template StringSet splitString(std::string_view s, std::string_view separators);
 extern template std::vector<std::string> splitString(std::string_view s, std::string_view separators);
 
 /**
@@ -54,7 +51,7 @@ template<class C>
 std::string concatStringsSep(const std::string_view sep, const C & ss);
 
 extern template std::string concatStringsSep(std::string_view, const std::list<std::string> &);
-extern template std::string concatStringsSep(std::string_view, const std::set<std::string> &);
+extern template std::string concatStringsSep(std::string_view, const StringSet &);
 extern template std::string concatStringsSep(std::string_view, const std::vector<std::string> &);
 extern template std::string concatStringsSep(std::string_view, const boost::container::small_vector<std::string, 64> &);
 
@@ -85,7 +82,7 @@ template<class C>
 dropEmptyInitThenConcatStringsSep(const std::string_view sep, const C & ss);
 
 extern template std::string dropEmptyInitThenConcatStringsSep(std::string_view, const std::list<std::string> &);
-extern template std::string dropEmptyInitThenConcatStringsSep(std::string_view, const std::set<std::string> &);
+extern template std::string dropEmptyInitThenConcatStringsSep(std::string_view, const StringSet &);
 extern template std::string dropEmptyInitThenConcatStringsSep(std::string_view, const std::vector<std::string> &);
 
 /**
@@ -95,4 +92,39 @@ extern template std::string dropEmptyInitThenConcatStringsSep(std::string_view, 
  * Arguments that need to be passed to ssh with spaces in them.
  */
 std::list<std::string> shellSplitString(std::string_view s);
-}
+
+/**
+ * Hash implementation that can be used for zero-copy heterogenous lookup from
+ * P1690R1[1] in unordered containers.
+ *
+ * [1]: https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1690r1.html
+ */
+struct StringViewHash
+{
+private:
+    using HashType = std::hash<std::string_view>;
+
+public:
+    using is_transparent = void;
+
+    auto operator()(const char * str) const
+    {
+        /* This has a slight overhead due to an implicit strlen, but there isn't
+           a good way around it because the hash value of all overloads must be
+           consistent. Delegating to string_view is the solution initially proposed
+           in P0919R3. */
+        return HashType{}(std::string_view{str});
+    }
+
+    auto operator()(std::string_view str) const
+    {
+        return HashType{}(str);
+    }
+
+    auto operator()(const std::string & str) const
+    {
+        return HashType{}(std::string_view{str});
+    }
+};
+
+} // namespace nix

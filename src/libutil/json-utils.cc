@@ -10,20 +10,20 @@ namespace nix {
 const nlohmann::json * get(const nlohmann::json & map, const std::string & key)
 {
     auto i = map.find(key);
-    if (i == map.end()) return nullptr;
+    if (i == map.end())
+        return nullptr;
     return &*i;
 }
 
 nlohmann::json * get(nlohmann::json & map, const std::string & key)
 {
     auto i = map.find(key);
-    if (i == map.end()) return nullptr;
+    if (i == map.end())
+        return nullptr;
     return &*i;
 }
 
-const nlohmann::json & valueAt(
-    const nlohmann::json::object_t & map,
-    const std::string & key)
+const nlohmann::json & valueAt(const nlohmann::json::object_t & map, const std::string & key)
 {
     if (!map.contains(key))
         throw Error("Expected JSON object to contain key '%s' but it doesn't: %s", key, nlohmann::json(map).dump());
@@ -36,7 +36,7 @@ std::optional<nlohmann::json> optionalValueAt(const nlohmann::json::object_t & m
     if (!map.contains(key))
         return std::nullopt;
 
-    return std::optional { map.at(key) };
+    return std::optional{map.at(key)};
 }
 
 std::optional<nlohmann::json> nullableValueAt(const nlohmann::json::object_t & map, const std::string & key)
@@ -46,7 +46,7 @@ std::optional<nlohmann::json> nullableValueAt(const nlohmann::json::object_t & m
     if (value.is_null())
         return std::nullopt;
 
-    return std::optional { std::move(value) };
+    return std::optional{std::move(value)};
 }
 
 const nlohmann::json * getNullable(const nlohmann::json & value)
@@ -63,16 +63,14 @@ const nlohmann::json * getNullable(const nlohmann::json & value)
  * functions. It is too cumbersome and easy to forget to expect regular
  * JSON code to use it directly.
  */
-static const nlohmann::json & ensureType(
-    const nlohmann::json & value,
-    nlohmann::json::value_type expectedType
-    )
+static const nlohmann::json & ensureType(const nlohmann::json & value, nlohmann::json::value_type expectedType)
 {
     if (value.type() != expectedType)
         throw Error(
             "Expected JSON value to be of type '%s' but it is of type '%s': %s",
             nlohmann::json(expectedType).type_name(),
-            value.type_name(), value.dump());
+            value.type_name(),
+            value.dump());
 
     return value;
 }
@@ -92,9 +90,17 @@ const nlohmann::json::string_t & getString(const nlohmann::json & value)
     return ensureType(value, nlohmann::json::value_t::string).get_ref<const nlohmann::json::string_t &>();
 }
 
-const nlohmann::json::number_integer_t & getInteger(const nlohmann::json & value)
+const nlohmann::json::number_unsigned_t & getUnsigned(const nlohmann::json & value)
 {
-    return ensureType(value, nlohmann::json::value_t::number_integer).get_ref<const nlohmann::json::number_integer_t &>();
+    if (auto ptr = value.get<const nlohmann::json::number_unsigned_t *>()) {
+        return *ptr;
+    }
+    const char * typeName = value.type_name();
+    if (typeName == nlohmann::json(0).type_name()) {
+        typeName = value.is_number_float() ? "floating point number" : "signed integral number";
+    }
+    throw Error(
+        "Expected JSON value to be an unsigned integral number but it is of type '%s': %s", typeName, value.dump());
 }
 
 const nlohmann::json::boolean_t & getBoolean(const nlohmann::json & value)
@@ -137,4 +143,4 @@ StringSet getStringSet(const nlohmann::json & value)
 
     return stringSet;
 }
-}
+} // namespace nix

@@ -8,22 +8,35 @@
 
 namespace nix {
 
+Path LocalFSStoreConfig::getDefaultStateDir()
+{
+    return settings.nixStateDir;
+}
+
+Path LocalFSStoreConfig::getDefaultLogDir()
+{
+    return settings.nixLogDir;
+}
+
 LocalFSStoreConfig::LocalFSStoreConfig(PathView rootDir, const Params & params)
     : StoreConfig(params)
-    // Default `?root` from `rootDir` if non set
-    // FIXME don't duplicate description once we don't have root setting
-    , rootDir{
-        this,
-        !rootDir.empty() && params.count("root") == 0
-            ? (std::optional<Path>{rootDir})
-            : std::nullopt,
-        "root",
-        "Directory prefixed to all other paths."}
+    /* Default `?root` from `rootDir` if non set
+     * NOTE: We would like to just do rootDir.set(...), which would take care of
+     * all normalization and error checking for us. Unfortunately we cannot do
+     * that because of the complicated initialization order of other fields with
+     * the virtual class hierarchy of nix store configs, and the design of the
+     * settings system. As such, we have no choice but to redefine the field and
+     * manually repeat the same normalization logic.
+     */
+    , rootDir{makeRootDirSetting(
+          *this,
+          !rootDir.empty() && params.count("root") == 0 ? std::optional<Path>{canonPath(rootDir)} : std::nullopt)}
 {
 }
 
-LocalFSStore::LocalFSStore(const Params & params)
-    : Store(params)
+LocalFSStore::LocalFSStore(const Config & config)
+    : Store{static_cast<const Store::Config &>(*this)}
+    , config{config}
 {
 }
 
@@ -33,51 +46,70 @@ struct LocalStoreAccessor : PosixSourceAccessor
     bool requireValidPath;
 
     LocalStoreAccessor(ref<LocalFSStore> store, bool requireValidPath)
-        : store(store)
+        : PosixSourceAccessor(std::filesystem::path{store->config.realStoreDir.get()})
+        , store(store)
         , requireValidPath(requireValidPath)
-    { }
-
-    CanonPath toRealPath(const CanonPath & path)
     {
-        auto [storePath, rest] = store->toStorePath(path.abs());
+    }
+
+    void requireStoreObject(const CanonPath & path)
+    {
+        auto [storePath, rest] = store->toStorePath(store->storeDir + path.abs());
         if (requireValidPath && !store->isValidPath(storePath))
             throw InvalidPath("path '%1%' is not a valid store path", store->printStorePath(storePath));
-        return CanonPath(store->getRealStoreDir()) / storePath.to_string() / CanonPath(rest);
     }
 
     std::optional<Stat> maybeLstat(const CanonPath & path) override
     {
-        /* Handle the case where `path` is (a parent of) the store. */
-        if (isDirOrInDir(store->storeDir, path.abs()))
-            return Stat{ .type = tDirectory };
+        /* Also allow `path` to point to the entire store, which is
+           needed for resolving symlinks. */
+        if (path.isRoot())
+            return Stat{.type = tDirectory};
 
-        return PosixSourceAccessor::maybeLstat(toRealPath(path));
+        requireStoreObject(path);
+        return PosixSourceAccessor::maybeLstat(path);
     }
 
     DirEntries readDirectory(const CanonPath & path) override
     {
-        return PosixSourceAccessor::readDirectory(toRealPath(path));
+        requireStoreObject(path);
+        return PosixSourceAccessor::readDirectory(path);
     }
 
-    void readFile(
-        const CanonPath & path,
-        Sink & sink,
-        std::function<void(uint64_t)> sizeCallback) override
+    void readFile(const CanonPath & path, Sink & sink, std::function<void(uint64_t)> sizeCallback) override
     {
-        return PosixSourceAccessor::readFile(toRealPath(path), sink, sizeCallback);
+        requireStoreObject(path);
+        return PosixSourceAccessor::readFile(path, sink, sizeCallback);
     }
 
     std::string readLink(const CanonPath & path) override
     {
-        return PosixSourceAccessor::readLink(toRealPath(path));
+        requireStoreObject(path);
+        return PosixSourceAccessor::readLink(path);
     }
 };
 
 ref<SourceAccessor> LocalFSStore::getFSAccessor(bool requireValidPath)
 {
-    return make_ref<LocalStoreAccessor>(ref<LocalFSStore>(
-            std::dynamic_pointer_cast<LocalFSStore>(shared_from_this())),
-        requireValidPath);
+    return make_ref<LocalStoreAccessor>(
+        ref<LocalFSStore>(std::dynamic_pointer_cast<LocalFSStore>(shared_from_this())), requireValidPath);
+}
+
+std::shared_ptr<SourceAccessor> LocalFSStore::getFSAccessor(const StorePath & path, bool requireValidPath)
+{
+    auto absPath = std::filesystem::path{config.realStoreDir.get()} / path.to_string();
+    if (requireValidPath) {
+        /* Only return non-null if the store object is a fully-valid
+           member of the store. */
+        if (!isValidPath(path))
+            return nullptr;
+    } else {
+        /* Return non-null as long as the some file system data exists,
+           even if the store object is not fully registered. */
+        if (!pathExists(absPath))
+            return nullptr;
+    }
+    return std::make_shared<PosixSourceAccessor>(std::move(absPath));
 }
 
 void LocalFSStore::narFromPath(const StorePath & path, Sink & sink)
@@ -96,9 +128,8 @@ std::optional<std::string> LocalFSStore::getBuildLogExact(const StorePath & path
     for (int j = 0; j < 2; j++) {
 
         Path logPath =
-            j == 0
-            ? fmt("%s/%s/%s/%s", logDir, drvsLogDir, baseName.substr(0, 2), baseName.substr(2))
-            : fmt("%s/%s/%s", logDir, drvsLogDir, baseName);
+            j == 0 ? fmt("%s/%s/%s/%s", config.logDir.get(), drvsLogDir, baseName.substr(0, 2), baseName.substr(2))
+                   : fmt("%s/%s/%s", config.logDir.get(), drvsLogDir, baseName);
         Path logBz2Path = logPath + ".bz2";
 
         if (pathExists(logPath))
@@ -107,12 +138,12 @@ std::optional<std::string> LocalFSStore::getBuildLogExact(const StorePath & path
         else if (pathExists(logBz2Path)) {
             try {
                 return decompress("bzip2", readFile(logBz2Path));
-            } catch (Error &) { }
+            } catch (Error &) {
+            }
         }
-
     }
 
     return std::nullopt;
 }
 
-}
+} // namespace nix

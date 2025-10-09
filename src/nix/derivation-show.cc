@@ -11,7 +11,7 @@
 using namespace nix;
 using json = nlohmann::json;
 
-struct CmdShowDerivation : InstallablesCommand
+struct CmdShowDerivation : InstallablesCommand, MixPrintJSON
 {
     bool recursive = false;
 
@@ -21,7 +21,7 @@ struct CmdShowDerivation : InstallablesCommand
             .longName = "recursive",
             .shortName = 'r',
             .description = "Include the dependencies of the specified derivations.",
-            .handler = {&recursive, true}
+            .handler = {&recursive, true},
         });
     }
 
@@ -33,11 +33,14 @@ struct CmdShowDerivation : InstallablesCommand
     std::string doc() override
     {
         return
-          #include "derivation-show.md"
-          ;
+#include "derivation-show.md"
+            ;
     }
 
-    Category category() override { return catUtility; }
+    Category category() override
+    {
+        return catUtility;
+    }
 
     void run(ref<Store> store, Installables && installables) override
     {
@@ -52,12 +55,12 @@ struct CmdShowDerivation : InstallablesCommand
         json jsonRoot = json::object();
 
         for (auto & drvPath : drvPaths) {
-            if (!drvPath.isDerivation()) continue;
+            if (!drvPath.isDerivation())
+                continue;
 
-            jsonRoot[store->printStorePath(drvPath)] =
-                store->readDerivation(drvPath).toJSON(*store);
+            jsonRoot[drvPath.to_string()] = store->readDerivation(drvPath).toJSON();
         }
-        logger->cout(jsonRoot.dump(2));
+        printJSON(jsonRoot);
     }
 };
 

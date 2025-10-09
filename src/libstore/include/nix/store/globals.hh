@@ -11,6 +11,7 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/experimental-features.hh"
 #include "nix/util/users.hh"
+#include "nix/store/build/derivation-builder.hh"
 
 #include "nix/store/config.hh"
 
@@ -18,13 +19,33 @@ namespace nix {
 
 typedef enum { smEnabled, smRelaxed, smDisabled } SandboxMode;
 
+template<>
+SandboxMode BaseSetting<SandboxMode>::parse(const std::string & str) const;
+template<>
+std::string BaseSetting<SandboxMode>::to_string() const;
+
+template<>
+PathsInChroot BaseSetting<PathsInChroot>::parse(const std::string & str) const;
+template<>
+std::string BaseSetting<PathsInChroot>::to_string() const;
+
+template<>
+struct BaseSetting<PathsInChroot>::trait
+{
+    static constexpr bool appendable = true;
+};
+
+template<>
+void BaseSetting<PathsInChroot>::appendOrSet(PathsInChroot newValue, bool append);
+
 struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
 {
-    MaxBuildJobsSetting(Config * options,
+    MaxBuildJobsSetting(
+        Config * options,
         unsigned int def,
         const std::string & name,
         const std::string & description,
-        const std::set<std::string> & aliases = {})
+        const StringSet & aliases = {})
         : BaseSetting<unsigned int>(def, true, name, description, aliases)
     {
         options->addSetting(this);
@@ -34,16 +55,15 @@ struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
 };
 
 const uint32_t maxIdsPerBuild =
-    #if __linux__
+#ifdef __linux__
     1 << 16
-    #else
+#else
     1
-    #endif
+#endif
     ;
 
-class Settings : public Config {
-
-    unsigned int getDefaultCores();
+class Settings : public Config
+{
 
     StringSet getDefaultSystemFeatures();
 
@@ -56,6 +76,8 @@ class Settings : public Config {
 public:
 
     Settings();
+
+    unsigned int getDefaultCores() const;
 
     Path nixPrefix;
 
@@ -91,7 +113,10 @@ public:
      */
     Path nixDaemonSocketFile;
 
-    Setting<std::string> storeUri{this, getEnv("NIX_REMOTE").value_or("auto"), "store",
+    Setting<std::string> storeUri{
+        this,
+        getEnv("NIX_REMOTE").value_or("auto"),
+        "store",
         R"(
           The [URL of the Nix store](@docroot@/store/types/index.md#store-url-format)
           to use for most operations.
@@ -100,16 +125,17 @@ public:
           section of the manual for supported store types and settings.
         )"};
 
-    Setting<bool> keepFailed{this, false, "keep-failed",
-        "Whether to keep temporary directories of failed builds."};
+    Setting<bool> keepFailed{this, false, "keep-failed", "Whether to keep temporary directories of failed builds."};
 
-    Setting<bool> keepGoing{this, false, "keep-going",
-        "Whether to keep building derivations when another build fails."};
+    Setting<bool> keepGoing{
+        this, false, "keep-going", "Whether to keep building derivations when another build fails."};
 
     Setting<bool> tryFallback{
-        this, false, "fallback",
+        this,
+        false,
+        "fallback",
         R"(
-          If set to `true`, Nix will fall back to building from source if a
+          If set to `true`, Nix falls back to building from source if a
           binary substitute fails. This is equivalent to the `--fallback`
           flag. The default is `false`.
         )",
@@ -120,18 +146,23 @@ public:
      */
     bool verboseBuild = true;
 
-    Setting<size_t> logLines{this, 25, "log-lines",
+    Setting<size_t> logLines{
+        this,
+        25,
+        "log-lines",
         "The number of lines of the tail of "
         "the log to show if a build fails."};
 
     MaxBuildJobsSetting maxBuildJobs{
-        this, 1, "max-jobs",
+        this,
+        1,
+        "max-jobs",
         R"(
-          Maximum number of jobs that Nix will try to build locally in parallel.
+          Maximum number of jobs that Nix tries to build locally in parallel.
 
           The special value `auto` causes Nix to use the number of CPUs in your system.
           Use `0` to disable local builds and directly use the remote machines specified in [`builders`](#conf-builders).
-          This will not affect derivations that have [`preferLocalBuild = true`](@docroot@/language/advanced-attributes.md#adv-attr-preferLocalBuild), which are always built locally.
+          This doesn't affect derivations that have [`preferLocalBuild = true`](@docroot@/language/advanced-attributes.md#adv-attr-preferLocalBuild), which are always built locally.
 
           > **Note**
           >
@@ -143,17 +174,19 @@ public:
         {"build-max-jobs"}};
 
     Setting<unsigned int> maxSubstitutionJobs{
-        this, 16, "max-substitution-jobs",
+        this,
+        16,
+        "max-substitution-jobs",
         R"(
           This option defines the maximum number of substitution jobs that Nix
-          will try to run in parallel. The default is `16`. The minimum value
-          one can choose is `1` and lower values will be interpreted as `1`.
+          tries to run in parallel. The default is `16`. The minimum value
+          one can choose is `1` and lower values are interpreted as `1`.
         )",
         {"substitution-max-jobs"}};
 
     Setting<unsigned int> buildCores{
         this,
-        getDefaultCores(),
+        0,
         "cores",
         R"(
           Sets the value of the `NIX_BUILD_CORES` environment variable in the [invocation of the `builder` executable](@docroot@/language/derivations.md#builder-execution) of a derivation.
@@ -164,17 +197,15 @@ public:
           A very generic example using `derivation` and `xargs` may be more appropriate to explain the mechanism.
           Using `mkDerivation` as an example requires being aware of that there are multiple independent layers that are completely opaque here.
           -->
-          For instance, in Nixpkgs, if the attribute `enableParallelBuilding` for the `mkDerivation` build helper is set to `true`, it will pass the `-j${NIX_BUILD_CORES}` flag to GNU Make.
+          For instance, in Nixpkgs, if the attribute `enableParallelBuilding` for the `mkDerivation` build helper is set to `true`, it passes the `-j${NIX_BUILD_CORES}` flag to GNU Make.
 
-          The value `0` means that the `builder` should use all available CPU cores in the system.
+          If set to `0`, nix will detect the number of CPU cores and pass this number via NIX_BUILD_CORES.
 
           > **Note**
           >
           > The number of parallel local Nix build jobs is independently controlled with the [`max-jobs`](#conf-max-jobs) setting.
         )",
-        {"build-cores"},
-        // Don't document the machine-specific default value
-        false};
+        {"build-cores"}};
 
     /**
      * Read-only mode.  Don't copy stuff to the store, don't change
@@ -183,10 +214,12 @@ public:
     bool readOnlyMode = false;
 
     Setting<std::string> thisSystem{
-        this, NIX_LOCAL_SYSTEM, "system",
+        this,
+        NIX_LOCAL_SYSTEM,
+        "system",
         R"(
           The system type of the current Nix installation.
-          Nix will only build a given [store derivation](@docroot@/glossary.md#gloss-store-derivation) locally when its `system` attribute equals any of the values specified here or in [`extra-platforms`](#conf-extra-platforms).
+          Nix only builds a given [store derivation](@docroot@/glossary.md#gloss-store-derivation) locally when its `system` attribute equals any of the values specified here or in [`extra-platforms`](#conf-extra-platforms).
 
           The default value is set when Nix itself is compiled for the system it will run on.
           The following system types are widely used, as Nix is actively supported on these platforms:
@@ -210,7 +243,9 @@ public:
         )"};
 
     Setting<time_t> maxSilentTime{
-        this, 0, "max-silent-time",
+        this,
+        0,
+        "max-silent-time",
         R"(
           This option defines the maximum number of seconds that a builder can
           go without producing any data on standard output or standard error.
@@ -225,7 +260,9 @@ public:
         {"build-max-silent-time"}};
 
     Setting<time_t> buildTimeout{
-        this, 0, "timeout",
+        this,
+        0,
+        "timeout",
         R"(
           This option defines the maximum number of seconds that a builder can
           run. This is useful (for instance in an automated build system) to
@@ -238,7 +275,10 @@ public:
         )",
         {"build-timeout"}};
 
-    Setting<Strings> buildHook{this, {"nix", "__build-remote"}, "build-hook",
+    Setting<Strings> buildHook{
+        this,
+        {"nix", "__build-remote"},
+        "build-hook",
         R"(
           The path to the helper program that executes remote builds.
 
@@ -251,7 +291,9 @@ public:
         )"};
 
     Setting<std::string> builders{
-        this, "@" + nixConfDir + "/machines", "builders",
+        this,
+        "@" + nixConfDir + "/machines",
+        "builders",
         R"(
           A semicolon- or newline-separated list of build machines.
 
@@ -269,7 +311,7 @@ public:
           Only the first element is required.
           To leave a field at its default, set it to `-`.
 
-          1. The URI of the remote store in the format `ssh://[username@]hostname`.
+          1. The URI of the remote store in the format `ssh://[username@]hostname[:port]`.
 
              > **Example**
              >
@@ -292,28 +334,28 @@ public:
              > `i686-linux,x86_64-linux`
 
           3. The SSH identity file to be used to log in to the remote machine.
-             If omitted, SSH will use its regular identities.
+             If omitted, SSH uses its regular identities.
 
              > **Example**
              >
              > `/home/user/.ssh/id_mac`
 
-          4. The maximum number of builds that Nix will execute in parallel on the machine.
+          4. The maximum number of builds that Nix executes in parallel on the machine.
              Typically this should be equal to the number of CPU cores.
 
           5. The “speed factor”, indicating the relative speed of the machine as a positive integer.
-             If there are multiple machines of the right type, Nix will prefer the fastest, taking load into account.
+             If there are multiple machines of the right type, Nix prefers the fastest, taking load into account.
 
           6. A comma-separated list of supported [system features](#conf-system-features).
 
-             A machine will only be used to build a derivation if all the features in the derivation's [`requiredSystemFeatures`](@docroot@/language/advanced-attributes.html#adv-attr-requiredSystemFeatures) attribute are supported by that machine.
+             A machine is only used to build a derivation if all the features in the derivation's [`requiredSystemFeatures`](@docroot@/language/advanced-attributes.html#adv-attr-requiredSystemFeatures) attribute are supported by that machine.
 
           7. A comma-separated list of required [system features](#conf-system-features).
 
-             A machine will only be used to build a derivation if all of the machine’s required features appear in the derivation’s [`requiredSystemFeatures`](@docroot@/language/advanced-attributes.html#adv-attr-requiredSystemFeatures) attribute.
+             A machine is only used to build a derivation if all of the machine’s required features appear in the derivation’s [`requiredSystemFeatures`](@docroot@/language/advanced-attributes.html#adv-attr-requiredSystemFeatures) attribute.
 
           8. The (base64-encoded) public host key of the remote machine.
-             If omitted, SSH will use its regular `known_hosts` file.
+             If omitted, SSH uses its regular `known_hosts` file.
 
              The value for this field can be obtained via `base64 -w0`.
 
@@ -335,7 +377,7 @@ public:
           > nix@poochie.labs.cs.uu.nl  i686-linux /home/nix/.ssh/id_scratchy 1 2 kvm benchmark
           > ```
           >
-          > However, `poochie` will only build derivations that have the attribute
+          > However, `poochie` only builds derivations that have the attribute
           >
           > ```nix
           > requiredSystemFeatures = [ "benchmark" ];
@@ -348,7 +390,7 @@ public:
           > ```
           >
           > `itchy` cannot do builds that require `kvm`, but `scratchy` does support such builds.
-          > For regular builds, `itchy` will be preferred over `scratchy` because it has a higher speed factor.
+          > For regular builds, `itchy` is preferred over `scratchy` because it has a higher speed factor.
 
           For Nix to use substituters, the calling user must be in the [`trusted-users`](#conf-trusted-users) list.
 
@@ -365,30 +407,37 @@ public:
 
           To build only on remote machines and disable local builds, set [`max-jobs`](#conf-max-jobs) to 0.
 
-          If you want the remote machines to use substituters, set [`builders-use-substitutes`](#conf-builders-use-substituters) to `true`.
+          If you want the remote machines to use substituters, set [`builders-use-substitutes`](#conf-builders-use-substitutes) to `true`.
         )",
-        {}, false};
+        {},
+        false};
 
     Setting<bool> alwaysAllowSubstitutes{
-        this, false, "always-allow-substitutes",
+        this,
+        false,
+        "always-allow-substitutes",
         R"(
-          If set to `true`, Nix will ignore the [`allowSubstitutes`](@docroot@/language/advanced-attributes.md) attribute in derivations and always attempt to use [available substituters](#conf-substituters).
+          If set to `true`, Nix ignores the [`allowSubstitutes`](@docroot@/language/advanced-attributes.md) attribute in derivations and always attempt to use [available substituters](#conf-substituters).
         )"};
 
     Setting<bool> buildersUseSubstitutes{
-        this, false, "builders-use-substitutes",
+        this,
+        false,
+        "builders-use-substitutes",
         R"(
-          If set to `true`, Nix will instruct [remote build machines](#conf-builders) to use their own [`substituters`](#conf-substituters) if available.
+          If set to `true`, Nix instructs [remote build machines](#conf-builders) to use their own [`substituters`](#conf-substituters) if available.
 
-          It means that remote build hosts will fetch as many dependencies as possible from their own substituters (e.g, from `cache.nixos.org`) instead of waiting for the local machine to upload them all.
+          It means that remote build hosts fetches as many dependencies as possible from their own substituters (e.g, from `cache.nixos.org`) instead of waiting for the local machine to upload them all.
           This can drastically reduce build times if the network connection between the local machine and the remote build host is slow.
         )"};
 
-    Setting<off_t> reservedSize{this, 8 * 1024 * 1024, "gc-reserved-space",
-        "Amount of reserved disk space for the garbage collector."};
+    Setting<off_t> reservedSize{
+        this, 8 * 1024 * 1024, "gc-reserved-space", "Amount of reserved disk space for the garbage collector."};
 
     Setting<bool> fsyncMetadata{
-        this, true, "fsync-metadata",
+        this,
+        true,
+        "fsync-metadata",
         R"(
           If set to `true`, changes to the Nix store metadata (in
           `/nix/var/nix/db`) are synchronously flushed to disk. This improves
@@ -396,33 +445,39 @@ public:
           default is `true`.
         )"};
 
-    Setting<bool> fsyncStorePaths{this, false, "fsync-store-paths",
+    Setting<bool> fsyncStorePaths{
+        this,
+        false,
+        "fsync-store-paths",
         R"(
           Whether to call `fsync()` on store paths before registering them, to
           flush them to disk. This improves robustness in case of system crashes,
           but reduces performance. The default is `false`.
         )"};
 
-    Setting<bool> useSQLiteWAL{this, !isWSL1(), "use-sqlite-wal",
-        "Whether SQLite should use WAL mode."};
+    Setting<bool> useSQLiteWAL{this, !isWSL1(), "use-sqlite-wal", "Whether SQLite should use WAL mode."};
 
 #ifndef _WIN32
     // FIXME: remove this option, `fsync-store-paths` is faster.
-    Setting<bool> syncBeforeRegistering{this, false, "sync-before-registering",
-        "Whether to call `sync()` before registering a path as valid."};
+    Setting<bool> syncBeforeRegistering{
+        this, false, "sync-before-registering", "Whether to call `sync()` before registering a path as valid."};
 #endif
 
     Setting<bool> useSubstitutes{
-        this, true, "substitute",
+        this,
+        true,
+        "substitute",
         R"(
-          If set to `true` (default), Nix will use binary substitutes if
+          If set to `true` (default), Nix uses binary substitutes if
           available. This option can be disabled to force building from
           source.
         )",
         {"build-use-substitutes"}};
 
     Setting<std::string> buildUsersGroup{
-        this, "", "build-users-group",
+        this,
+        "",
+        "build-users-group",
         R"(
           This options specifies the Unix group containing the Nix build user
           accounts. In multi-user Nix installations, builds should not be
@@ -432,11 +487,11 @@ public:
           since that would allow him/her to influence the build result.
 
           Therefore, if this option is non-empty and specifies a valid group,
-          builds will be performed under the user accounts that are a member
+          builds are performed under the user accounts that are a member
           of the group specified here (as listed in `/etc/group`). Those user
           accounts should not be used for any other purpose\!
 
-          Nix will never run two builds under the same user account at the
+          Nix never runs two builds under the same user account at the
           same time. This is to prevent an obvious security hole: a malicious
           user writing a Nix expression that modifies the build result of a
           legitimate Nix expression being built by another user. Therefore it
@@ -448,7 +503,7 @@ public:
           by the Nix account, its group should be the group specified here,
           and its mode should be `1775`.
 
-          If the build users group is empty, builds will be performed under
+          If the build users group is empty, builds areperformed under
           the uid of the Nix process (that is, the uid of the caller if
           `NIX_REMOTE` is empty, the uid under which the Nix daemon runs if
           `NIX_REMOTE` is `daemon`). Obviously, this should not be used
@@ -456,37 +511,48 @@ public:
 
           Defaults to `nixbld` when running as root, *empty* otherwise.
         )",
-        {}, false};
+        {},
+        false};
 
-    Setting<bool> autoAllocateUids{this, false, "auto-allocate-uids",
+    Setting<bool> autoAllocateUids{
+        this,
+        false,
+        "auto-allocate-uids",
         R"(
           Whether to select UIDs for builds automatically, instead of using the
           users in `build-users-group`.
 
           UIDs are allocated starting at 872415232 (0x34000000) on Linux and 56930 on macOS.
-        )", {}, true, Xp::AutoAllocateUids};
+        )",
+        {},
+        true,
+        Xp::AutoAllocateUids};
 
-    Setting<uint32_t> startId{this,
-        #if __linux__
+    Setting<uint32_t> startId{
+        this,
+#ifdef __linux__
         0x34000000,
-        #else
+#else
         56930,
-        #endif
+#endif
         "start-id",
         "The first UID and GID to use for dynamic ID allocation."};
 
-    Setting<uint32_t> uidCount{this,
-        #if __linux__
+    Setting<uint32_t> uidCount{
+        this,
+#ifdef __linux__
         maxIdsPerBuild * 128,
-        #else
+#else
         128,
-        #endif
+#endif
         "id-count",
         "The number of UIDs/GIDs to use for dynamic ID allocation."};
 
-    #if __linux__
+#ifdef __linux__
     Setting<bool> useCgroups{
-        this, false, "use-cgroups",
+        this,
+        false,
+        "use-cgroups",
         R"(
           Whether to execute builds inside cgroups.
           This is only supported on Linux.
@@ -494,16 +560,21 @@ public:
           Cgroups are required and enabled automatically for derivations
           that require the `uid-range` system feature.
         )"};
-    #endif
+#endif
 
-    Setting<bool> impersonateLinux26{this, false, "impersonate-linux-26",
+    Setting<bool> impersonateLinux26{
+        this,
+        false,
+        "impersonate-linux-26",
         "Whether to impersonate a Linux 2.6 machine on newer kernels.",
         {"build-impersonate-linux-26"}};
 
     Setting<bool> keepLog{
-        this, true, "keep-build-log",
+        this,
+        true,
+        "keep-build-log",
         R"(
-          If set to `true` (the default), Nix will write the build log of a
+          If set to `true` (the default), Nix writes the build log of a
           derivation (i.e. the standard output and error of its builder) to
           the directory `/nix/var/log/nix/drvs`. The build log can be
           retrieved using the command `nix-store -l path`.
@@ -511,16 +582,20 @@ public:
         {"build-keep-log"}};
 
     Setting<bool> compressLog{
-        this, true, "compress-build-log",
+        this,
+        true,
+        "compress-build-log",
         R"(
           If set to `true` (the default), build logs written to
-          `/nix/var/log/nix/drvs` will be compressed on the fly using bzip2.
-          Otherwise, they will not be compressed.
+          `/nix/var/log/nix/drvs` are compressed on the fly using bzip2.
+          Otherwise, they are not compressed.
         )",
         {"build-compress-log"}};
 
     Setting<unsigned long> maxLogSize{
-        this, 0, "max-build-log-size",
+        this,
+        0,
+        "max-build-log-size",
         R"(
           This option defines the maximum number of bytes that a builder can
           write to its stdout/stderr. If the builder exceeds this limit, it’s
@@ -528,31 +603,34 @@ public:
         )",
         {"build-max-log-size"}};
 
-    Setting<unsigned int> pollInterval{this, 5, "build-poll-interval",
-        "How often (in seconds) to poll for locks."};
+    Setting<unsigned int> pollInterval{this, 5, "build-poll-interval", "How often (in seconds) to poll for locks."};
 
     Setting<bool> gcKeepOutputs{
-        this, false, "keep-outputs",
+        this,
+        false,
+        "keep-outputs",
         R"(
-          If `true`, the garbage collector will keep the outputs of
-          non-garbage derivations. If `false` (default), outputs will be
+          If `true`, the garbage collector keeps the outputs of
+          non-garbage derivations. If `false` (default), outputs are
           deleted unless they are GC roots themselves (or reachable from other
           roots).
 
           In general, outputs must be registered as roots separately. However,
           even if the output of a derivation is registered as a root, the
-          collector will still delete store paths that are used only at build
+          collector still deletes store paths that are used only at build
           time (e.g., the C compiler, or source tarballs downloaded from the
           network). To prevent it from doing so, set this option to `true`.
         )",
         {"gc-keep-outputs"}};
 
     Setting<bool> gcKeepDerivations{
-        this, true, "keep-derivations",
+        this,
+        true,
+        "keep-derivations",
         R"(
-          If `true` (default), the garbage collector will keep the derivations
-          from which non-garbage store paths were built. If `false`, they will
-          be deleted unless explicitly registered as a root (or reachable from
+          If `true` (default), the garbage collector keeps the derivations
+          from which non-garbage store paths were built. If `false`, they are
+          deleted unless explicitly registered as a root (or reachable from
           other roots).
 
           Keeping derivation around is useful for querying and traceability
@@ -564,7 +642,9 @@ public:
         {"gc-keep-derivations"}};
 
     Setting<bool> autoOptimiseStore{
-        this, false, "auto-optimise-store",
+        this,
+        false,
+        "auto-optimise-store",
         R"(
           If set to `true`, Nix automatically detects files in the store
           that have identical contents, and replaces them with hard links to
@@ -574,7 +654,9 @@ public:
         )"};
 
     Setting<bool> envKeepDerivations{
-        this, false, "keep-env-derivations",
+        this,
+        false,
+        "keep-env-derivations",
         R"(
           If `false` (default), derivations are not stored in Nix user
           environments. That is, the derivations of any build-time-only
@@ -582,7 +664,7 @@ public:
 
           If `true`, when you add a Nix derivation to a user environment, the
           path of the derivation is stored in the user environment. Thus, the
-          derivation will not be garbage-collected until the user environment
+          derivation isn't garbage-collected until the user environment
           generation is deleted (`nix-env --delete-generations`). To prevent
           build-time-only dependencies from being collected, you should also
           turn on `keep-outputs`.
@@ -596,16 +678,17 @@ public:
 
     Setting<SandboxMode> sandboxMode{
         this,
-        #if __linux__
-          smEnabled
-        #else
-          smDisabled
-        #endif
-        , "sandbox",
+#ifdef __linux__
+        smEnabled
+#else
+        smDisabled
+#endif
+        ,
+        "sandbox",
         R"(
-          If set to `true`, builds will be performed in a *sandboxed
+          If set to `true`, builds are performed in a *sandboxed
           environment*, i.e., they’re isolated from the normal file system
-          hierarchy and will only see their dependencies in the Nix store,
+          hierarchy and only see their dependencies in the Nix store,
           the temporary build directory, private versions of `/proc`,
           `/dev`, `/dev/shm` and `/dev/pts` (on Linux), and the paths
           configured with the `sandbox-paths` option. This is useful to
@@ -629,18 +712,20 @@ public:
         )",
         {"build-use-chroot", "build-use-sandbox"}};
 
-    Setting<PathSet> sandboxPaths{
-        this, {}, "sandbox-paths",
+    Setting<PathsInChroot> sandboxPaths{
+        this,
+        {},
+        "sandbox-paths",
         R"(
           A list of paths bind-mounted into Nix sandbox environments. You can
           use the syntax `target=source` to mount a path in a different
-          location in the sandbox; for instance, `/bin=/nix-bin` will mount
+          location in the sandbox; for instance, `/bin=/nix-bin` mounts
           the path `/nix-bin` as `/bin` inside the sandbox. If *source* is
           followed by `?`, then it is not an error if *source* does not exist;
-          for example, `/dev/nvidiactl?` specifies that `/dev/nvidiactl` will
+          for example, `/dev/nvidiactl?` specifies that `/dev/nvidiactl`
           only be mounted in the sandbox if it exists in the host filesystem.
 
-          If the source is in the Nix store, then its closure will be added to
+          If the source is in the Nix store, then its closure is added to
           the sandbox as well.
 
           Depending on how Nix was built, the default value for this option
@@ -648,22 +733,25 @@ public:
         )",
         {"build-chroot-dirs", "build-sandbox-paths"}};
 
-    Setting<bool> sandboxFallback{this, true, "sandbox-fallback",
-        "Whether to disable sandboxing when the kernel doesn't allow it."};
+    Setting<bool> sandboxFallback{
+        this, true, "sandbox-fallback", "Whether to disable sandboxing when the kernel doesn't allow it."};
 
 #ifndef _WIN32
-    Setting<bool> requireDropSupplementaryGroups{this, isRootUser(), "require-drop-supplementary-groups",
+    Setting<bool> requireDropSupplementaryGroups{
+        this,
+        isRootUser(),
+        "require-drop-supplementary-groups",
         R"(
           Following the principle of least privilege,
-          Nix will attempt to drop supplementary groups when building with sandboxing.
+          Nix attempts to drop supplementary groups when building with sandboxing.
 
           However this can fail under some circumstances.
           For example, if the user lacks the `CAP_SETGID` capability.
           Search `setgroups(2)` for `EPERM` to find more detailed information on this.
 
-          If you encounter such a failure, setting this option to `false` will let you ignore it and continue.
+          If you encounter such a failure, setting this option to `false` enables you to ignore it and continue.
           But before doing so, you should consider the security implications carefully.
-          Not dropping supplementary groups means the build sandbox will be less restricted than intended.
+          Not dropping supplementary groups means the build sandbox is less restricted than intended.
 
           This option defaults to `true` when the user is root
           (since `root` usually has permissions to call setgroups)
@@ -671,9 +759,11 @@ public:
         )"};
 #endif
 
-#if __linux__
+#ifdef __linux__
     Setting<std::string> sandboxShmSize{
-        this, "50%", "sandbox-dev-shm-size",
+        this,
+        "50%",
+        "sandbox-dev-shm-size",
         R"(
             *Linux only*
 
@@ -682,8 +772,13 @@ public:
             description of the `size` option of `tmpfs` in mount(8). The default
             is `50%`.
         )"};
+#endif
 
-    Setting<Path> sandboxBuildDir{this, "/build", "sandbox-build-dir",
+#if defined(__linux__) || defined(__FreeBSD__)
+    Setting<Path> sandboxBuildDir{
+        this,
+        "/build",
+        "sandbox-build-dir",
         R"(
             *Linux only*
 
@@ -693,28 +788,32 @@ public:
         )"};
 #endif
 
-    Setting<std::optional<Path>> buildDir{this, std::nullopt, "build-dir",
+    Setting<std::optional<Path>> buildDir{
+        this,
+        std::nullopt,
+        "build-dir",
         R"(
-            The directory on the host, in which derivations' temporary build directories are created.
-
-            If not set, Nix will use the system temporary directory indicated by the `TMPDIR` environment variable.
-            Note that builds are often performed by the Nix daemon, so its `TMPDIR` is used, and not that of the Nix command line interface.
-
-            This is also the location where [`--keep-failed`](@docroot@/command-ref/opt-common.md#opt-keep-failed) leaves its files.
-
-            If Nix runs without sandbox, or if the platform does not support sandboxing with bind mounts (e.g. macOS), then the [`builder`](@docroot@/language/derivations.md#attr-builder)'s environment will contain this directory, instead of the virtual location [`sandbox-build-dir`](#conf-sandbox-build-dir).
+            Override the `build-dir` store setting for all stores that have this setting.
         )"};
 
-    Setting<PathSet> allowedImpureHostPrefixes{this, {}, "allowed-impure-host-deps",
+    Setting<PathSet> allowedImpureHostPrefixes{
+        this,
+        {},
+        "allowed-impure-host-deps",
         "Which prefixes to allow derivations to ask for access to (primarily for Darwin)."};
 
-#if __APPLE__
-    Setting<bool> darwinLogSandboxViolations{this, false, "darwin-log-sandbox-violations",
+#ifdef __APPLE__
+    Setting<bool> darwinLogSandboxViolations{
+        this,
+        false,
+        "darwin-log-sandbox-violations",
         "Whether to log Darwin sandbox access violations to the system log."};
 #endif
 
     Setting<bool> runDiffHook{
-        this, false, "run-diff-hook",
+        this,
+        false,
+        "run-diff-hook",
         R"(
           If true, enable the execution of the `diff-hook` program.
 
@@ -724,7 +823,9 @@ public:
         )"};
 
     OptionalPathSetting diffHook{
-        this, std::nullopt, "diff-hook",
+        this,
+        std::nullopt,
+        "diff-hook",
         R"(
           Absolute path to an executable capable of diffing build
           results. The hook is executed if `run-diff-hook` is true, and the
@@ -743,12 +844,11 @@ public:
 
           3.  The path to the build's derivation
 
-          4.  The path to the build's scratch directory. This directory will
-              exist only if the build was run with `--keep-failed`.
+          4.  The path to the build's scratch directory. This directory
+              exists only if the build was run with `--keep-failed`.
 
-          The stderr and stdout output from the diff hook will not be
-          displayed to the user. Instead, it will print to the nix-daemon's
-          log.
+          The stderr and stdout output from the diff hook isn't
+          displayed to the user. Instead, it print to the nix-daemon's log.
 
           When using the Nix daemon, `diff-hook` must be set in the `nix.conf`
           configuration file, and cannot be passed at the command line.
@@ -773,7 +873,9 @@ public:
         {"binary-cache-public-keys"}};
 
     Setting<Strings> secretKeyFiles{
-        this, {}, "secret-key-files",
+        this,
+        {},
+        "secret-key-files",
         R"(
           A whitespace-separated list of files containing secret (private)
           keys. These are used to sign locally-built paths. They can be
@@ -783,11 +885,13 @@ public:
         )"};
 
     Setting<unsigned int> tarballTtl{
-        this, 60 * 60, "tarball-ttl",
+        this,
+        60 * 60,
+        "tarball-ttl",
         R"(
           The number of seconds a downloaded tarball is considered fresh. If
-          the cached tarball is stale, Nix will check whether it is still up
-          to date using the ETag header. Nix will download a new version if
+          the cached tarball is stale, Nix checks whether it is still up
+          to date using the ETag header. Nix downloads a new version if
           the ETag header is unsupported, or the cached ETag doesn't match.
 
           Setting the TTL to `0` forces Nix to always check if the tarball is
@@ -800,7 +904,9 @@ public:
         )"};
 
     Setting<bool> requireSigs{
-        this, true, "require-sigs",
+        this,
+        true,
+        "require-sigs",
         R"(
           If set to `true` (the default), any non-content-addressed path added
           or copied to the Nix store (e.g. when substituting from a binary
@@ -822,7 +928,7 @@ public:
         R"(
           System types of executables that can be run on this machine.
 
-          Nix will only build a given [store derivation](@docroot@/glossary.md#gloss-store-derivation) locally when its `system` attribute equals any of the values specified here or in the [`system` option](#conf-system).
+          Nix only builds a given [store derivation](@docroot@/glossary.md#gloss-store-derivation) locally when its `system` attribute equals any of the values specified here or in the [`system` option](#conf-system).
 
           Setting this can be useful to build derivations locally on compatible machines:
           - `i686-linux` executables can be run on `x86_64-linux` machines (set by default)
@@ -832,7 +938,7 @@ public:
           - `qemu-user` may be used to support non-native platforms (though this
           may be slow and buggy)
 
-          Build systems will usually detect the target platform to be the current physical system and therefore produce machine code incompatible with what may be intended in the derivation.
+          Build systems usually detect the target platform to be the current physical system and therefore produce machine code incompatible with what may be intended in the derivation.
           You should design your derivation's `builder` accordingly and cross-check the results when using this option against natively-built versions of your derivation.
         )",
         {},
@@ -879,7 +985,7 @@ public:
             On Linux, Nix can run builds in a user namespace where they run as root (UID 0) and have 65,536 UIDs available.
             This is primarily useful for running containers such as `systemd-nspawn` inside a Nix build. For an example, see [`tests/systemd-nspawn/nix`][nspawn].
 
-            [nspawn]: https://github.com/NixOS/nix/blob/67bcb99700a0da1395fa063d7c6586740b304598/tests/systemd-nspawn.nix.
+            [nspawn]: https://github.com/NixOS/nix/blob/67bcb99700a0da1395fa063d7c6586740b304598/tests/systemd-nspawn.nix
 
             Included by default on Linux if the [`auto-allocate-uids`](#conf-auto-allocate-uids) setting is enabled.
         )",
@@ -909,7 +1015,9 @@ public:
         {"binary-caches"}};
 
     Setting<StringSet> trustedSubstituters{
-        this, {}, "trusted-substituters",
+        this,
+        {},
+        "trusted-substituters",
         R"(
           A list of [Nix store URLs](@docroot@/store/types/index.md#store-url-format), separated by whitespace.
           These are not used by default, but users of the Nix daemon can enable them by specifying [`substituters`](#conf-substituters).
@@ -919,10 +1027,12 @@ public:
         {"trusted-binary-caches"}};
 
     Setting<unsigned int> ttlNegativeNarInfoCache{
-        this, 3600, "narinfo-cache-negative-ttl",
+        this,
+        3600,
+        "narinfo-cache-negative-ttl",
         R"(
           The TTL in seconds for negative lookups.
-          If a store path is queried from a [substituter](#conf-substituters) but was not found, there will be a negative lookup cached in the local disk cache database for the specified duration.
+          If a store path is queried from a [substituter](#conf-substituters) but was not found, a negative lookup is cached in the local disk cache database for the specified duration.
 
           Set to `0` to force updating the lookup cache.
 
@@ -935,10 +1045,12 @@ public:
         )"};
 
     Setting<unsigned int> ttlPositiveNarInfoCache{
-        this, 30 * 24 * 3600, "narinfo-cache-positive-ttl",
+        this,
+        30 * 24 * 3600,
+        "narinfo-cache-positive-ttl",
         R"(
           The TTL in seconds for positive lookups. If a store path is queried
-          from a substituter, the result of the query will be cached in the
+          from a substituter, the result of the query is cached in the
           local disk cache database including some of the NAR metadata. The
           default TTL is a month, setting a shorter TTL for positive lookups
           can be useful for binary caches that have frequent garbage
@@ -947,11 +1059,13 @@ public:
           mismatch if the build isn't reproducible.
         )"};
 
-    Setting<bool> printMissing{this, true, "print-missing",
-        "Whether to print what paths need to be built or downloaded."};
+    Setting<bool> printMissing{
+        this, true, "print-missing", "Whether to print what paths need to be built or downloaded."};
 
     Setting<std::string> preBuildHook{
-        this, "", "pre-build-hook",
+        this,
+        "",
+        "pre-build-hook",
         R"(
           If set, the path to a program that can set extra derivation-specific
           settings for this system. This is used for settings that can't be
@@ -970,7 +1084,9 @@ public:
         )"};
 
     Setting<std::string> postBuildHook{
-        this, "", "post-build-hook",
+        this,
+        "",
+        "post-build-hook",
         R"(
           Optional. The path to a program to execute after each build.
 
@@ -1014,17 +1130,21 @@ public:
               /nix/store/xfghy8ixrhz3kyy6p724iv3cxji088dx-bash-4.4-p23`.
         )"};
 
-    Setting<unsigned int> downloadSpeed {
-        this, 0, "download-speed",
+    Setting<unsigned int> downloadSpeed{
+        this,
+        0,
+        "download-speed",
         R"(
           Specify the maximum transfer rate in kilobytes per second you want
           Nix to use for downloads.
         )"};
 
     Setting<std::string> netrcFile{
-        this, fmt("%s/%s", nixConfDir, "netrc"), "netrc-file",
+        this,
+        fmt("%s/%s", nixConfDir, "netrc"),
+        "netrc-file",
         R"(
-          If set to an absolute path to a `netrc` file, Nix will use the HTTP
+          If set to an absolute path to a `netrc` file, Nix uses the HTTP
           authentication credentials in this file when trying to download from
           a remote host through HTTP or HTTPS. Defaults to
           `$NIX_CONF_DIR/netrc`.
@@ -1047,10 +1167,12 @@ public:
         )"};
 
     Setting<Path> caFile{
-        this, getDefaultSSLCertFile(), "ssl-cert-file",
+        this,
+        getDefaultSSLCertFile(),
+        "ssl-cert-file",
         R"(
           The path of a file containing CA certificates used to
-          authenticate `https://` downloads. Nix by default will use
+          authenticate `https://` downloads. Nix by default uses
           the first of the following files that exists:
 
           1. `/etc/ssl/certs/ca-certificates.crt`
@@ -1066,9 +1188,11 @@ public:
         // Don't document the machine-specific default value
         false};
 
-#if __linux__
+#ifdef __linux__
     Setting<bool> filterSyscalls{
-        this, true, "filter-syscalls",
+        this,
+        true,
+        "filter-syscalls",
         R"(
           Whether to prevent certain dangerous system calls, such as
           creation of setuid/setgid files or adding ACLs or extended
@@ -1077,12 +1201,14 @@ public:
         )"};
 
     Setting<bool> allowNewPrivileges{
-        this, false, "allow-new-privileges",
+        this,
+        false,
+        "allow-new-privileges",
         R"(
           (Linux-specific.) By default, builders on Linux cannot acquire new
           privileges by calling setuid/setgid programs or programs that have
           file capabilities. For example, programs such as `sudo` or `ping`
-          will fail. (Note that in sandbox builds, no such programs are
+          should fail. (Note that in sandbox builds, no such programs are
           available unless you bind-mount them into the sandbox via the
           `sandbox-paths` option.) You can allow the use of such programs by
           enabling this option. This is impure and usually undesirable, but
@@ -1093,7 +1219,9 @@ public:
 
 #if NIX_SUPPORT_ACL
     Setting<StringSet> ignoredAcls{
-        this, {"security.selinux", "system.nfs4_acl", "security.csm"}, "ignored-acls",
+        this,
+        {"security.selinux", "system.nfs4_acl", "security.csm"},
+        "ignored-acls",
         R"(
           A list of ACLs that should be ignored, normally Nix attempts to
           remove all ACLs from files and directories in the Nix store, but
@@ -1103,10 +1231,12 @@ public:
 #endif
 
     Setting<Strings> hashedMirrors{
-        this, {}, "hashed-mirrors",
+        this,
+        {},
+        "hashed-mirrors",
         R"(
           A list of web servers used by `builtins.fetchurl` to obtain files by
-          hash. Given a hash algorithm *ha* and a base-16 hash *h*, Nix will try to
+          hash. Given a hash algorithm *ha* and a base-16 hash *h*, Nix tries to
           download the file from *hashed-mirror*/*ha*/*h*. This allows files to
           be downloaded even if they have disappeared from their original URI.
           For example, given an example mirror `http://tarballs.nixos.org/`,
@@ -1121,11 +1251,13 @@ public:
 
           Nix will attempt to download this file from
           `http://tarballs.nixos.org/sha256/2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae`
-          first. If it is not available there, if will try the original URI.
+          first. If it is not available there, it tries the original URI.
         )"};
 
     Setting<uint64_t> minFree{
-        this, 0, "min-free",
+        this,
+        0,
+        "min-free",
         R"(
           When free disk space in `/nix/store` drops below `min-free` during a
           build, Nix performs a garbage-collection until `max-free` bytes are
@@ -1133,28 +1265,31 @@ public:
           disables this feature.
         )"};
 
-    Setting<uint64_t> maxFree{
-        // n.b. this is deliberately int64 max rather than uint64 max because
-        // this goes through the Nix language JSON parser and thus needs to be
-        // representable in Nix language integers.
-        this, std::numeric_limits<int64_t>::max(), "max-free",
-        R"(
+    Setting<uint64_t> maxFree{// n.b. this is deliberately int64 max rather than uint64 max because
+                              // this goes through the Nix language JSON parser and thus needs to be
+                              // representable in Nix language integers.
+                              this,
+                              std::numeric_limits<int64_t>::max(),
+                              "max-free",
+                              R"(
           When a garbage collection is triggered by the `min-free` option, it
           stops as soon as `max-free` bytes are available. The default is
           infinity (i.e. delete all garbage).
         )"};
 
-    Setting<uint64_t> minFreeCheckInterval{this, 5, "min-free-check-interval",
-        "Number of seconds between checking free disk space."};
+    Setting<uint64_t> minFreeCheckInterval{
+        this, 5, "min-free-check-interval", "Number of seconds between checking free disk space."};
 
-    Setting<size_t> narBufferSize{this, 32 * 1024 * 1024, "nar-buffer-size",
-        "Maximum size of NARs before spilling them to disk."};
+    Setting<size_t> narBufferSize{
+        this, 32 * 1024 * 1024, "nar-buffer-size", "Maximum size of NARs before spilling them to disk."};
 
     Setting<bool> allowSymlinkedStore{
-        this, false, "allow-symlinked-store",
+        this,
+        false,
+        "allow-symlinked-store",
         R"(
-          If set to `true`, Nix will stop complaining if the store directory
-          (typically /nix/store) contains symlink components.
+          If set to `true`, Nix stops complaining if the store directory
+          (typically `/nix/store`) contains symlink components.
 
           This risks making some builds "impure" because builders sometimes
           "canonicalise" paths by resolving all symlink components. Problems
@@ -1164,9 +1299,11 @@ public:
         )"};
 
     Setting<bool> useXDGBaseDirectories{
-        this, false, "use-xdg-base-directories",
+        this,
+        false,
+        "use-xdg-base-directories",
         R"(
-          If set to `true`, Nix will conform to the [XDG Base Directory Specification] for files in `$HOME`.
+          If set to `true`, Nix conforms to the [XDG Base Directory Specification] for files in `$HOME`.
           The environment variables used to implement this are documented in the [Environment Variables section](@docroot@/command-ref/env-common.md).
 
           [XDG Base Directory Specification]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
@@ -1193,10 +1330,12 @@ public:
           mv $HOME/.nix-defexpr $nix_state_home/defexpr
           mv $HOME/.nix-channels $nix_state_home/channels
           ```
-        )"
-    };
+        )"};
 
-    Setting<StringMap> impureEnv {this, {}, "impure-env",
+    Setting<StringMap> impureEnv{
+        this,
+        {},
+        "impure-env",
         R"(
           A list of items, each in the format of:
 
@@ -1204,16 +1343,15 @@ public:
 
           If the user is trusted (see `trusted-users` option), when building
           a fixed-output derivation, environment variables set in this option
-          will be passed to the builder if they are listed in [`impureEnvVars`](@docroot@/language/advanced-attributes.md#adv-attr-impureEnvVars).
+          is passed to the builder if they are listed in [`impureEnvVars`](@docroot@/language/advanced-attributes.md#adv-attr-impureEnvVars).
 
           This option is useful for, e.g., setting `https_proxy` for
           fixed-output derivations and in a multi-user Nix installation, or
           setting private access tokens when fetching a private repository.
         )",
-        {}, // aliases
+        {},   // aliases
         true, // document default
-        Xp::ConfigurableImpureEnv
-    };
+        Xp::ConfigurableImpureEnv};
 
     Setting<std::string> upgradeNixStorePathUrl{
         this,
@@ -1222,8 +1360,7 @@ public:
         R"(
           Used by `nix upgrade-nix`, the URL of the file that contains the
           store paths of the latest Nix release.
-        )"
-    };
+        )"};
 
     Setting<uint64_t> warnLargePathThreshold{
         this,
@@ -1234,10 +1371,79 @@ public:
           (as determined by its NAR serialisation).
           Default is 0, which disables the warning.
           Set it to 1 to warn on all paths.
-        )"
+        )"};
+
+    struct ExternalBuilder
+    {
+        std::vector<std::string> systems;
+        Path program;
+        std::vector<std::string> args;
+    };
+
+    using ExternalBuilders = std::vector<ExternalBuilder>;
+
+    Setting<ExternalBuilders> externalBuilders{
+        this,
+        {},
+        "external-builders",
+        R"(
+          Helper programs that execute derivations.
+
+          The program is passed a JSON document that describes the build environment as the final argument.
+          The JSON document looks like this:
+
+            {
+              "args": [
+                "-e",
+                "/nix/store/vj1c3wf9…-source-stdenv.sh",
+                "/nix/store/shkw4qm9…-default-builder.sh"
+              ],
+              "builder": "/nix/store/s1qkj0ph…-bash-5.2p37/bin/bash",
+              "env": {
+                "HOME": "/homeless-shelter",
+                "builder": "/nix/store/s1qkj0ph…-bash-5.2p37/bin/bash",
+                "nativeBuildInputs": "/nix/store/l31j72f1…-version-check-hook",
+                "out": "/nix/store/2yx2prgx…-hello-2.12.2"
+                …
+              },
+              "inputPaths": [
+                "/nix/store/14dciax3…-glibc-2.32-54-dev",
+                "/nix/store/1azs5s8z…-gettext-0.21",
+                …
+              ],
+              "outputs": {
+                "out": "/nix/store/2yx2prgx…-hello-2.12.2"
+              },
+              "realStoreDir": "/nix/store",
+              "storeDir": "/nix/store",
+              "system": "aarch64-linux",
+              "tmpDir": "/private/tmp/nix-build-hello-2.12.2.drv-0/build",
+              "tmpDirInSandbox": "/build",
+              "topTmpDir": "/private/tmp/nix-build-hello-2.12.2.drv-0",
+              "version": 1
+            }
+        )",
+        {},   // aliases
+        true, // document default
+        // NOTE(cole-h): even though we can make the experimental feature required here, the errors
+        // are not as good (it just becomes a warning if you try to use this setting without the
+        // experimental feature)
+        //
+        // With this commented out:
+        //
+        // error: experimental Nix feature 'external-builders' is disabled; add '--extra-experimental-features
+        // external-builders' to enable it
+        //
+        // With this uncommented:
+        //
+        // warning: Ignoring setting 'external-builders' because experimental feature 'external-builders' is not enabled
+        // error: Cannot build '/nix/store/vwsp4qd8…-opentofu-1.10.2.drv'.
+        //        Reason: required system or feature not available
+        //        Required system: 'aarch64-linux' with features {}
+        //        Current system: 'aarch64-darwin' with features {apple-virt, benchmark, big-parallel, nixos-test}
+        // Xp::ExternalBuilders
     };
 };
-
 
 // FIXME: don't use a global variable.
 extern Settings settings;
@@ -1276,4 +1482,4 @@ void initLibStore(bool loadConfig = true);
  */
 void assertLibStoreInitialized();
 
-}
+} // namespace nix

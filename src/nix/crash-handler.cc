@@ -8,7 +8,7 @@
 #include <sstream>
 
 // Darwin and FreeBSD stdenv do not define _GNU_SOURCE but do have _Unwind_Backtrace.
-#if __APPLE__ || __FreeBSD__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #  define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
 #endif
 
@@ -55,7 +55,7 @@ void onTerminate()
 
     std::abort();
 }
-}
+} // namespace
 
 void registerCrashHandler()
 {
@@ -65,4 +65,4 @@ void registerCrashHandler()
     // If you want signals, set up a minidump system and do it out-of-process.
     std::set_terminate(onTerminate);
 }
-}
+} // namespace nix

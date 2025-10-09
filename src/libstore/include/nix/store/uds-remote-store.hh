@@ -7,7 +7,9 @@
 
 namespace nix {
 
-struct UDSRemoteStoreConfig : virtual LocalFSStoreConfig, virtual RemoteStoreConfig
+struct UDSRemoteStoreConfig : std::enable_shared_from_this<UDSRemoteStoreConfig>,
+                              virtual LocalFSStoreConfig,
+                              virtual RemoteStoreConfig
 {
     // TODO(fzakaria): Delete this constructor once moved over to the factory pattern
     // outlined in https://github.com/NixOS/nix/issues/10766
@@ -17,14 +19,16 @@ struct UDSRemoteStoreConfig : virtual LocalFSStoreConfig, virtual RemoteStoreCon
     /**
      * @param authority is the socket path.
      */
-    UDSRemoteStoreConfig(
-        std::string_view scheme,
-        std::string_view authority,
-        const Params & params);
+    UDSRemoteStoreConfig(std::string_view scheme, std::string_view authority, const Params & params);
 
-    const std::string name() override { return "Local Daemon Store"; }
+    UDSRemoteStoreConfig(const Params & params);
 
-    std::string doc() override;
+    static const std::string name()
+    {
+        return "Local Daemon Store";
+    }
+
+    static std::string doc();
 
     /**
      * The path to the unix domain socket.
@@ -34,40 +38,38 @@ struct UDSRemoteStoreConfig : virtual LocalFSStoreConfig, virtual RemoteStoreCon
      */
     Path path;
 
-protected:
-    static constexpr char const * scheme = "unix";
+    static StringSet uriSchemes()
+    {
+        return {"unix"};
+    }
 
-public:
-    static std::set<std::string> uriSchemes()
-    { return {scheme}; }
+    ref<Store> openStore() const override;
+
+    StoreReference getReference() const override;
 };
 
-class UDSRemoteStore : public virtual UDSRemoteStoreConfig
-    , public virtual IndirectRootStore
-    , public virtual RemoteStore
+struct UDSRemoteStore : virtual IndirectRootStore, virtual RemoteStore
 {
-public:
+    using Config = UDSRemoteStoreConfig;
 
-    /**
-     * @deprecated This is the old API to construct the store.
-    */
-    UDSRemoteStore(const Params & params);
+    ref<const Config> config;
 
-    /**
-     * @param authority is the socket path.
-     */
-    UDSRemoteStore(
-        std::string_view scheme,
-        std::string_view authority,
-        const Params & params);
-
-    std::string getUri() override;
+    UDSRemoteStore(ref<const Config>);
 
     ref<SourceAccessor> getFSAccessor(bool requireValidPath = true) override
-    { return LocalFSStore::getFSAccessor(requireValidPath); }
+    {
+        return LocalFSStore::getFSAccessor(requireValidPath);
+    }
+
+    std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath = true) override
+    {
+        return LocalFSStore::getFSAccessor(path, requireValidPath);
+    }
 
     void narFromPath(const StorePath & path, Sink & sink) override
-    { LocalFSStore::narFromPath(path, sink); }
+    {
+        LocalFSStore::narFromPath(path, sink);
+    }
 
     /**
      * Implementation of `IndirectRootStore::addIndirectRoot()` which
@@ -90,4 +92,4 @@ private:
     ref<RemoteStore::Connection> openConnection() override;
 };
 
-}
+} // namespace nix

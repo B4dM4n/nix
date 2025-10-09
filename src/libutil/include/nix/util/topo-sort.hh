@@ -5,23 +5,26 @@
 
 namespace nix {
 
-template<typename T>
-std::vector<T> topoSort(std::set<T> items,
-        std::function<std::set<T>(const T &)> getChildren,
-        std::function<Error(const T &, const T &)> makeCycleError)
+template<typename T, typename Compare>
+std::vector<T> topoSort(
+    std::set<T, Compare> items,
+    std::function<std::set<T, Compare>(const T &)> getChildren,
+    std::function<Error(const T &, const T &)> makeCycleError)
 {
     std::vector<T> sorted;
-    std::set<T> visited, parents;
+    decltype(items) visited, parents;
 
     std::function<void(const T & path, const T * parent)> dfsVisit;
 
     dfsVisit = [&](const T & path, const T * parent) {
-        if (parents.count(path)) throw makeCycleError(path, *parent);
+        if (parents.count(path))
+            throw makeCycleError(path, *parent);
 
-        if (!visited.insert(path).second) return;
+        if (!visited.insert(path).second)
+            return;
         parents.insert(path);
 
-        std::set<T> references = getChildren(path);
+        auto references = getChildren(path);
 
         for (auto & i : references)
             /* Don't traverse into items that don't exist in our starting set. */
@@ -40,4 +43,4 @@ std::vector<T> topoSort(std::set<T> items,
     return sorted;
 }
 
-}
+} // namespace nix

@@ -1,7 +1,9 @@
-project('nix-expr-c', 'cpp',
+project(
+  'nix-expr-c',
+  'cpp',
   version : files('.version'),
   default_options : [
-    'cpp_std=c++2a',
+    'cpp_std=c++23',
     # TODO(Qyriad): increase the warning level
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
@@ -26,6 +28,7 @@ deps_public_maybe_subproject = [
 subdir('nix-meson-build-support/subprojects')
 
 subdir('nix-meson-build-support/common')
+subdir('nix-meson-build-support/asan-options')
 
 sources = files(
   'nix_api_expr.cc',
@@ -33,16 +36,14 @@ sources = files(
   'nix_api_value.cc',
 )
 
-include_dirs = [include_directories('.')]
+include_dirs = [ include_directories('.') ]
 
 headers = files(
   'nix_api_expr.h',
+  'nix_api_expr_internal.h',
   'nix_api_external.h',
   'nix_api_value.h',
 )
-
-# TODO move this header to libexpr, maybe don't use it in tests?
-headers += files('nix_api_expr_internal.h')
 
 subdir('nix-meson-build-support/export-all-symbols')
 subdir('nix-meson-build-support/windows-version')
@@ -50,9 +51,10 @@ subdir('nix-meson-build-support/windows-version')
 this_library = library(
   'nixexprc',
   sources,
+  soversion : nix_soversion,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
-  link_args: linker_export_flags,
+  link_args : linker_export_flags,
   prelink : true, # For C++ static initializers
   install : true,
 )
