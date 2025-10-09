@@ -19,7 +19,7 @@ namespace nix::fetchers {
 
 struct DownloadUrl
 {
-    std::string url;
+    ParsedURL url;
     Headers headers;
 };
 
@@ -38,7 +38,8 @@ struct GitArchiveInputScheme : InputScheme
         if (url.scheme != schemeName())
             return {};
 
-        auto path = tokenizeString<std::vector<std::string>>(url.path, "/");
+        /* This ignores empty path segments for back-compat. Older versions used a tokenizeString here. */
+        auto path = url.pathSegments(/*skipEmpty=*/true) | std::ranges::to<std::vector<std::string>>();
 
         std::optional<Hash> rev;
         std::optional<std::string> ref;
@@ -48,7 +49,7 @@ struct GitArchiveInputScheme : InputScheme
         if (size == 3) {
             if (std::regex_match(path[2], revRegex))
                 rev = Hash::parseAny(path[2], HashAlgorithm::SHA1);
-            else if (std::regex_match(path[2], refRegex))
+            else if (isLegalRefName(path[2]))
                 ref = path[2];
             else
                 throw BadURL("in URL '%s', '%s' is not a commit hash or branch/tag name", url, path[2]);
@@ -61,7 +62,7 @@ struct GitArchiveInputScheme : InputScheme
                 }
             }
 
-            if (std::regex_match(rs, refRegex)) {
+            if (isLegalRefName(rs)) {
                 ref = rs;
             } else {
                 throw BadURL("in URL '%s', '%s' is not a branch/tag name", url, rs);
@@ -75,7 +76,7 @@ struct GitArchiveInputScheme : InputScheme
                     throw BadURL("URL '%s' contains multiple commit hashes", url);
                 rev = Hash::parseAny(value, HashAlgorithm::SHA1);
             } else if (name == "ref") {
-                if (!std::regex_match(value, refRegex))
+                if (!isLegalRefName(value))
                     throw BadURL("URL '%s' contains an invalid branch/tag name", url);
                 if (ref)
                     throw BadURL("URL '%s' contains multiple branch/tag names", url);
@@ -139,12 +140,12 @@ struct GitArchiveInputScheme : InputScheme
         auto repo = getStrAttr(input.attrs, "repo");
         auto ref = input.getRef();
         auto rev = input.getRev();
-        auto path = owner + "/" + repo;
+        std::vector<std::string> path{owner, repo};
         assert(!(ref && rev));
         if (ref)
-            path += "/" + *ref;
+            path.push_back(*ref);
         if (rev)
-            path += "/" + rev->to_string(HashFormat::Base16, false);
+            path.push_back(rev->to_string(HashFormat::Base16, false));
         auto url = ParsedURL{
             .scheme = std::string{schemeName()},
             .path = path,
@@ -397,8 +398,8 @@ struct GitHubInputScheme : GitArchiveInputScheme
 
         Headers headers = makeHeadersWithAuthTokens(*input.settings, host, input);
 
-        auto json = nlohmann::json::parse(
-            readFile(store->toRealPath(downloadFile(store, *input.settings, url, "source", headers).storePath)));
+        auto downloadResult = downloadFile(store, *input.settings, url, "source", headers);
+        auto json = nlohmann::json::parse(store->getFSAccessor(downloadResult.storePath)->readFile(CanonPath::root));
 
         return RefInfo{
             .rev = Hash::parseAny(std::string{json["sha"]}, HashAlgorithm::SHA1),
@@ -420,7 +421,7 @@ struct GitHubInputScheme : GitArchiveInputScheme
         const auto url =
             fmt(urlFmt, host, getOwner(input), getRepo(input), input.getRev()->to_string(HashFormat::Base16, false));
 
-        return DownloadUrl{url, headers};
+        return DownloadUrl{parseURL(url), headers};
     }
 
     void clone(const Input & input, const Path & destDir) const override
@@ -471,8 +472,8 @@ struct GitLabInputScheme : GitArchiveInputScheme
 
         Headers headers = makeHeadersWithAuthTokens(*input.settings, host, input);
 
-        auto json = nlohmann::json::parse(
-            readFile(store->toRealPath(downloadFile(store, *input.settings, url, "source", headers).storePath)));
+        auto downloadResult = downloadFile(store, *input.settings, url, "source", headers);
+        auto json = nlohmann::json::parse(store->getFSAccessor(downloadResult.storePath)->readFile(CanonPath::root));
 
         if (json.is_array() && json.size() >= 1 && json[0]["id"] != nullptr) {
             return RefInfo{.rev = Hash::parseAny(std::string(json[0]["id"]), HashAlgorithm::SHA1)};
@@ -500,7 +501,7 @@ struct GitLabInputScheme : GitArchiveInputScheme
                 input.getRev()->to_string(HashFormat::Base16, false));
 
         Headers headers = makeHeadersWithAuthTokens(*input.settings, host, input);
-        return DownloadUrl{url, headers};
+        return DownloadUrl{parseURL(url), headers};
     }
 
     void clone(const Input & input, const Path & destDir) const override
@@ -592,7 +593,7 @@ struct SourceHutInputScheme : GitArchiveInputScheme
                 input.getRev()->to_string(HashFormat::Base16, false));
 
         Headers headers = makeHeadersWithAuthTokens(*input.settings, host, input);
-        return DownloadUrl{url, headers};
+        return DownloadUrl{parseURL(url), headers};
     }
 
     void clone(const Input & input, const Path & destDir) const override

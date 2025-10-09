@@ -12,6 +12,7 @@
 #include "nix/util/posix-source-accessor.hh"
 #include "nix/cmd/misc-store-flags.hh"
 #include "nix/util/terminal.hh"
+#include "nix/util/environment-variables.hh"
 
 #include "man-pages.hh"
 
@@ -104,7 +105,7 @@ std::tuple<StorePath, Hash> prefetchFile(
 
             FdSink sink(fd.get());
 
-            FileTransferRequest req(url);
+            FileTransferRequest req(ValidURL{url});
             req.decompress = false;
             getFileTransfer()->download(std::move(req), sink);
         }
@@ -247,7 +248,9 @@ static int main_nix_prefetch_url(int argc, char ** argv)
         if (!printPath)
             printInfo("path is '%s'", store->printStorePath(storePath));
 
-        logger->cout(printHash16or32(hash));
+        assert(static_cast<char>(hash.algo));
+        logger->cout(hash.to_string(hash.algo == HashAlgorithm::MD5 ? HashFormat::Base16 : HashFormat::Nix32, false));
+
         if (printPath)
             logger->cout(store->printStorePath(storePath));
 

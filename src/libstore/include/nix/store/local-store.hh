@@ -11,7 +11,7 @@
 #include <chrono>
 #include <future>
 #include <string>
-#include <unordered_set>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 namespace nix {
 
@@ -74,9 +74,19 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
 
     LocalStoreConfig(std::string_view scheme, std::string_view authority, const Params & params);
 
+private:
+
+    /**
+     * An indirection so that we don't need to refer to global settings
+     * in headers.
+     */
+    bool getDefaultRequireSigs();
+
+public:
+
     Setting<bool> requireSigs{
         this,
-        settings.requireSigs,
+        getDefaultRequireSigs(),
         "require-sigs",
         "Whether store paths copied into this store should have a trusted signature."};
 
@@ -111,6 +121,8 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
     static std::string doc();
 
     ref<Store> openStore() const override;
+
+    StoreReference getReference() const override;
 };
 
 class LocalStore : public virtual IndirectRootStore, public virtual GcStore
@@ -162,7 +174,11 @@ private:
         std::unique_ptr<PublicKeys> publicKeys;
     };
 
-    Sync<State> _state;
+    /**
+     * Mutable state. It's behind a `ref` to reduce false sharing
+     * between immutable and mutable fields.
+     */
+    ref<Sync<State>> _state;
 
 public:
 
@@ -195,8 +211,6 @@ public:
     /**
      * Implementations of abstract store API methods.
      */
-
-    std::string getUri() override;
 
     bool isValidPathUncached(const StorePath & path) override;
 
@@ -428,7 +442,7 @@ private:
 
     std::pair<std::filesystem::path, AutoCloseFD> createTempDirInStore();
 
-    typedef std::unordered_set<ino_t> InodeHash;
+    typedef boost::unordered_flat_set<ino_t> InodeHash;
 
     InodeHash loadInodeHash();
     Strings readDirectoryIgnoringInodes(const Path & path, const InodeHash & inodeHash);
@@ -442,7 +456,6 @@ private:
     void addBuildLog(const StorePath & drvPath, std::string_view log) override;
 
     friend struct PathSubstitutionGoal;
-    friend struct SubstitutionGoal;
     friend struct DerivationGoal;
 };
 

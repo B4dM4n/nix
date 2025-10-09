@@ -1,11 +1,11 @@
 #pragma once
 ///@file
-#include "store-config-private.hh"
+#include "nix/store/config.hh"
 #if NIX_WITH_S3_SUPPORT
 
 #  include "nix/util/ref.hh"
+#  include "nix/store/s3-url.hh"
 
-#  include <optional>
 #  include <string>
 
 namespace Aws {

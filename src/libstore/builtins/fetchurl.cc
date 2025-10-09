@@ -1,6 +1,7 @@
 #include "nix/store/builtins.hh"
 #include "nix/store/filetransfer.hh"
 #include "nix/store/store-api.hh"
+#include "nix/store/globals.hh"
 #include "nix/util/archive.hh"
 #include "nix/util/compression.hh"
 
@@ -36,7 +37,7 @@ static void builtinFetchurl(const BuiltinBuilderContext & ctx)
 
     auto fetch = [&](const std::string & url) {
         auto source = sinkToSource([&](Sink & sink) {
-            FileTransferRequest request(url);
+            FileTransferRequest request(ValidURL{url});
             request.decompress = false;
 
             auto decompressor = makeDecompressionSink(unpack && hasSuffix(mainUrl, ".xz") ? "xz" : "none", sink);

@@ -51,45 +51,44 @@ using BothFixtures = ::testing::Types<DerivationAdvancedAttrsTest, CaDerivationA
 
 TYPED_TEST_SUITE(DerivationAdvancedAttrsBothTest, BothFixtures);
 
-#define TEST_ATERM_JSON(STEM, NAME)                                                                      \
-    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_from_json)                           \
-    {                                                                                                    \
-        this->readTest(NAME ".json", [&](const auto & encoded_) {                                        \
-            auto encoded = json::parse(encoded_);                                                        \
-            /* Use DRV file instead of C++ literal as source of truth. */                                \
-            auto aterm = readFile(this->goldenMaster(NAME ".drv"));                                      \
-            auto expected = parseDerivation(*this->store, std::move(aterm), NAME, this->mockXpSettings); \
-            Derivation got = Derivation::fromJSON(*this->store, encoded, this->mockXpSettings);          \
-            EXPECT_EQ(got, expected);                                                                    \
-        });                                                                                              \
-    }                                                                                                    \
-                                                                                                         \
-    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_to_json)                             \
-    {                                                                                                    \
-        this->writeTest(                                                                                 \
-            NAME ".json",                                                                                \
-            [&]() -> json {                                                                              \
-                /* Use DRV file instead of C++ literal as source of truth. */                            \
-                auto aterm = readFile(this->goldenMaster(NAME ".drv"));                                  \
-                return parseDerivation(*this->store, std::move(aterm), NAME, this->mockXpSettings)       \
-                    .toJSON(*this->store);                                                               \
-            },                                                                                           \
-            [](const auto & file) { return json::parse(readFile(file)); },                               \
-            [](const auto & file, const auto & got) { return writeFile(file, got.dump(2) + "\n"); });    \
-    }                                                                                                    \
-                                                                                                         \
-    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_from_aterm)                          \
-    {                                                                                                    \
-        this->readTest(NAME ".drv", [&](auto encoded) {                                                  \
-            /* Use JSON file instead of C++ literal as source of truth. */                               \
-            auto json = json::parse(readFile(this->goldenMaster(NAME ".json")));                         \
-            auto expected = Derivation::fromJSON(*this->store, json, this->mockXpSettings);              \
-            auto got = parseDerivation(*this->store, std::move(encoded), NAME, this->mockXpSettings);    \
-            EXPECT_EQ(got.toJSON(*this->store), expected.toJSON(*this->store));                          \
-            EXPECT_EQ(got, expected);                                                                    \
-        });                                                                                              \
-    }                                                                                                    \
-                                                                                                         \
+#define TEST_ATERM_JSON(STEM, NAME)                                                                          \
+    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_from_json)                               \
+    {                                                                                                        \
+        this->readTest(NAME ".json", [&](const auto & encoded_) {                                            \
+            auto encoded = json::parse(encoded_);                                                            \
+            /* Use DRV file instead of C++ literal as source of truth. */                                    \
+            auto aterm = readFile(this->goldenMaster(NAME ".drv"));                                          \
+            auto expected = parseDerivation(*this->store, std::move(aterm), NAME, this->mockXpSettings);     \
+            Derivation got = Derivation::fromJSON(encoded, this->mockXpSettings);                            \
+            EXPECT_EQ(got, expected);                                                                        \
+        });                                                                                                  \
+    }                                                                                                        \
+                                                                                                             \
+    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_to_json)                                 \
+    {                                                                                                        \
+        this->writeTest(                                                                                     \
+            NAME ".json",                                                                                    \
+            [&]() -> json {                                                                                  \
+                /* Use DRV file instead of C++ literal as source of truth. */                                \
+                auto aterm = readFile(this->goldenMaster(NAME ".drv"));                                      \
+                return parseDerivation(*this->store, std::move(aterm), NAME, this->mockXpSettings).toJSON(); \
+            },                                                                                               \
+            [](const auto & file) { return json::parse(readFile(file)); },                                   \
+            [](const auto & file, const auto & got) { return writeFile(file, got.dump(2) + "\n"); });        \
+    }                                                                                                        \
+                                                                                                             \
+    TYPED_TEST(DerivationAdvancedAttrsBothTest, Derivation_##STEM##_from_aterm)                              \
+    {                                                                                                        \
+        this->readTest(NAME ".drv", [&](auto encoded) {                                                      \
+            /* Use JSON file instead of C++ literal as source of truth. */                                   \
+            auto json = json::parse(readFile(this->goldenMaster(NAME ".json")));                             \
+            auto expected = Derivation::fromJSON(json, this->mockXpSettings);                                \
+            auto got = parseDerivation(*this->store, std::move(encoded), NAME, this->mockXpSettings);        \
+            EXPECT_EQ(got.toJSON(), expected.toJSON());                                                      \
+            EXPECT_EQ(got, expected);                                                                        \
+        });                                                                                                  \
+    }                                                                                                        \
+                                                                                                             \
     /* No corresponding write test, because we need to read the drv to write the json file */
 
 TEST_ATERM_JSON(advancedAttributes, "advanced-attributes-defaults");
@@ -108,10 +107,9 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_defaults)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
-        EXPECT_TRUE(!parsedDrv);
+        EXPECT_TRUE(!got.structuredAttrs);
 
         EXPECT_EQ(options.additionalSandboxProfile, "");
         EXPECT_EQ(options.noChroot, false);
@@ -143,8 +141,7 @@ TEST_F(DerivationAdvancedAttrsTest, advancedAttributes_defaults)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(options.getRequiredSystemFeatures(got), StringSet{});
     });
@@ -157,8 +154,7 @@ TEST_F(CaDerivationAdvancedAttrsTest, advancedAttributes_defaults)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(options.getRequiredSystemFeatures(got), StringSet{"ca-derivations"});
     });
@@ -171,10 +167,9 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
-        EXPECT_TRUE(!parsedDrv);
+        EXPECT_TRUE(!got.structuredAttrs);
 
         EXPECT_EQ(options.additionalSandboxProfile, "sandcastle");
         EXPECT_EQ(options.noChroot, true);
@@ -195,8 +190,7 @@ TEST_F(DerivationAdvancedAttrsTest, advancedAttributes)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(
             options.exportReferencesGraph,
@@ -245,8 +239,7 @@ TEST_F(CaDerivationAdvancedAttrsTest, advancedAttributes)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(
             options.exportReferencesGraph,
@@ -298,10 +291,9 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_structuredAttrs_d
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
-        EXPECT_TRUE(parsedDrv);
+        EXPECT_TRUE(got.structuredAttrs);
 
         EXPECT_EQ(options.additionalSandboxProfile, "");
         EXPECT_EQ(options.noChroot, false);
@@ -332,8 +324,7 @@ TEST_F(DerivationAdvancedAttrsTest, advancedAttributes_structuredAttrs_defaults)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(options.getRequiredSystemFeatures(got), StringSet{});
     });
@@ -346,8 +337,7 @@ TEST_F(CaDerivationAdvancedAttrsTest, advancedAttributes_structuredAttrs_default
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(options.getRequiredSystemFeatures(got), StringSet{"ca-derivations"});
     });
@@ -360,10 +350,9 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_structuredAttrs)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
-        EXPECT_TRUE(parsedDrv);
+        EXPECT_TRUE(got.structuredAttrs);
 
         EXPECT_EQ(options.additionalSandboxProfile, "sandcastle");
         EXPECT_EQ(options.noChroot, true);
@@ -394,8 +383,7 @@ TEST_F(DerivationAdvancedAttrsTest, advancedAttributes_structuredAttrs)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(
             options.exportReferencesGraph,
@@ -448,8 +436,7 @@ TEST_F(CaDerivationAdvancedAttrsTest, advancedAttributes_structuredAttrs)
 
         auto drvPath = writeDerivation(*this->store, got, NoRepair, true);
 
-        auto parsedDrv = StructuredAttrs::tryParse(got.env);
-        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, parsedDrv ? &*parsedDrv : nullptr);
+        DerivationOptions options = DerivationOptions::fromStructuredAttrs(got.env, got.structuredAttrs);
 
         EXPECT_EQ(
             options.exportReferencesGraph,

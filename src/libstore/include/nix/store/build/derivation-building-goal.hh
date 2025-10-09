@@ -1,8 +1,8 @@
 #pragma once
 ///@file
 
-#include "nix/store/parsed-derivations.hh"
 #include "nix/store/derivations.hh"
+#include "nix/store/parsed-derivations.hh"
 #include "nix/store/derivation-options.hh"
 #include "nix/store/build/derivation-building-misc.hh"
 #include "nix/store/outputs-spec.hh"
@@ -14,6 +14,7 @@ namespace nix {
 
 using std::map;
 
+struct BuilderFailureError;
 #ifndef _WIN32 // TODO enable build hook on Windows
 struct HookInstance;
 struct DerivationBuilder;
@@ -21,14 +22,19 @@ struct DerivationBuilder;
 
 typedef enum { rpAccept, rpDecline, rpPostpone } HookReply;
 
-/** Used internally */
-void runPostBuildHook(Store & store, Logger & logger, const StorePath & drvPath, const StorePathSet & outputPaths);
-
 /**
- * A goal for building some or all of the outputs of a derivation.
+ * A goal for building a derivation. Substitution, (or any other method of
+ * obtaining the outputs) will not be attempted, so it is the calling goal's
+ * responsibility to try to substitute first.
  */
 struct DerivationBuildingGoal : public Goal
 {
+    DerivationBuildingGoal(
+        const StorePath & drvPath, const Derivation & drv, Worker & worker, BuildMode buildMode = bmNormal);
+    ~DerivationBuildingGoal();
+
+private:
+
     /** The path of the derivation. */
     StorePath drvPath;
 
@@ -37,17 +43,11 @@ struct DerivationBuildingGoal : public Goal
      */
     std::unique_ptr<Derivation> drv;
 
-    std::unique_ptr<StructuredAttrs> parsedDrv;
     std::unique_ptr<DerivationOptions> drvOptions;
 
     /**
      * The remainder is state held during the build.
      */
-
-    /**
-     * Locks on (fixed) output paths.
-     */
-    PathLocks outputLocks;
 
     std::optional<StringSet> derivationGroups;
 
@@ -56,8 +56,6 @@ struct DerivationBuildingGoal : public Goal
      * immediate input paths).
      */
     StorePathSet inputPaths;
-
-    std::map<std::string, InitialOutput> initialOutputs;
 
     /**
      * File descriptor for the log file.
@@ -95,21 +93,7 @@ struct DerivationBuildingGoal : public Goal
 
     std::unique_ptr<Activity> act;
 
-    /**
-     * Activity that denotes waiting for a lock.
-     */
-    std::unique_ptr<Activity> actLock;
-
     std::map<ActivityId, Activity> builderActivities;
-
-    /**
-     * The remote machine on which we're building.
-     */
-    std::string machineName;
-
-    DerivationBuildingGoal(
-        const StorePath & drvPath, const Derivation & drv, Worker & worker, BuildMode buildMode = bmNormal);
-    ~DerivationBuildingGoal();
 
     void timedOut(Error && ex) override;
 
@@ -120,12 +104,11 @@ struct DerivationBuildingGoal : public Goal
      */
     Co gaveUpOnSubstitution();
     Co tryToBuild();
-    Co hookDone();
 
     /**
      * Is the build hook willing to perform the build?
      */
-    HookReply tryBuildHook();
+    HookReply tryBuildHook(const std::map<std::string, InitialOutput> & initialOutputs);
 
     /**
      * Open a log file and a pipe to it.
@@ -159,26 +142,18 @@ struct DerivationBuildingGoal : public Goal
      * whether all outputs are valid and non-corrupt, and a
      * 'SingleDrvOutputs' structure containing the valid outputs.
      */
-    std::pair<bool, SingleDrvOutputs> checkPathValidity();
-
-    /**
-     * Aborts if any output is not valid or corrupt, and otherwise
-     * returns a 'SingleDrvOutputs' structure containing all outputs.
-     */
-    SingleDrvOutputs assertPathValidity();
+    std::pair<bool, SingleDrvOutputs> checkPathValidity(std::map<std::string, InitialOutput> & initialOutputs);
 
     /**
      * Forcibly kill the child process, if any.
      */
     void killChild();
 
-    void started();
+    Done doneSuccess(BuildResult::Success::Status status, SingleDrvOutputs builtOutputs);
 
-    Done done(BuildResult::Status status, SingleDrvOutputs builtOutputs = {}, std::optional<Error> ex = {});
+    Done doneFailure(BuildError ex);
 
-    void appendLogTailErrorMsg(std::string & msg);
-
-    StorePathSet exportReferences(const StorePathSet & storePaths);
+    BuildError fixupBuilderFailureErrorMessage(BuilderFailureError msg);
 
     JobCategory jobCategory() const override
     {

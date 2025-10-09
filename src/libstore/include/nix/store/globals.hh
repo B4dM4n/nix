@@ -12,12 +12,32 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/experimental-features.hh"
 #include "nix/util/users.hh"
+#include "nix/store/build/derivation-builder.hh"
 
 #include "nix/store/config.hh"
 
 namespace nix {
 
 typedef enum { smEnabled, smRelaxed, smDisabled } SandboxMode;
+
+template<>
+SandboxMode BaseSetting<SandboxMode>::parse(const std::string & str) const;
+template<>
+std::string BaseSetting<SandboxMode>::to_string() const;
+
+template<>
+PathsInChroot BaseSetting<PathsInChroot>::parse(const std::string & str) const;
+template<>
+std::string BaseSetting<PathsInChroot>::to_string() const;
+
+template<>
+struct BaseSetting<PathsInChroot>::trait
+{
+    static constexpr bool appendable = true;
+};
+
+template<>
+void BaseSetting<PathsInChroot>::appendOrSet(PathsInChroot newValue, bool append);
 
 struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
 {
@@ -40,7 +60,8 @@ struct DerivationGroupsSetting : public BaseSetting<Strings>
     typedef std::pair<std::string, std::vector<std::pair<std::string, std::regex>>> Matcher;
     typedef std::vector<Matcher> Matchers;
 
-    DerivationGroupsSetting(Config * options,
+    DerivationGroupsSetting(
+        Config * options,
         const Strings & def,
         const std::string & name,
         const std::string & description,
@@ -64,8 +85,6 @@ const uint32_t maxIdsPerBuild =
 class Settings : public Config
 {
 
-    unsigned int getDefaultCores();
-
     StringSet getDefaultSystemFeatures();
 
     StringSet getDefaultExtraPlatforms();
@@ -77,6 +96,8 @@ class Settings : public Config
 public:
 
     Settings();
+
+    unsigned int getDefaultCores() const;
 
     Path nixPrefix;
 
@@ -185,7 +206,7 @@ public:
 
     Setting<unsigned int> buildCores{
         this,
-        getDefaultCores(),
+        0,
         "cores",
         R"(
           Sets the value of the `NIX_BUILD_CORES` environment variable in the [invocation of the `builder` executable](@docroot@/language/derivations.md#builder-execution) of a derivation.
@@ -198,15 +219,13 @@ public:
           -->
           For instance, in Nixpkgs, if the attribute `enableParallelBuilding` for the `mkDerivation` build helper is set to `true`, it passes the `-j${NIX_BUILD_CORES}` flag to GNU Make.
 
-          The value `0` means that the `builder` should use all available CPU cores in the system.
+          If set to `0`, nix will detect the number of CPU cores and pass this number via NIX_BUILD_CORES.
 
           > **Note**
           >
           > The number of parallel local Nix build jobs is independently controlled with the [`max-jobs`](#conf-max-jobs) setting.
         )",
-        {"build-cores"},
-        // Don't document the machine-specific default value
-        false};
+        {"build-cores"}};
 
     /**
      * Read-only mode.  Don't copy stuff to the store, don't change
@@ -312,7 +331,7 @@ public:
           Only the first element is required.
           To leave a field at its default, set it to `-`.
 
-          1. The URI of the remote store in the format `ssh://[username@]hostname`.
+          1. The URI of the remote store in the format `ssh://[username@]hostname[:port]`.
 
              > **Example**
              >
@@ -713,7 +732,7 @@ public:
         )",
         {"build-use-chroot", "build-use-sandbox"}};
 
-    Setting<PathSet> sandboxPaths{
+    Setting<PathsInChroot> sandboxPaths{
         this,
         {},
         "sandbox-paths",
@@ -986,7 +1005,7 @@ public:
             On Linux, Nix can run builds in a user namespace where they run as root (UID 0) and have 65,536 UIDs available.
             This is primarily useful for running containers such as `systemd-nspawn` inside a Nix build. For an example, see [`tests/systemd-nspawn/nix`][nspawn].
 
-            [nspawn]: https://github.com/NixOS/nix/blob/67bcb99700a0da1395fa063d7c6586740b304598/tests/systemd-nspawn.nix.
+            [nspawn]: https://github.com/NixOS/nix/blob/67bcb99700a0da1395fa063d7c6586740b304598/tests/systemd-nspawn.nix
 
             Included by default on Linux if the [`auto-allocate-uids`](#conf-auto-allocate-uids) setting is enabled.
         )",
@@ -1285,18 +1304,20 @@ public:
         this, 32 * 1024 * 1024, "nar-buffer-size", "Maximum size of NARs before spilling them to disk."};
 
     DerivationGroupsSetting derivationGroups{
-        this, {}, "derivation-groups",
+        this,
+        {},
+        "derivation-groups",
         R"(
-          A whitespace-separated list of matchers.
+       A whitespace-separated list of matchers.
 
-          A matcher has the following structure: <group>[,<field>=<regex>]
+       A matcher has the following structure: <group>[,<field>=<regex>]
 
-          The matchers are applied to all derivations before building and
-          if all specified fields of a derivation match the given regex, the
-          derivation is assigned to the specified group.
+       The matchers are applied to all derivations before building and
+       if all specified fields of a derivation match the given regex, the
+       derivation is assigned to the specified group.
 
-          Inside the group, only one derivation will be build at a time.
-        )"};
+       Inside the group, only one derivation will be build at a time.
+     )"};
 
     Setting<bool> allowSymlinkedStore{
         this,
@@ -1387,6 +1408,77 @@ public:
           Default is 0, which disables the warning.
           Set it to 1 to warn on all paths.
         )"};
+
+    struct ExternalBuilder
+    {
+        std::vector<std::string> systems;
+        Path program;
+        std::vector<std::string> args;
+    };
+
+    using ExternalBuilders = std::vector<ExternalBuilder>;
+
+    Setting<ExternalBuilders> externalBuilders{
+        this,
+        {},
+        "external-builders",
+        R"(
+          Helper programs that execute derivations.
+
+          The program is passed a JSON document that describes the build environment as the final argument.
+          The JSON document looks like this:
+
+            {
+              "args": [
+                "-e",
+                "/nix/store/vj1c3wf9…-source-stdenv.sh",
+                "/nix/store/shkw4qm9…-default-builder.sh"
+              ],
+              "builder": "/nix/store/s1qkj0ph…-bash-5.2p37/bin/bash",
+              "env": {
+                "HOME": "/homeless-shelter",
+                "builder": "/nix/store/s1qkj0ph…-bash-5.2p37/bin/bash",
+                "nativeBuildInputs": "/nix/store/l31j72f1…-version-check-hook",
+                "out": "/nix/store/2yx2prgx…-hello-2.12.2"
+                …
+              },
+              "inputPaths": [
+                "/nix/store/14dciax3…-glibc-2.32-54-dev",
+                "/nix/store/1azs5s8z…-gettext-0.21",
+                …
+              ],
+              "outputs": {
+                "out": "/nix/store/2yx2prgx…-hello-2.12.2"
+              },
+              "realStoreDir": "/nix/store",
+              "storeDir": "/nix/store",
+              "system": "aarch64-linux",
+              "tmpDir": "/private/tmp/nix-build-hello-2.12.2.drv-0/build",
+              "tmpDirInSandbox": "/build",
+              "topTmpDir": "/private/tmp/nix-build-hello-2.12.2.drv-0",
+              "version": 1
+            }
+        )",
+        {},   // aliases
+        true, // document default
+        // NOTE(cole-h): even though we can make the experimental feature required here, the errors
+        // are not as good (it just becomes a warning if you try to use this setting without the
+        // experimental feature)
+        //
+        // With this commented out:
+        //
+        // error: experimental Nix feature 'external-builders' is disabled; add '--extra-experimental-features
+        // external-builders' to enable it
+        //
+        // With this uncommented:
+        //
+        // warning: Ignoring setting 'external-builders' because experimental feature 'external-builders' is not enabled
+        // error: Cannot build '/nix/store/vwsp4qd8…-opentofu-1.10.2.drv'.
+        //        Reason: required system or feature not available
+        //        Required system: 'aarch64-linux' with features {}
+        //        Current system: 'aarch64-darwin' with features {apple-virt, benchmark, big-parallel, nixos-test}
+        // Xp::ExternalBuilders
+    };
 };
 
 // FIXME: don't use a global variable.

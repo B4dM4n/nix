@@ -53,6 +53,8 @@ struct LegacySSHStoreConfig : std::enable_shared_from_this<LegacySSHStoreConfig>
     static std::string doc();
 
     ref<Store> openStore() const override;
+
+    StoreReference getReference() const override;
 };
 
 struct LegacySSHStore : public virtual Store
@@ -70,8 +72,6 @@ struct LegacySSHStore : public virtual Store
     LegacySSHStore(ref<const Config>);
 
     ref<Connection> openConnection();
-
-    std::string getUri() override;
 
     void queryPathInfoUncached(
         const StorePath & path, Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept override;
@@ -109,7 +109,7 @@ struct LegacySSHStore : public virtual Store
         unsupported("addToStore");
     }
 
-    virtual StorePath addToStoreFromDump(
+    StorePath addToStoreFromDump(
         Source & dump,
         std::string_view name,
         FileSerialisationMethod dumpMethod = FileSerialisationMethod::NixArchive,
@@ -119,6 +119,11 @@ struct LegacySSHStore : public virtual Store
         RepairFlag repair = NoRepair) override
     {
         unsupported("addToStore");
+    }
+
+    void registerDrvOutput(const Realisation & output) override
+    {
+        unsupported("registerDrvOutput");
     }
 
 public:
@@ -142,7 +147,12 @@ public:
         unsupported("ensurePath");
     }
 
-    virtual ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
+    ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
+    {
+        unsupported("getFSAccessor");
+    }
+
+    std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath) override
     {
         unsupported("getFSAccessor");
     }
@@ -178,12 +188,6 @@ public:
      * the remote host to substitute missing paths.
      */
     StorePathSet queryValidPaths(const StorePathSet & paths, bool lock, SubstituteFlag maybeSubstitute = NoSubstitute);
-
-    /**
-     * Just exists because this is exactly what Hydra was doing, and we
-     * don't yet want an algorithmic change.
-     */
-    void addMultipleToStoreLegacy(Store & srcStore, const StorePathSet & paths);
 
     void connect() override;
 

@@ -10,6 +10,8 @@
 
 #include "nix/store/globals.hh"
 
+extern "C" {
+
 nix_err nix_libstore_init(nix_c_context * context)
 {
     if (context)
@@ -62,7 +64,7 @@ nix_err nix_store_get_uri(nix_c_context * context, Store * store, nix_get_string
     if (context)
         context->last_err_code = NIX_OK;
     try {
-        auto res = store->ptr->getUri();
+        auto res = store->ptr->config.getReference().render(/*withParams=*/true);
         return call_nix_get_string_callback(res, callback, user_data);
     }
     NIXC_CATCH_ERRS
@@ -91,7 +93,7 @@ nix_store_get_version(nix_c_context * context, Store * store, nix_get_string_cal
     NIXC_CATCH_ERRS
 }
 
-bool nix_store_is_valid_path(nix_c_context * context, Store * store, StorePath * path)
+bool nix_store_is_valid_path(nix_c_context * context, Store * store, const StorePath * path)
 {
     if (context)
         context->last_err_code = NIX_OK;
@@ -129,7 +131,7 @@ nix_err nix_store_realise(
     Store * store,
     StorePath * path,
     void * userdata,
-    void (*callback)(void * userdata, const char *, const char *))
+    void (*callback)(void * userdata, const char *, const StorePath *))
 {
     if (context)
         context->last_err_code = NIX_OK;
@@ -143,9 +145,11 @@ nix_err nix_store_realise(
 
         if (callback) {
             for (const auto & result : results) {
-                for (const auto & [outputName, realisation] : result.builtOutputs) {
-                    auto op = store->ptr->printStorePath(realisation.outPath);
-                    callback(userdata, outputName.c_str(), op.c_str());
+                if (auto * success = result.tryGetSuccess()) {
+                    for (const auto & [outputName, realisation] : success->builtOutputs) {
+                        StorePath p{realisation.outPath};
+                        callback(userdata, outputName.c_str(), &p);
+                    }
                 }
             }
         }
@@ -164,9 +168,42 @@ void nix_store_path_free(StorePath * sp)
     delete sp;
 }
 
+void nix_derivation_free(nix_derivation * drv)
+{
+    delete drv;
+}
+
 StorePath * nix_store_path_clone(const StorePath * p)
 {
     return new StorePath{p->path};
+}
+
+nix_derivation * nix_derivation_from_json(nix_c_context * context, Store * store, const char * json)
+{
+    if (context)
+        context->last_err_code = NIX_OK;
+    try {
+        auto drv = static_cast<nix::Derivation>(nlohmann::json::parse(json));
+
+        auto drvPath = nix::writeDerivation(*store->ptr, drv, nix::NoRepair, /* read only */ true);
+
+        drv.checkInvariants(*store->ptr, drvPath);
+
+        return new nix_derivation{drv};
+    }
+    NIXC_CATCH_ERRS_NULL
+}
+
+StorePath * nix_add_derivation(nix_c_context * context, Store * store, nix_derivation * derivation)
+{
+    if (context)
+        context->last_err_code = NIX_OK;
+    try {
+        auto ret = nix::writeDerivation(*store->ptr, derivation->drv, nix::NoRepair);
+
+        return new StorePath{ret};
+    }
+    NIXC_CATCH_ERRS_NULL
 }
 
 nix_err nix_store_copy_closure(nix_c_context * context, Store * srcStore, Store * dstStore, StorePath * path)
@@ -180,3 +217,5 @@ nix_err nix_store_copy_closure(nix_c_context * context, Store * srcStore, Store 
     }
     NIXC_CATCH_ERRS
 }
+
+} // extern "C"

@@ -5,6 +5,7 @@
 #include "nix/store/store-api.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
+#include "nix/store/globals.hh"
 
 #include <optional>
 #include <string>
@@ -92,6 +93,12 @@ using OutputChecks = DerivationOptions::OutputChecks;
 
 using OutputChecksVariant = std::variant<OutputChecks, std::map<std::string, OutputChecks>>;
 
+DerivationOptions DerivationOptions::fromStructuredAttrs(
+    const StringMap & env, const std::optional<StructuredAttrs> & parsed, bool shouldWarn)
+{
+    return fromStructuredAttrs(env, parsed ? &*parsed : nullptr);
+}
+
 DerivationOptions
 DerivationOptions::fromStructuredAttrs(const StringMap & env, const StructuredAttrs * parsed, bool shouldWarn)
 {
@@ -138,7 +145,7 @@ DerivationOptions::fromStructuredAttrs(const StringMap & env, const StructuredAt
                         if (auto maxClosureSize = get(output, "maxClosureSize"))
                             checks.maxClosureSize = maxClosureSize->get<uint64_t>();
 
-                        auto get_ = [&](const std::string & name) -> std::optional<StringSet> {
+                        auto get_ = [&output = output](const std::string & name) -> std::optional<StringSet> {
                             if (auto i = get(output, name)) {
                                 StringSet res;
                                 for (auto j = i->begin(); j != i->end(); ++j) {
@@ -249,6 +256,27 @@ DerivationOptions::fromStructuredAttrs(const StringMap & env, const StructuredAt
     };
 }
 
+std::map<std::string, StorePathSet>
+DerivationOptions::getParsedExportReferencesGraph(const StoreDirConfig & store) const
+{
+    std::map<std::string, StorePathSet> res;
+
+    for (auto & [fileName, ss] : exportReferencesGraph) {
+        StorePathSet storePaths;
+        for (auto & storePathS : ss) {
+            if (!store.isInStore(storePathS))
+                throw BuildError(
+                    BuildResult::Failure::InputRejected,
+                    "'exportReferencesGraph' contains a non-store path '%1%'",
+                    storePathS);
+            storePaths.insert(store.toStorePath(storePathS).first);
+        }
+        res.insert_or_assign(fileName, storePaths);
+    }
+
+    return res;
+}
+
 StringSet DerivationOptions::getRequiredSystemFeatures(const BasicDerivation & drv) const
 {
     // FIXME: cache this?
@@ -330,7 +358,7 @@ DerivationOptions adl_serializer<DerivationOptions>::from_json(const json & json
     };
 }
 
-void adl_serializer<DerivationOptions>::to_json(json & json, DerivationOptions o)
+void adl_serializer<DerivationOptions>::to_json(json & json, const DerivationOptions & o)
 {
     json["outputChecks"] = std::visit(
         overloaded{
@@ -372,7 +400,7 @@ DerivationOptions::OutputChecks adl_serializer<DerivationOptions::OutputChecks>:
     };
 }
 
-void adl_serializer<DerivationOptions::OutputChecks>::to_json(json & json, DerivationOptions::OutputChecks c)
+void adl_serializer<DerivationOptions::OutputChecks>::to_json(json & json, const DerivationOptions::OutputChecks & c)
 {
     json["ignoreSelfRefs"] = c.ignoreSelfRefs;
     json["allowedReferences"] = c.allowedReferences;

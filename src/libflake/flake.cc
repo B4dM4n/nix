@@ -24,21 +24,6 @@ using namespace flake;
 
 namespace flake {
 
-static StorePath copyInputToStore(
-    EvalState & state, fetchers::Input & input, const fetchers::Input & originalInput, ref<SourceAccessor> accessor)
-{
-    auto storePath = fetchToStore(*input.settings, *state.store, accessor, FetchMode::Copy, input.getName());
-
-    state.allowPath(storePath);
-
-    auto narHash = state.store->queryPathInfo(storePath)->narHash;
-    input.attrs.insert_or_assign("narHash", narHash.to_string(HashFormat::SRI, true));
-
-    assert(!originalInput.getNarHash() || storePath == originalInput.computeStorePath(*state.store));
-
-    return storePath;
-}
-
 static void forceTrivialValue(EvalState & state, Value & value, const PosIdx pos)
 {
     if (value.isThunk() && value.isTrivial())
@@ -232,7 +217,7 @@ static Flake readFlake(
         .path = flakePath,
     };
 
-    if (auto description = vInfo.attrs()->get(state.sDescription)) {
+    if (auto description = vInfo.attrs()->get(state.s.description)) {
         expectType(state, nString, *description->value, description->pos);
         flake.description = description->value->c_str();
     }
@@ -253,7 +238,7 @@ static Flake readFlake(
 
         if (outputs->value->isLambda() && outputs->value->lambda().fun->hasFormals()) {
             for (auto & formal : outputs->value->lambda().fun->formals->formals) {
-                if (formal.name != state.sSelf)
+                if (formal.name != state.s.self)
                     flake.inputs.emplace(
                         state.symbols[formal.name],
                         FlakeInput{.ref = parseFlakeRef(state.fetchSettings, std::string(state.symbols[formal.name]))});
@@ -305,7 +290,8 @@ static Flake readFlake(
     }
 
     for (auto & attr : *vInfo.attrs()) {
-        if (attr.name != state.sDescription && attr.name != sInputs && attr.name != sOutputs && attr.name != sNixConfig)
+        if (attr.name != state.s.description && attr.name != sInputs && attr.name != sOutputs
+            && attr.name != sNixConfig)
             throw Error(
                 "flake '%s' has an unsupported attribute '%s', at %s",
                 resolvedRef,
@@ -340,8 +326,9 @@ static Flake getFlake(
     // Fetch a lazy tree first.
     auto cachedInput = state.inputCache->getAccessor(state.store, originalRef.input, useRegistries);
 
-    auto resolvedRef = FlakeRef(std::move(cachedInput.resolvedInput), originalRef.subdir);
-    auto lockedRef = FlakeRef(std::move(cachedInput.lockedInput), originalRef.subdir);
+    auto subdir = fetchers::maybeGetStrAttr(cachedInput.extraAttrs, "dir").value_or(originalRef.subdir);
+    auto resolvedRef = FlakeRef(std::move(cachedInput.resolvedInput), subdir);
+    auto lockedRef = FlakeRef(std::move(cachedInput.lockedInput), subdir);
 
     // Parse/eval flake.nix to get at the input.self attributes.
     auto flake = readFlake(state, originalRef, resolvedRef, lockedRef, {cachedInput.accessor}, lockRootAttrPath);
@@ -358,11 +345,14 @@ static Flake getFlake(
         lockedRef = FlakeRef(std::move(cachedInput2.lockedInput), newLockedRef.subdir);
     }
 
-    // Copy the tree to the store.
-    auto storePath = copyInputToStore(state, lockedRef.input, originalRef.input, cachedInput.accessor);
-
     // Re-parse flake.nix from the store.
-    return readFlake(state, originalRef, resolvedRef, lockedRef, state.storePath(storePath), lockRootAttrPath);
+    return readFlake(
+        state,
+        originalRef,
+        resolvedRef,
+        lockedRef,
+        state.storePath(state.mountInput(lockedRef.input, originalRef.input, cachedInput.accessor)),
+        lockRootAttrPath);
 }
 
 Flake getFlake(EvalState & state, const FlakeRef & originalRef, fetchers::UseRegistries useRegistries)
@@ -719,11 +709,10 @@ lockFlake(const Settings & settings, EvalState & state, const FlakeRef & topRef,
 
                                     auto lockedRef = FlakeRef(std::move(cachedInput.lockedInput), input.ref->subdir);
 
-                                    // FIXME: allow input to be lazy.
-                                    auto storePath = copyInputToStore(
-                                        state, lockedRef.input, input.ref->input, cachedInput.accessor);
-
-                                    return {state.storePath(storePath), lockedRef};
+                                    return {
+                                        state.storePath(
+                                            state.mountInput(lockedRef.input, input.ref->input, cachedInput.accessor)),
+                                        lockedRef};
                                 }
                             }();
 

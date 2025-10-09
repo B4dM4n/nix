@@ -64,9 +64,6 @@ struct Realisation
      */
     std::map<DrvOutput, StorePath> dependentRealisations;
 
-    nlohmann::json toJSON() const;
-    static Realisation fromJSON(const nlohmann::json & json, const std::string & whence);
-
     std::string fingerprint() const;
     void sign(const Signer &);
     bool checkSignature(const PublicKeys & publicKeys, const std::string & sig) const;
@@ -101,13 +98,6 @@ typedef std::map<OutputName, Realisation> SingleDrvOutputs;
  * secondly which output of that derivation.
  */
 typedef std::map<DrvOutput, Realisation> DrvOutputs;
-
-/**
- * Filter a SingleDrvOutputs to include only specific output names
- *
- * Moves the `outputs` input.
- */
-SingleDrvOutputs filterDrvOutputs(const OutputsSpec &, SingleDrvOutputs &&);
 
 struct OpaquePath
 {
@@ -176,3 +166,5 @@ public:
 };
 
 } // namespace nix
+
+JSON_IMPL(nix::Realisation)
