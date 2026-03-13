@@ -1,14 +1,18 @@
 #include "nix/store/local-store.hh"
 #include "nix/store/machines.hh"
+#include "nix/store/store-open.hh"
 #include "nix/store/build/worker.hh"
 #include "nix/store/build/substitution-goal.hh"
 #include "nix/store/build/drv-output-substitution-goal.hh"
 #include "nix/store/build/derivation-goal.hh"
+#include "nix/store/build/derivation-resolution-goal.hh"
 #include "nix/store/build/derivation-building-goal.hh"
+#include "nix/store/build/derivation-trampoline-goal.hh"
 #ifndef _WIN32 // TODO Enable building on Windows
 #  include "nix/store/build/hook-instance.hh"
 #endif
 #include "nix/util/signals.hh"
+#include "nix/store/globals.hh"
 
 namespace nix {
 
@@ -16,16 +20,23 @@ Worker::Worker(Store & store, Store & evalStore)
     : act(*logger, actRealise)
     , actDerivations(*logger, actBuilds)
     , actSubstitutions(*logger, actCopyPaths)
+#ifdef _WIN32
+    , ioport{CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0)}
+#endif
     , store(store)
     , evalStore(evalStore)
+    , settings(nix::settings.getWorkerSettings())
+    , getSubstituters{[] {
+        return nix::settings.getWorkerSettings().useSubstitutes ? getDefaultSubstituters() : std::list<ref<Store>>{};
+    }}
 {
+#ifdef _WIN32
+    if (!ioport)
+        throw windows::WinError("CreateIoCompletionPort");
+#endif
     nrLocalBuilds = 0;
     nrSubstitutions = 0;
     lastWokenUp = steady_time_point::min();
-    permanentFailure = false;
-    timedOut = false;
-    hashMismatch = false;
-    checkMismatch = false;
 }
 
 Worker::~Worker()
@@ -53,51 +64,46 @@ std::shared_ptr<G> Worker::initGoalIfNeeded(std::weak_ptr<G> & goal_weak, Args &
     return goal;
 }
 
-std::shared_ptr<DerivationGoal> Worker::makeDerivationGoalCommon(
-    ref<const SingleDerivedPath> drvReq,
-    const OutputsSpec & wantedOutputs,
-    std::function<std::shared_ptr<DerivationGoal>()> mkDrvGoal)
+std::shared_ptr<DerivationTrampolineGoal> Worker::makeDerivationTrampolineGoal(
+    ref<const SingleDerivedPath> drvReq, const OutputsSpec & wantedOutputs, BuildMode buildMode)
 {
-    std::weak_ptr<DerivationGoal> & goal_weak = derivationGoals.ensureSlot(*drvReq).value;
-    std::shared_ptr<DerivationGoal> goal = goal_weak.lock();
-    if (!goal) {
-        goal = mkDrvGoal();
-        goal_weak = goal;
-        wakeUp(goal);
-    } else {
-        goal->addWantedOutputs(wantedOutputs);
-    }
-    return goal;
+    return initGoalIfNeeded(
+        derivationTrampolineGoals.ensureSlot(*drvReq).value[wantedOutputs], drvReq, wantedOutputs, *this, buildMode);
 }
 
-std::shared_ptr<DerivationGoal>
-Worker::makeDerivationGoal(ref<const SingleDerivedPath> drvReq, const OutputsSpec & wantedOutputs, BuildMode buildMode)
+std::shared_ptr<DerivationTrampolineGoal> Worker::makeDerivationTrampolineGoal(
+    const StorePath & drvPath, const OutputsSpec & wantedOutputs, const Derivation & drv, BuildMode buildMode)
 {
-    return makeDerivationGoalCommon(drvReq, wantedOutputs, [&]() -> std::shared_ptr<DerivationGoal> {
-        return std::make_shared<DerivationGoal>(drvReq, wantedOutputs, *this, buildMode);
-    });
+    return initGoalIfNeeded(
+        derivationTrampolineGoals.ensureSlot(DerivedPath::Opaque{drvPath}).value[wantedOutputs],
+        drvPath,
+        wantedOutputs,
+        drv,
+        *this,
+        buildMode);
 }
 
-std::shared_ptr<DerivationGoal> Worker::makeBasicDerivationGoal(
-    const StorePath & drvPath, const BasicDerivation & drv, const OutputsSpec & wantedOutputs, BuildMode buildMode)
+std::shared_ptr<DerivationGoal> Worker::makeDerivationGoal(
+    const StorePath & drvPath,
+    const Derivation & drv,
+    const OutputName & wantedOutput,
+    BuildMode buildMode,
+    bool storeDerivation)
 {
-    return makeDerivationGoalCommon(
-        makeConstantStorePathRef(drvPath), wantedOutputs, [&]() -> std::shared_ptr<DerivationGoal> {
-            return std::make_shared<DerivationGoal>(drvPath, drv, wantedOutputs, *this, buildMode);
-        });
+    return initGoalIfNeeded(
+        derivationGoals[drvPath][wantedOutput], drvPath, drv, wantedOutput, *this, buildMode, storeDerivation);
 }
 
-std::shared_ptr<DerivationBuildingGoal>
-Worker::makeDerivationBuildingGoal(const StorePath & drvPath, const Derivation & drv, BuildMode buildMode)
+std::shared_ptr<DerivationResolutionGoal>
+Worker::makeDerivationResolutionGoal(const StorePath & drvPath, const Derivation & drv, BuildMode buildMode)
 {
-    std::weak_ptr<DerivationBuildingGoal> & goal_weak = derivationBuildingGoals[drvPath];
-    auto goal = goal_weak.lock(); // FIXME
-    if (!goal) {
-        goal = std::make_shared<DerivationBuildingGoal>(drvPath, drv, *this, buildMode);
-        goal_weak = goal;
-        wakeUp(goal);
-    }
-    return goal;
+    return initGoalIfNeeded(derivationResolutionGoals[drvPath], drvPath, drv, *this, buildMode);
+}
+
+std::shared_ptr<DerivationBuildingGoal> Worker::makeDerivationBuildingGoal(
+    const StorePath & drvPath, const Derivation & drv, BuildMode buildMode, bool storeDerivation)
+{
+    return initGoalIfNeeded(derivationBuildingGoals[drvPath], drvPath, drv, *this, buildMode, storeDerivation);
 }
 
 std::shared_ptr<PathSubstitutionGoal>
@@ -106,10 +112,9 @@ Worker::makePathSubstitutionGoal(const StorePath & path, RepairFlag repair, std:
     return initGoalIfNeeded(substitutionGoals[path], path, *this, repair, ca);
 }
 
-std::shared_ptr<DrvOutputSubstitutionGoal>
-Worker::makeDrvOutputSubstitutionGoal(const DrvOutput & id, RepairFlag repair, std::optional<ContentAddress> ca)
+std::shared_ptr<DrvOutputSubstitutionGoal> Worker::makeDrvOutputSubstitutionGoal(const DrvOutput & id)
 {
-    return initGoalIfNeeded(drvOutputSubstitutionGoals[id], id, *this, repair, ca);
+    return initGoalIfNeeded(drvOutputSubstitutionGoals[id], id, *this);
 }
 
 GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
@@ -117,7 +122,7 @@ GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
     return std::visit(
         overloaded{
             [&](const DerivedPath::Built & bfd) -> GoalPtr {
-                return makeDerivationGoal(bfd.drvPath, bfd.outputs, buildMode);
+                return makeDerivationTrampolineGoal(bfd.drvPath, bfd.outputs, buildMode);
             },
             [&](const DerivedPath::Opaque & bo) -> GoalPtr {
                 return makePathSubstitutionGoal(bo.path, buildMode == bmRepair ? Repair : NoRepair);
@@ -126,46 +131,56 @@ GoalPtr Worker::makeGoal(const DerivedPath & req, BuildMode buildMode)
         req.raw());
 }
 
-template<typename K, typename V, typename F>
-static void cullMap(std::map<K, V> & goalMap, F f)
+/**
+ * This function is polymorphic (both via type parameters and
+ * overloading) and recursive in order to work on a various types of
+ * trees
+ *
+ * @return Whether the tree node we are processing is not empty / should
+ * be kept alive. In the case of this overloading the node in question
+ * is the leaf, the weak reference itself. If the weak reference points
+ * to the goal we are looking for, our caller can delete it. In the
+ * inductive case where the node is an interior node, we'll likewise
+ * return whether the interior node is non-empty. If it is empty
+ * (because we just deleted its last child), then our caller can
+ * likewise delete it.
+ */
+template<typename G>
+static bool removeGoal(std::shared_ptr<G> goal, std::weak_ptr<G> & gp)
 {
-    for (auto i = goalMap.begin(); i != goalMap.end();)
-        if (!f(i->second))
+    return gp.lock() != goal;
+}
+
+template<typename K, typename G, typename Inner>
+static bool removeGoal(std::shared_ptr<G> goal, std::map<K, Inner> & goalMap)
+{
+    /* !!! inefficient */
+    for (auto i = goalMap.begin(); i != goalMap.end();) {
+        if (!removeGoal(goal, i->second))
             i = goalMap.erase(i);
         else
             ++i;
+    }
+    return !goalMap.empty();
 }
 
-template<typename K, typename G>
-static void removeGoal(std::shared_ptr<G> goal, std::map<K, std::weak_ptr<G>> & goalMap)
+template<typename G>
+static bool
+removeGoal(std::shared_ptr<G> goal, typename DerivedPathMap<std::map<OutputsSpec, std::weak_ptr<G>>>::ChildNode & node)
 {
-    /* !!! inefficient */
-    cullMap(goalMap, [&](const std::weak_ptr<G> & gp) -> bool { return gp.lock() != goal; });
-}
-
-template<typename K>
-static void removeGoal(
-    std::shared_ptr<DerivationGoal> goal,
-    std::map<K, DerivedPathMap<std::weak_ptr<DerivationGoal>>::ChildNode> & goalMap);
-
-template<typename K>
-static void removeGoal(
-    std::shared_ptr<DerivationGoal> goal,
-    std::map<K, DerivedPathMap<std::weak_ptr<DerivationGoal>>::ChildNode> & goalMap)
-{
-    /* !!! inefficient */
-    cullMap(goalMap, [&](DerivedPathMap<std::weak_ptr<DerivationGoal>>::ChildNode & node) -> bool {
-        if (node.value.lock() == goal)
-            node.value.reset();
-        removeGoal(goal, node.childMap);
-        return !node.value.expired() || !node.childMap.empty();
-    });
+    bool valueKeep = removeGoal(goal, node.value);
+    bool childMapKeep = removeGoal(goal, node.childMap);
+    return valueKeep || childMapKeep;
 }
 
 void Worker::removeGoal(GoalPtr goal)
 {
-    if (auto drvGoal = std::dynamic_pointer_cast<DerivationGoal>(goal))
-        nix::removeGoal(drvGoal, derivationGoals.map);
+    if (auto drvGoal = std::dynamic_pointer_cast<DerivationTrampolineGoal>(goal))
+        nix::removeGoal(drvGoal, derivationTrampolineGoals.map);
+    else if (auto drvGoal = std::dynamic_pointer_cast<DerivationGoal>(goal))
+        nix::removeGoal(drvGoal, derivationGoals);
+    else if (auto drvResolutionGoal = std::dynamic_pointer_cast<DerivationResolutionGoal>(goal))
+        nix::removeGoal(drvResolutionGoal, derivationResolutionGoals);
     else if (auto drvBuildingGoal = std::dynamic_pointer_cast<DerivationBuildingGoal>(goal))
         nix::removeGoal(drvBuildingGoal, derivationBuildingGoals);
     else if (auto subGoal = std::dynamic_pointer_cast<PathSubstitutionGoal>(goal))
@@ -239,12 +254,17 @@ void Worker::childStarted(
 
 void Worker::childTerminated(Goal * goal, bool wakeSleepers)
 {
+    childTerminated(goal, goal->jobCategory(), wakeSleepers);
+}
+
+void Worker::childTerminated(Goal * goal, JobCategory jobCategory, bool wakeSleepers)
+{
     auto i = std::find_if(children.begin(), children.end(), [&](const Child & child) { return child.goal2 == goal; });
     if (i == children.end())
         return;
 
     if (i->inBuildSlot) {
-        switch (goal->jobCategory()) {
+        switch (jobCategory) {
         case JobCategory::Substitution:
             assert(nrSubstitutions > 0);
             nrSubstitutions--;
@@ -305,7 +325,7 @@ void Worker::run(const Goals & _topGoals)
 
     for (auto & i : _topGoals) {
         topGoals.insert(i);
-        if (auto goal = dynamic_cast<DerivationGoal *>(i.get())) {
+        if (auto goal = dynamic_cast<DerivationTrampolineGoal *>(i.get())) {
             topPaths.push_back(
                 DerivedPath::Built{
                     .drvPath = goal->drvReq,
@@ -354,7 +374,7 @@ void Worker::run(const Goals & _topGoals)
         if (!children.empty() || !waitingForAWhile.empty())
             waitForInput();
         else if (awake.empty() && 0U == settings.maxBuildJobs) {
-            if (getMachines().empty())
+            if (Machine::parseConfig({nix::settings.thisSystem}, nix::settings.getWorkerSettings().builders).empty())
                 throw Error(
                     "Unable to start any build; either increase '--max-jobs' or enable remote builds.\n"
                     "\n"
@@ -394,8 +414,12 @@ void Worker::waitForInput()
        is a build timeout, then wait for input until the first
        deadline for any child. */
     auto nearest = steady_time_point::max(); // nearest deadline
-    if (settings.minFree.get() != 0)
-        // Periodicallty wake up to see if we need to run the garbage collector.
+
+    auto localStore = dynamic_cast<LocalStore *>(&store);
+    if (localStore && localStore->config->getLocalSettings().getGCSettings().minFree.get() != 0)
+        // If we have a local store (and thus are capable of automatically collecting garbage) and configured to do so,
+        // periodically wake up to see if we need to run the garbage collector. (See the `autoGC` call site above in
+        // this file, also gated on having a local store. when we wake up, we intended to reach that call site.)
         nearest = before + std::chrono::seconds(10);
     for (auto & i : children) {
         if (!i.respectTimeouts)
@@ -474,14 +498,13 @@ void Worker::waitForInput()
 
         if (goal->exitCode == Goal::ecBusy && 0 != settings.maxSilentTime && j->respectTimeouts
             && after - j->lastOutput >= std::chrono::seconds(settings.maxSilentTime)) {
-            goal->timedOut(
-                Error("%1% timed out after %2% seconds of silence", goal->getName(), settings.maxSilentTime));
+            goal->timedOut(TimedOut(settings.maxSilentTime));
         }
 
         else if (
             goal->exitCode == Goal::ecBusy && 0 != settings.buildTimeout && j->respectTimeouts
             && after - j->timeStarted >= std::chrono::seconds(settings.buildTimeout)) {
-            goal->timedOut(Error("%1% timed out after %2% seconds", goal->getName(), settings.buildTimeout));
+            goal->timedOut(TimedOut(settings.buildTimeout));
         }
     }
 
@@ -496,26 +519,6 @@ void Worker::waitForInput()
     }
 }
 
-unsigned int Worker::failingExitStatus()
-{
-    // See API docs in header for explanation
-    unsigned int mask = 0;
-    bool buildFailure = permanentFailure || timedOut || hashMismatch;
-    if (buildFailure)
-        mask |= 0x04; // 100
-    if (timedOut)
-        mask |= 0x01; // 101
-    if (hashMismatch)
-        mask |= 0x02; // 102
-    if (checkMismatch) {
-        mask |= 0x08; // 104
-    }
-
-    if (mask)
-        mask |= 0x60;
-    return mask ? mask : 1;
-}
-
 bool Worker::pathContentsGood(const StorePath & path)
 {
     auto i = pathContentsGoodCache.find(path);
@@ -523,15 +526,9 @@ bool Worker::pathContentsGood(const StorePath & path)
         return i->second;
     printInfo("checking path '%s'...", store.printStorePath(path));
     auto info = store.queryPathInfo(path);
-    bool res;
-    if (!pathExists(store.printStorePath(path)))
-        res = false;
-    else {
-        auto current = hashPath(
-                           {store.getFSAccessor(), CanonPath(path.to_string())},
-                           FileIngestionMethod::NixArchive,
-                           info->narHash.algo)
-                           .first;
+    bool res = false;
+    if (auto accessor = store.getFSAccessor(path, /*requireValidPath=*/false)) {
+        auto current = hashPath({ref{accessor}}, FileIngestionMethod::NixArchive, info->narHash.algo).first;
         Hash nullHash(HashAlgorithm::SHA256);
         res = info->narHash == nullHash || info->narHash == current;
     }

@@ -1,11 +1,14 @@
-#include <unordered_set>
 #include <queue>
+
+#include <boost/unordered/unordered_flat_set.hpp>
 
 #include "nix/cmd/command.hh"
 #include "nix/expr/eval.hh"
 #include "run.hh"
 #include "nix/util/strings.hh"
 #include "nix/util/executable-path.hh"
+#include "nix/util/environment-variables.hh"
+#include "nix/util/mounted-source-accessor.hh"
 
 using namespace nix;
 
@@ -70,7 +73,7 @@ struct CmdShell : InstallablesCommand, MixEnvironment
         auto outPaths =
             Installable::toStorePaths(getEvalStore(), store, Realise::Outputs, OperateOn::Output, installables);
 
-        std::unordered_set<StorePath> done;
+        boost::unordered_flat_set<StorePath, std::hash<StorePath>> done;
         std::queue<StorePath> todo;
         for (auto & path : outPaths)
             todo.push(path);
@@ -94,7 +97,7 @@ struct CmdShell : InstallablesCommand, MixEnvironment
             auto propPath = state->storeFS->resolveSymlinks(
                 CanonPath(store->printStorePath(path)) / "nix-support" / "propagated-user-env-packages");
             if (auto st = state->storeFS->maybeLstat(propPath); st && st->type == SourceAccessor::tRegular) {
-                for (auto & p : tokenizeString<Paths>(state->storeFS->readFile(propPath)))
+                for (auto & p : tokenizeString<Strings>(state->storeFS->readFile(propPath)))
                     todo.push(store->parseStorePath(p));
             }
         }

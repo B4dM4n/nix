@@ -2,6 +2,8 @@
 
 source ../common.sh
 
+export _NIX_TEST_BARF_ON_UNCACHEABLE=1
+
 # shellcheck disable=SC2034 # this variable is used by tests that source this file
 registry=$TEST_ROOT/registry.json
 
@@ -110,25 +112,4 @@ writeTrivialFlake() {
   };
 }
 EOF
-}
-
-initGitRepo() {
-    local repo="$1"
-    local extraArgs="${2-}"
-
-    # shellcheck disable=SC2086 # word splitting of extraArgs is intended
-    git -C "$repo" init $extraArgs
-    git -C "$repo" config user.email "foobar@example.com"
-    git -C "$repo" config user.name "Foobar"
-}
-
-createGitRepo() {
-    local repo="$1"
-    local extraArgs="${2-}"
-
-    rm -rf "$repo" "$repo".tmp
-    mkdir -p "$repo"
-
-    # shellcheck disable=SC2086 # word splitting of extraArgs is intended
-    initGitRepo "$repo" $extraArgs
 }

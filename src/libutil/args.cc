@@ -81,6 +81,8 @@ std::optional<std::string> RootArgs::needsCompletion(std::string_view s)
     return {};
 }
 
+namespace {
+
 /**
  * Basically this is `typedef std::optional<Parser> Parser(std::string_view s, Strings & r);`
  *
@@ -246,6 +248,8 @@ void ParseQuoted::operator()(std::shared_ptr<Parser> & state, Strings & r)
     assert(false);
 }
 
+} // namespace
+
 Strings parseShebangContent(std::string_view s)
 {
     Strings result;
@@ -280,7 +284,7 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
     // executable file, and it starts with "#!".
     Strings savedArgs;
     if (allowShebang) {
-        auto script = *cmdline.begin();
+        std::filesystem::path script = *cmdline.begin();
         try {
             std::ifstream stream(script);
             char shebang[3] = {0, 0, 0};
@@ -306,14 +310,15 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
                 for (const auto & word : parseShebangContent(shebangContent)) {
                     cmdline.push_back(word);
                 }
-                cmdline.push_back(script);
-                commandBaseDir = dirOf(script);
+                cmdline.push_back(script.string());
+                commandBaseDir = script.parent_path();
                 for (auto pos = savedArgs.begin(); pos != savedArgs.end(); pos++)
                     cmdline.push_back(*pos);
             }
         } catch (SystemError &) {
         }
     }
+
     for (auto pos = cmdline.begin(); pos != cmdline.end();) {
 
         auto arg = *pos;
@@ -350,6 +355,9 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
 
     processArgs(pendingArgs, true);
 
+    if (!completions)
+        checkArgs();
+
     initialFlagsProcessed();
 
     /* Now that we are done parsing, make sure that any experimental
@@ -363,13 +371,13 @@ void RootArgs::parseCmdline(const Strings & _cmdline, bool allowShebang)
         d.completer(*completions, d.n, d.prefix);
 }
 
-Path Args::getCommandBaseDir() const
+std::filesystem::path Args::getCommandBaseDir() const
 {
     assert(parent);
     return parent->getCommandBaseDir();
 }
 
-Path RootArgs::getCommandBaseDir() const
+std::filesystem::path RootArgs::getCommandBaseDir() const
 {
     return commandBaseDir;
 }
@@ -380,7 +388,7 @@ bool Args::processFlag(Strings::iterator & pos, Strings::iterator end)
 
     auto & rootArgs = getRoot();
 
-    auto process = [&](const std::string & name, const Flag & flag) -> bool {
+    auto process = [&](const std::string & name, Flag & flag) -> bool {
         ++pos;
 
         if (auto & f = flag.experimentalFeature)
@@ -409,6 +417,7 @@ bool Args::processFlag(Strings::iterator & pos, Strings::iterator end)
         }
         if (!anyCompleted)
             flag.handler.fun(std::move(args));
+        flag.timesUsed++;
         return true;
     };
 
@@ -498,6 +507,14 @@ bool Args::processArgs(const Strings & args, bool finish)
         throw UsageError("more arguments are required");
 
     return res;
+}
+
+void Args::checkArgs()
+{
+    for (auto & [name, flag] : longFlags) {
+        if (flag->required && flag->timesUsed == 0)
+            throw UsageError("required argument '--%s' is missing", name);
+    }
 }
 
 nlohmann::json Args::toJSON()
@@ -637,6 +654,13 @@ bool MultiCommand::processArgs(const Strings & args, bool finish)
         return command->second->processArgs(args, finish);
     else
         return Args::processArgs(args, finish);
+}
+
+void MultiCommand::checkArgs()
+{
+    Args::checkArgs();
+    if (command)
+        command->second->checkArgs();
 }
 
 nlohmann::json MultiCommand::toJSON()

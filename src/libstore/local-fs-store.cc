@@ -8,15 +8,28 @@
 
 namespace nix {
 
-LocalFSStoreConfig::LocalFSStoreConfig(PathView rootDir, const Params & params)
+std::filesystem::path LocalFSStoreConfig::getDefaultStateDir()
+{
+    return settings.nixStateDir;
+}
+
+std::filesystem::path LocalFSStoreConfig::getDefaultLogDir()
+{
+    return settings.getLogFileSettings().nixLogDir;
+}
+
+LocalFSStoreConfig::LocalFSStoreConfig(const std::filesystem::path & rootDir, const Params & params)
     : StoreConfig(params)
-    // Default `?root` from `rootDir` if non set
-    // FIXME don't duplicate description once we don't have root setting
-    , rootDir{
-          this,
-          !rootDir.empty() && params.count("root") == 0 ? (std::optional<Path>{rootDir}) : std::nullopt,
-          "root",
-          "Directory prefixed to all other paths."}
+    /* Default `?root` from `rootDir` if non set
+     * NOTE: We would like to just do rootDir.set(...), which would take care of
+     * all normalization and error checking for us. Unfortunately we cannot do
+     * that because of the complicated initialization order of other fields with
+     * the virtual class hierarchy of nix store configs, and the design of the
+     * settings system. As such, we have no choice but to redefine the field and
+     * manually repeat the same normalization logic.
+     */
+    , rootDir{makeRootDirSetting(
+          *this, !rootDir.empty() && params.count("root") == 0 ? std::optional{canonPath(rootDir)} : std::nullopt)}
 {
 }
 
@@ -62,7 +75,7 @@ struct LocalStoreAccessor : PosixSourceAccessor
         return PosixSourceAccessor::readDirectory(path);
     }
 
-    void readFile(const CanonPath & path, Sink & sink, std::function<void(uint64_t)> sizeCallback) override
+    void readFile(const CanonPath & path, Sink & sink, fun<void(uint64_t)> sizeCallback) override
     {
         requireStoreObject(path);
         return PosixSourceAccessor::readFile(path, sink, sizeCallback);
@@ -81,14 +94,24 @@ ref<SourceAccessor> LocalFSStore::getFSAccessor(bool requireValidPath)
         ref<LocalFSStore>(std::dynamic_pointer_cast<LocalFSStore>(shared_from_this())), requireValidPath);
 }
 
-void LocalFSStore::narFromPath(const StorePath & path, Sink & sink)
+std::shared_ptr<SourceAccessor> LocalFSStore::getFSAccessor(const StorePath & path, bool requireValidPath)
 {
-    if (!isValidPath(path))
-        throw Error("path '%s' is not valid", printStorePath(path));
-    dumpPath(getRealStoreDir() + std::string(printStorePath(path), storeDir.size()), sink);
+    auto absPath = std::filesystem::path{config.realStoreDir.get()} / path.to_string();
+    if (requireValidPath) {
+        /* Only return non-null if the store object is a fully-valid
+           member of the store. */
+        if (!isValidPath(path))
+            return nullptr;
+    } else {
+        /* Return non-null as long as the some file system data exists,
+           even if the store object is not fully registered. */
+        if (!pathExists(absPath))
+            return nullptr;
+    }
+    return std::make_shared<PosixSourceAccessor>(std::move(absPath));
 }
 
-const std::string LocalFSStore::drvsLogDir = "drvs";
+const std::filesystem::path LocalFSStore::drvsLogDir = "drvs";
 
 std::optional<std::string> LocalFSStore::getBuildLogExact(const StorePath & path)
 {
@@ -96,10 +119,10 @@ std::optional<std::string> LocalFSStore::getBuildLogExact(const StorePath & path
 
     for (int j = 0; j < 2; j++) {
 
-        Path logPath =
-            j == 0 ? fmt("%s/%s/%s/%s", config.logDir.get(), drvsLogDir, baseName.substr(0, 2), baseName.substr(2))
-                   : fmt("%s/%s/%s", config.logDir.get(), drvsLogDir, baseName);
-        Path logBz2Path = logPath + ".bz2";
+        auto logPath = config.logDir.get()
+                       / (j == 0 ? drvsLogDir / baseName.substr(0, 2) / baseName.substr(2) : drvsLogDir / baseName);
+        auto logBz2Path = logPath;
+        logBz2Path += ".bz2";
 
         if (pathExists(logPath))
             return readFile(logPath);

@@ -57,11 +57,6 @@ Most Nix commands interpret the following environment variables:
 
   Overrides the location of the Nix store (default `prefix/store`).
 
-- <span id="env-NIX_DATA_DIR">[`NIX_DATA_DIR`](#env-NIX_DATA_DIR)</span>
-
-  Overrides the location of the Nix static data directory (default
-  `prefix/share`).
-
 - <span id="env-NIX_LOG_DIR">[`NIX_LOG_DIR`](#env-NIX_LOG_DIR)</span>
 
   Overrides the location of the Nix log directory (default
@@ -75,7 +70,7 @@ Most Nix commands interpret the following environment variables:
 - <span id="env-NIX_CONF_DIR">[`NIX_CONF_DIR`](#env-NIX_CONF_DIR)</span>
 
   Overrides the location of the system Nix configuration directory
-  (default `prefix/etc/nix`).
+  (default `sysconfdir/nix`, i.e. `/etc/nix` on most systems).
 
 - <span id="env-NIX_CONFIG">[`NIX_CONFIG`](#env-NIX_CONFIG)</span>
 

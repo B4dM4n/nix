@@ -4,6 +4,10 @@
 #include "nix/util/url.hh"
 #include "nix/util/signals.hh"
 
+#ifdef __linux__
+#  include <sys/vfs.h>
+#endif
+
 #include <sqlite3.h>
 
 #include <atomic>
@@ -13,7 +17,7 @@ namespace nix {
 
 SQLiteError::SQLiteError(
     const char * path, const char * errMsg, int errNo, int extendedErrNo, int offset, HintFmt && hf)
-    : Error("")
+    : CloneableError("")
     , path(path)
     , errMsg(errMsg)
     , errNo(errNo)
@@ -58,21 +62,43 @@ static void traceSQL(void * x, const char * sql)
     notice("SQL<[%1%]>", sql);
 };
 
-SQLite::SQLite(const Path & path, SQLiteOpenMode mode)
+SQLite::SQLite(const std::filesystem::path & path, Settings && settings)
 {
+    // Work around a ZFS issue where SQLite's truncate() call on
+    // db.sqlite-shm can randomly take up to a few seconds. See
+    // https://github.com/openzfs/zfs/issues/14290#issuecomment-3074672917.
+    // Remove this workaround when a fix is widely installed, perhaps 2027? Candidate:
+    // https://github.com/search?q=repo%3Aopenzfs%2Fzfs+%22Linux%3A+zfs_putpage%3A+complete+async+page+writeback+immediately%22&type=commits
+#ifdef __linux__
+    try {
+        auto shmFile = path;
+        shmFile += "-shm";
+        AutoCloseFD fd = open(shmFile.string().c_str(), O_RDWR | O_CLOEXEC);
+        if (fd) {
+            struct statfs fs;
+            if (fstatfs(fd.get(), &fs))
+                throw SysError("statfs() on %s", PathFmt(shmFile));
+            if (fs.f_type == /* ZFS_SUPER_MAGIC */ 801189825 && fdatasync(fd.get()) != 0)
+                throw SysError("fsync() on %s", PathFmt(shmFile));
+        }
+    } catch (...) {
+        throw;
+    }
+#endif
+
     // useSQLiteWAL also indicates what virtual file system we need.  Using
     // `unix-dotfile` is needed on NFS file systems and on Windows' Subsystem
     // for Linux (WSL) where useSQLiteWAL should be false by default.
-    const char * vfs = settings.useSQLiteWAL ? 0 : "unix-dotfile";
-    bool immutable = mode == SQLiteOpenMode::Immutable;
+    const char * vfs = settings.useWAL ? 0 : "unix-dotfile";
+    bool immutable = settings.mode == SQLiteOpenMode::Immutable;
     int flags = immutable ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE;
-    if (mode == SQLiteOpenMode::Normal)
+    if (settings.mode == SQLiteOpenMode::Normal)
         flags |= SQLITE_OPEN_CREATE;
-    auto uri = "file:" + percentEncode(path) + "?immutable=" + (immutable ? "1" : "0");
+    auto uri = "file:" + percentEncode(path.string()) + "?immutable=" + (immutable ? "1" : "0");
     int ret = sqlite3_open_v2(uri.c_str(), &db, SQLITE_OPEN_URI | flags, vfs);
     if (ret != SQLITE_OK) {
         const char * err = sqlite3_errstr(ret);
-        throw Error("cannot open SQLite database '%s': %s", path, err);
+        throw Error("cannot open SQLite database %s: %s", PathFmt(path), err);
     }
 
     if (sqlite3_busy_timeout(db, 60 * 60 * 1000) != SQLITE_OK)
@@ -99,7 +125,7 @@ SQLite::~SQLite()
 void SQLite::isCache()
 {
     exec("pragma synchronous = off");
-    exec("pragma main.journal_mode = truncate");
+    exec("pragma main.journal_mode = wal");
 }
 
 void SQLite::exec(const std::string & stmt)
@@ -252,10 +278,10 @@ SQLiteTxn::~SQLiteTxn()
 
 void handleSQLiteBusy(const SQLiteBusy & e, time_t & nextWarning)
 {
-    time_t now = time(0);
+    time_t now = time(nullptr);
     if (now > nextWarning) {
         nextWarning = now + 10;
-        logWarning({.msg = HintFmt(e.what())});
+        logWarning({.msg = e.info().msg});
     }
 
     /* Sleep for a while since retrying the transaction right away

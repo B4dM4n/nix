@@ -31,6 +31,8 @@
 
   nix-cmd,
 
+  nix-nswrapper,
+
   nix-cli,
 
   nix-functional-tests,
@@ -47,25 +49,25 @@
 }:
 
 let
-  libs =
-    {
-      inherit
-        nix-util
-        nix-util-c
-        nix-store
-        nix-store-c
-        nix-fetchers
-        nix-fetchers-c
-        nix-expr
-        nix-expr-c
-        nix-flake
-        nix-flake-c
-        nix-main
-        nix-main-c
-        nix-cmd
-        ;
-    }
-    // lib.optionalAttrs
+  libs = {
+    inherit
+      nix-util
+      nix-util-c
+      nix-store
+      nix-store-c
+      nix-fetchers
+      nix-fetchers-c
+      nix-expr
+      nix-expr-c
+      nix-flake
+      nix-flake-c
+      nix-main
+      nix-main-c
+      nix-cmd
+      ;
+  }
+  //
+    lib.optionalAttrs
       (!stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
       {
         # Currently fails in static build
@@ -127,20 +129,19 @@ stdenv.mkDerivation (finalAttrs: {
   */
   dontFixup = true;
 
-  checkInputs =
-    [
-      # Make sure the unit tests have passed
-      nix-util-tests.tests.run
-      nix-store-tests.tests.run
-      nix-expr-tests.tests.run
-      nix-fetchers-tests.tests.run
-      nix-flake-tests.tests.run
+  checkInputs = [
+    # Make sure the unit tests have passed
+    nix-util-tests.tests.run
+    nix-store-tests.tests.run
+    nix-expr-tests.tests.run
+    nix-fetchers-tests.tests.run
+    nix-flake-tests.tests.run
 
-      # Make sure the functional tests have passed
-      nix-functional-tests
-    ]
-    ++ lib.optionals
-      (!stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
+    # Make sure the functional tests have passed
+    nix-functional-tests
+  ]
+  ++
+    lib.optionals (!stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
       [
         # Perl currently fails in static build
         # TODO: Split out tests into a separate derivation?
@@ -172,6 +173,9 @@ stdenv.mkDerivation (finalAttrs: {
       # Forwarded outputs
       ln -sT ${nix-manual} $doc
       ln -sT ${nix-manual.man} $man
+    ''
+    + lib.optionalString stdenv.isLinux ''
+      lndir ${nix-nswrapper} $out
     '';
 
   passthru = {

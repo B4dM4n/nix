@@ -5,6 +5,6 @@ include_dirs += include_directories('../..')
 headers += files(
   'signals-impl.hh',
   'windows-async-pipe.hh',
-  'windows-error.hh',
-  # hack for trailing newline
+  'windows-environment.hh',
+  'windows-known-folders.hh',
 )

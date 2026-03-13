@@ -90,13 +90,13 @@ struct CmdSearch : InstallableValueCommand, MixJSON
 
         uint64_t results = 0;
 
-        std::function<void(eval_cache::AttrCursor & cursor, const std::vector<Symbol> & attrPath, bool initialRecurse)>
-            visit;
+        std::function<void(eval_cache::AttrCursor & cursor, const AttrPath & attrPath, bool initialRecurse)> visit;
 
-        visit = [&](eval_cache::AttrCursor & cursor, const std::vector<Symbol> & attrPath, bool initialRecurse) {
-            auto attrPathS = state->symbols.resolve(attrPath);
+        visit = [&](eval_cache::AttrCursor & cursor, const AttrPath & attrPath, bool initialRecurse) {
+            auto attrPathS = state->symbols.resolve({attrPath});
+            auto attrPathStr = attrPath.to_string(*state);
 
-            Activity act(*logger, lvlInfo, actUnknown, fmt("evaluating '%s'", concatStringsSep(".", attrPathS)));
+            Activity act(*logger, lvlInfo, actUnknown, fmt("evaluating '%s'", attrPathStr));
             try {
                 auto recurse = [&]() {
                     for (const auto & attr : cursor.getAttrs()) {
@@ -108,13 +108,12 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                 };
 
                 if (cursor.isDerivation()) {
-                    DrvName name(cursor.getAttr(state->sName)->getString());
+                    DrvName name(cursor.getAttr(state->s.name)->getString());
 
-                    auto aMeta = cursor.maybeGetAttr(state->sMeta);
-                    auto aDescription = aMeta ? aMeta->maybeGetAttr(state->sDescription) : nullptr;
+                    auto aMeta = cursor.maybeGetAttr(state->s.meta);
+                    auto aDescription = aMeta ? aMeta->maybeGetAttr(state->s.description) : nullptr;
                     auto description = aDescription ? aDescription->getString() : "";
                     std::replace(description.begin(), description.end(), '\n', ' ');
-                    auto attrPath2 = concatStringsSep(".", attrPathS);
 
                     std::vector<std::smatch> attrPathMatches;
                     std::vector<std::smatch> descriptionMatches;
@@ -122,7 +121,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                     bool found = false;
 
                     for (auto & regex : excludeRegexes) {
-                        if (std::regex_search(attrPath2, regex) || std::regex_search(name.name, regex)
+                        if (std::regex_search(attrPathStr, regex) || std::regex_search(name.name, regex)
                             || std::regex_search(description, regex))
                             return;
                     }
@@ -137,7 +136,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                             }
                         };
 
-                        addAll(std::sregex_iterator(attrPath2.begin(), attrPath2.end(), regex), attrPathMatches);
+                        addAll(std::sregex_iterator(attrPathStr.begin(), attrPathStr.end(), regex), attrPathMatches);
                         addAll(std::sregex_iterator(name.name.begin(), name.name.end(), regex), nameMatches);
                         addAll(std::sregex_iterator(description.begin(), description.end(), regex), descriptionMatches);
 
@@ -148,7 +147,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                     if (found) {
                         results++;
                         if (json) {
-                            (*jsonOut)[attrPath2] = {
+                            (*jsonOut)[attrPathStr] = {
                                 {"pname", name.name},
                                 {"version", name.version},
                                 {"description", description},
@@ -158,8 +157,8 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                                 logger->cout("");
                             logger->cout(
                                 "* %s%s",
-                                wrap("\e[0;1m", hiliteMatches(attrPath2, attrPathMatches, ANSI_GREEN, "\e[0;1m")),
-                                name.version != "" ? " (" + name.version + ")" : "");
+                                wrap("\e[0;1m", hiliteMatches(attrPathStr, attrPathMatches, ANSI_GREEN, "\e[0;1m")),
+                                optionalBracket(" (", name.version, ")"));
                             if (description != "")
                                 logger->cout(
                                     "  %s", hiliteMatches(description, descriptionMatches, ANSI_GREEN, ANSI_NORMAL));
@@ -176,7 +175,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                     recurse();
 
                 else if (attrPathS[0] == "legacyPackages" && attrPath.size() > 2) {
-                    auto attr = cursor.maybeGetAttr(state->sRecurseForDerivations);
+                    auto attr = cursor.maybeGetAttr(state->s.recurseForDerivations);
                     if (attr && attr->getBool())
                         recurse();
                 }

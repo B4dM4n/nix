@@ -1,23 +1,40 @@
-// FIXME: Odd failures for templates that are causing the PR to break
-// for now with discussion with @Ericson2314 to comment out.
-#if 0
-#  include <gtest/gtest.h>
+#include <gtest/gtest.h>
 
-#  include "nix/store/uds-remote-store.hh"
+#include "nix/store/uds-remote-store.hh"
 
 namespace nix {
 
 TEST(UDSRemoteStore, constructConfig)
 {
-    UDSRemoteStoreConfig config{"unix", "/tmp/socket", {}};
+    UDSRemoteStoreConfig config{"/tmp/socket", {}};
 
     EXPECT_EQ(config.path, "/tmp/socket");
 }
 
-TEST(UDSRemoteStore, constructConfigWrongScheme)
+TEST(UDSRemoteStore, constructConfig_to_string)
 {
-    EXPECT_THROW(UDSRemoteStoreConfig("http", "/tmp/socket", {}), UsageError);
+    UDSRemoteStoreConfig config{"", {}};
+    EXPECT_EQ(config.getReference().to_string(), "daemon");
+}
+
+TEST(UDSRemoteStore, constructConfigWithParams)
+{
+    StoreConfig::Params params{{"max-connections", "1"}};
+    UDSRemoteStoreConfig config{"/tmp/socket", params};
+    auto storeReference = config.getReference();
+    EXPECT_EQ(storeReference.to_string(), "unix:///tmp/socket?max-connections=1");
+    EXPECT_EQ(storeReference.render(/*withParams=*/false), "unix:///tmp/socket");
+    EXPECT_EQ(storeReference.params, params);
+}
+
+TEST(UDSRemoteStore, constructConfigWithParamsNoPath)
+{
+    StoreConfig::Params params{{"max-connections", "1"}};
+    UDSRemoteStoreConfig config{"", params};
+    auto storeReference = config.getReference();
+    EXPECT_EQ(storeReference.to_string(), "daemon?max-connections=1");
+    EXPECT_EQ(storeReference.render(/*withParams=*/false), "daemon");
+    EXPECT_EQ(storeReference.params, params);
 }
 
 } // namespace nix
-#endif

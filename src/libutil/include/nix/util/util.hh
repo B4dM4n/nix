@@ -4,13 +4,15 @@
 #include "nix/util/types.hh"
 #include "nix/util/error.hh"
 #include "nix/util/logging.hh"
+#include "nix/util/strings.hh"
 
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <sstream>
+#include <bit>
 #include <optional>
-
-#include "nix/util/strings.hh"
+#include <ranges>
 
 namespace nix {
 
@@ -34,15 +36,34 @@ auto concatStrings(Parts &&... parts)
 }
 
 /**
+ * Add quotes around a string.
+ */
+inline std::string quoteString(std::string_view s, char quote = '\'')
+{
+    std::string result;
+    result.reserve(s.size() + 2);
+    result += quote;
+    result += s;
+    result += quote;
+    return result;
+}
+
+/**
  * Add quotes around a collection of strings.
  */
 template<class C>
-Strings quoteStrings(const C & c)
+Strings quoteStrings(const C & c, char quote = '\'')
 {
     Strings res;
     for (auto & s : c)
-        res.push_back("'" + s + "'");
+        res.push_back(quoteString(s, quote));
     return res;
+}
+
+inline Strings quoteFSPaths(const std::set<std::filesystem::path> & paths, char quote = '\'')
+{
+    return paths | std::views::transform([&](const auto & p) { return quoteString(p.string(), quote); })
+           | std::ranges::to<Strings>();
 }
 
 /**
@@ -99,12 +120,48 @@ N string2IntWithUnitPrefix(std::string_view s)
     throw UsageError("'%s' is not an integer", s);
 }
 
+// Base also uses 'K', because it should also displayed as KiB => 100 Bytes => 0.1 KiB
+#define NIX_UTIL_SIZE_UNITS               \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Base, 'K')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Kilo, 'K')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Mega, 'M')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Giga, 'G')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Tera, 'T')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Peta, 'P')  \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Exa, 'E')   \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Zetta, 'Z') \
+    NIX_UTIL_DEFINE_SIZE_UNIT(Yotta, 'Y')
+
+enum class SizeUnit {
+#define NIX_UTIL_DEFINE_SIZE_UNIT(name, suffix) name,
+    NIX_UTIL_SIZE_UNITS
+#undef NIX_UTIL_DEFINE_SIZE_UNIT
+};
+
+constexpr inline auto sizeUnits = std::to_array<SizeUnit>({
+#define NIX_UTIL_DEFINE_SIZE_UNIT(name, suffix) SizeUnit::name,
+    NIX_UTIL_SIZE_UNITS
+#undef NIX_UTIL_DEFINE_SIZE_UNIT
+});
+
+SizeUnit getSizeUnit(int64_t value);
+
+/**
+ * Returns the unit if all values would be rendered using the same unit
+ * otherwise returns `std::nullopt`.
+ */
+std::optional<SizeUnit> getCommonSizeUnit(std::initializer_list<int64_t> values);
+
+std::string renderSizeWithoutUnit(int64_t value, SizeUnit unit, bool align = false);
+
+char getSizeUnitSuffix(SizeUnit unit);
+
 /**
  * Pretty-print a byte value, e.g. 12433615056 is rendered as `11.6
  * GiB`. If `align` is set, the number will be right-justified by
  * padding with spaces on the left.
  */
-std::string renderSize(uint64_t value, bool align = false);
+std::string renderSize(int64_t value, bool align = false);
 
 /**
  * Parse a string into a float.
@@ -119,8 +176,25 @@ template<typename T>
 T readLittleEndian(unsigned char * p)
 {
     T x = 0;
-    for (size_t i = 0; i < sizeof(x); ++i, ++p) {
-        x |= ((T) *p) << (i * 8);
+    /* Byte types such as char/unsigned char/std::byte are a bit special because
+       they are allowed to alias anything else. Thus a raw loop iterating
+       over the bytes here would be quite inefficient and iterate byte-by-byte
+       (the compiler cannot optimise anything because the pointer might alias
+       something). Use a memcpy + byteswap here as needed. */
+    std::memcpy(&x, p, sizeof(T));
+    /* Don't need to do anything if we are not on a big endian machine. */
+    if constexpr (std::endian::native != std::endian::little) {
+        if constexpr (std::is_same_v<T, uint64_t>) {
+            x = __builtin_bswap64(x);
+        } else if constexpr (std::is_same_v<T, uint32_t>) {
+            x = __builtin_bswap32(x);
+        } else if constexpr (std::is_same_v<T, uint16_t>) {
+            x = __builtin_bswap16(x);
+        } else {
+            /* Signed types don't make their way here. Though it would be fine
+               since C++20 mandates 2's complement representation. */
+            static_assert(false);
+        }
     }
     return x;
 }
@@ -180,16 +254,6 @@ constexpr char treeLine[] = "│   ";
 constexpr char treeNull[] = "    ";
 
 /**
- * Encode arbitrary bytes as Base64.
- */
-std::string base64Encode(std::string_view s);
-
-/**
- * Decode arbitrary bytes to Base64.
- */
-std::string base64Decode(std::string_view s);
-
-/**
  * Remove common leading whitespace from the lines in the string
  * 's'. For example, if every line is indented by at least 3 spaces,
  * then we remove 3 spaces from the start of every line.
@@ -204,10 +268,32 @@ std::string stripIndentation(std::string_view s);
 std::pair<std::string_view, std::string_view> getLine(std::string_view s);
 
 /**
- * Get a value for the specified key from an associate container.
+ * Get a pointer to the contents of a `std::optional` if it is set, or a
+ * null pointer otherise.
+ *
+ * Const version.
  */
 template<class T>
-const typename T::mapped_type * get(const T & map, const typename T::key_type & key)
+const T * get(const std::optional<T> & opt)
+{
+    return opt ? &*opt : nullptr;
+}
+
+/**
+ * Non-const counterpart of `const T * get(const std::optional<T>)`.
+ * Takes a mutable reference, but returns a mutable pointer.
+ */
+template<class T>
+T * get(std::optional<T> & opt)
+{
+    return opt ? &*opt : nullptr;
+}
+
+/**
+ * Get a value for the specified key from an associate container.
+ */
+template<class T, typename K>
+const typename T::mapped_type * get(const T & map, const K & key)
 {
     auto i = map.find(key);
     if (i == map.end())
@@ -215,8 +301,8 @@ const typename T::mapped_type * get(const T & map, const typename T::key_type & 
     return &i->second;
 }
 
-template<class T>
-typename T::mapped_type * get(T & map, const typename T::key_type & key)
+template<class T, typename K>
+typename T::mapped_type * get(T & map, const K & key)
 {
     auto i = map.find(key);
     if (i == map.end())
@@ -225,17 +311,39 @@ typename T::mapped_type * get(T & map, const typename T::key_type & key)
 }
 
 /**
- * Get a value for the specified key from an associate container, or a default value if the key isn't present.
+ * Deleted because this is use-after-free liability. Just don't pass temporaries to this overload set.
+ */
+template<class T, typename K>
+typename T::mapped_type * get(T && map, const K & key) = delete;
+
+/**
+ * Look up a value in a `boost::concurrent_flat_map`.
  */
 template<class T>
-const typename T::mapped_type &
-getOr(T & map, const typename T::key_type & key, const typename T::mapped_type & defaultValue)
+std::optional<typename T::mapped_type> getConcurrent(const T & map, const typename T::key_type & key)
+{
+    std::optional<typename T::mapped_type> res;
+    map.cvisit(key, [&](auto & x) { res = x.second; });
+    return res;
+}
+
+/**
+ * Get a value for the specified key from an associate container, or a default value if the key isn't present.
+ */
+template<class T, typename K>
+const typename T::mapped_type & getOr(T & map, const K & key, const typename T::mapped_type & defaultValue)
 {
     auto i = map.find(key);
     if (i == map.end())
         return defaultValue;
     return i->second;
 }
+
+/**
+ * Deleted because this is use-after-free liability. Just don't pass temporaries to this overload set.
+ */
+template<class T, typename K>
+const typename T::mapped_type & getOr(T && map, const K & key, const typename T::mapped_type & defaultValue) = delete;
 
 /**
  * Remove and return the first item from a container.
@@ -294,6 +402,11 @@ struct MaintainCount
         counter += delta;
     }
 
+    MaintainCount(MaintainCount &&) = delete;
+    MaintainCount(const MaintainCount &) = delete;
+    MaintainCount & operator=(MaintainCount &&) = delete;
+    MaintainCount & operator=(const MaintainCount &) = delete;
+
     ~MaintainCount()
     {
         counter -= delta;
@@ -302,53 +415,12 @@ struct MaintainCount
 
 /**
  * A Rust/Python-like enumerate() iterator adapter.
- *
- * Borrowed from http://reedbeta.com/blog/python-like-enumerate-in-cpp17.
  */
-template<
-    typename T,
-    typename TIter = decltype(std::begin(std::declval<T>())),
-    typename = decltype(std::end(std::declval<T>()))>
-constexpr auto enumerate(T && iterable)
+template<std::ranges::viewable_range R>
+constexpr auto enumerate(R && range)
 {
-    struct iterator
-    {
-        size_t i;
-        TIter iter;
-
-        constexpr bool operator!=(const iterator & other) const
-        {
-            return iter != other.iter;
-        }
-
-        constexpr void operator++()
-        {
-            ++i;
-            ++iter;
-        }
-
-        constexpr auto operator*() const
-        {
-            return std::tie(i, *iter);
-        }
-    };
-
-    struct iterable_wrapper
-    {
-        T iterable;
-
-        constexpr auto begin()
-        {
-            return iterator{0, std::begin(iterable)};
-        }
-
-        constexpr auto end()
-        {
-            return iterator{0, std::end(iterable)};
-        }
-    };
-
-    return iterable_wrapper{std::forward<T>(iterable)};
+    /* Not std::views::enumerate because it uses difference_type for the index. */
+    return std::views::zip(std::views::iota(size_t{0}), std::forward<R>(range));
 }
 
 /**
@@ -361,8 +433,6 @@ struct overloaded : Ts...
 };
 template<class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
-
-std::string showBytes(uint64_t bytes);
 
 /**
  * Provide an addition operator between strings and string_views

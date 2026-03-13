@@ -21,8 +21,9 @@ clearStore
 
 # Submodules can't be fetched locally by default.
 # See fetchGitSubmodules.sh
-export XDG_CONFIG_HOME=$TEST_HOME/.config
-git config --global protocol.file.allow always
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=protocol.file.allow
+export GIT_CONFIG_VALUE_0=always
 
 
 rootRepo=$TEST_ROOT/rootRepo
@@ -62,8 +63,8 @@ flakeref=git+file://$rootRepo\?submodules=1\&dir=submodule
 # Check that dirtying a submodule makes the entire thing dirty.
 [[ $(nix flake metadata --json "$flakeref" | jq -r .locked.rev) != null ]]
 echo '"foo"' > "$rootRepo"/submodule/sub.nix
-[[ $(nix eval --json "$flakeref#sub" ) = '"foo"' ]]
-[[ $(nix flake metadata --json "$flakeref" | jq -r .locked.rev) = null ]]
+[[ $(_NIX_TEST_BARF_ON_UNCACHEABLE='' nix eval --json "$flakeref#sub" ) = '"foo"' ]]
+[[ $(_NIX_TEST_BARF_ON_UNCACHEABLE='' nix flake metadata --json "$flakeref" | jq -r .locked.rev) = null ]]
 
 # Test that `nix flake metadata` parses `submodule` correctly.
 cat > "$rootRepo"/flake.nix <<EOF
@@ -75,7 +76,7 @@ EOF
 git -C "$rootRepo" add flake.nix
 git -C "$rootRepo" commit -m "Add flake.nix"
 
-storePath=$(nix flake prefetch --json "$rootRepo?submodules=1" | jq -r .storePath)
+storePath=$(_NIX_TEST_BARF_ON_UNCACHEABLE='' nix flake prefetch --json "$rootRepo?submodules=1" | jq -r .storePath)
 [[ -e "$storePath/submodule" ]]
 
 # Test the use of inputs.self.

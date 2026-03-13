@@ -11,7 +11,7 @@
 #include <chrono>
 #include <future>
 #include <string>
-#include <unordered_set>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 namespace nix {
 
@@ -31,6 +31,8 @@ struct OptimiseStats
     uint64_t bytesFreed = 0;
 };
 
+struct LocalSettings;
+
 struct LocalBuildStoreConfig : virtual LocalFSStoreConfig
 {
 
@@ -38,7 +40,7 @@ private:
     /**
       Input for computing the build directory. See `getBuildDir()`.
      */
-    Setting<std::optional<Path>> buildDir{
+    Setting<std::optional<AbsolutePath>> buildDir{
         this,
         std::nullopt,
         "build-dir",
@@ -54,16 +56,24 @@ private:
 
             This is also the location where [`--keep-failed`](@docroot@/command-ref/opt-common.md#opt-keep-failed) leaves its files.
 
-            If Nix runs without sandbox, or if the platform does not support sandboxing with bind mounts (e.g. macOS), then the [`builder`](@docroot@/language/derivations.md#attr-builder)'s environment will contain this directory, instead of the virtual location [`sandbox-build-dir`](#conf-sandbox-build-dir).
+            If Nix runs without sandbox, or if the platform does not support sandboxing with bind mounts (e.g. macOS), then the [`builder`](@docroot@/language/derivations.md#attr-builder)'s environment will contain this directory, instead of the virtual location [`sandbox-build-dir`](@docroot@/command-ref/conf-file.md#conf-sandbox-build-dir).
 
             > **Warning**
             >
             > `build-dir` must not be set to a world-writable directory.
             > Placing temporary build directories in a world-writable place allows other users to access or modify build data that is currently in use.
             > This alone is merely an impurity, but combined with another factor this has allowed malicious derivations to escape the build sandbox.
+
+            See also the global [`build-dir`](@docroot@/command-ref/conf-file.md#conf-build-dir) setting.
         )"};
 public:
-    Path getBuildDir() const;
+    /**
+     * For now, this just grabs the global local settings, but by having this method we get ready for these being
+     * per-store settings instead.
+     */
+    const LocalSettings & getLocalSettings() const;
+
+    std::filesystem::path getBuildDir() const;
 };
 
 struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
@@ -72,11 +82,20 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
 {
     using LocalFSStoreConfig::LocalFSStoreConfig;
 
-    LocalStoreConfig(std::string_view scheme, std::string_view authority, const Params & params);
+    LocalStoreConfig(const std::filesystem::path & path, const Params & params);
 
+private:
+
+    /**
+     * An indirection so that we don't need to refer to global settings
+     * in headers.
+     */
+    bool getDefaultRequireSigs();
+
+public:
     Setting<bool> requireSigs{
         this,
-        settings.requireSigs,
+        getDefaultRequireSigs(),
         "require-sigs",
         "Whether store paths copied into this store should have a trusted signature."};
 
@@ -98,6 +117,43 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
           > While the filesystem the database resides on might appear to be read-only, consider whether another user or system might have write access to it.
         )"};
 
+    bool getReadOnly() const override;
+
+    Setting<bool> ignoreGcDeleteFailure{
+        this,
+        false,
+        "ignore-gc-delete-failure",
+        R"(
+          Whether to ignore failures when deleting items with the garbage collector.
+
+          Normally the garbage collector will fail with an error if the nix daemon cannot delete a file, with this setting such errors will only be printed as warnings.
+        )",
+        {},
+        true,
+        Xp::LocalOverlayStore,
+    };
+
+    Setting<bool> useRootsDaemon{
+        this,
+        false,
+        "use-roots-daemon",
+        R"(
+          Whether to request garbage collector roots from an external daemon.
+
+          When enabled, the garbage collector connects to a Unix domain socket
+          at [`<state-dir>`](@docroot@/store/types/local-store.md#store-option-state)`/gc-roots-socket/socket` to discover additional roots
+          that should not be collected. This is useful when the Nix daemon runs
+          without root privileges and cannot scan `/proc` for runtime roots.
+
+          The daemon can be started with [`nix store roots-daemon`](@docroot@/command-ref/new-cli/nix3-store-roots-daemon.md).
+        )",
+        {},
+        true,
+        Xp::LocalOverlayStore,
+    };
+
+    std::filesystem::path getRootsSocketPath() const;
+
     static const std::string name()
     {
         return "Local Store";
@@ -111,6 +167,8 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
     static std::string doc();
 
     ref<Store> openStore() const override;
+
+    StoreReference getReference() const override;
 };
 
 class LocalStore : public virtual IndirectRootStore, public virtual GcStore
@@ -162,16 +220,20 @@ private:
         std::unique_ptr<PublicKeys> publicKeys;
     };
 
-    Sync<State> _state;
+    /**
+     * Mutable state. It's behind a `ref` to reduce false sharing
+     * between immutable and mutable fields.
+     */
+    ref<Sync<State>> _state;
 
 public:
 
-    const Path dbDir;
-    const Path linksDir;
-    const Path reservedPath;
-    const Path schemaPath;
-    const Path tempRootsDir;
-    const Path fnTempRoots;
+    const std::filesystem::path dbDir;
+    const std::filesystem::path linksDir;
+    const std::filesystem::path reservedPath;
+    const std::filesystem::path schemaPath;
+    const std::filesystem::path tempRootsDir;
+    const std::filesystem::path fnTempRoots;
 
 private:
 
@@ -196,8 +258,6 @@ public:
      * Implementations of abstract store API methods.
      */
 
-    std::string getUri() override;
-
     bool isValidPathUncached(const StorePath & path) override;
 
     StorePathSet queryValidPaths(const StorePathSet & paths, SubstituteFlag maybeSubstitute = NoSubstitute) override;
@@ -215,8 +275,6 @@ public:
     queryStaticPartialDerivationOutputMap(const StorePath & path) override;
 
     std::optional<StorePath> queryPathFromHashPart(const std::string & hashPart) override;
-
-    StorePathSet querySubstitutablePaths(const StorePathSet & paths) override;
 
     bool pathInfoIsUntrusted(const ValidPathInfo &) override;
     bool realisationIsUntrusted(const Realisation &) override;
@@ -261,7 +319,7 @@ public:
      * The weak reference merely is a symlink to `path' from
      * /nix/var/nix/gcroots/auto/<hash of `path'>.
      */
-    void addIndirectRoot(const Path & path) override;
+    void addIndirectRoot(const std::filesystem::path & path) override;
 
 private:
 
@@ -291,8 +349,11 @@ public:
      * Called by `collectGarbage` to recursively delete a path.
      * The default implementation simply calls `deletePath`, but it can be
      * overridden by stores that wish to provide their own deletion behaviour.
+     *
+     * @param isKnownPath true if this is a known store path, false if it's
+     *        garbage/unknown content found in the store directory
      */
-    virtual void deleteStorePath(const Path & path, uint64_t & bytesFreed);
+    virtual void deleteStorePath(const std::filesystem::path & path, uint64_t & bytesFreed, bool isKnownPath);
 
     /**
      * Optimise the disk space usage of the Nix store by hard-linking
@@ -306,7 +367,7 @@ public:
      * Optimise a single store path. Optionally, test the encountered
      * symlinks for corruption.
      */
-    void optimisePath(const Path & path, RepairFlag repair);
+    void optimisePath(const std::filesystem::path & path, RepairFlag repair);
 
     bool verifyStore(bool checkContents, RepairFlag repair) override;
 
@@ -354,7 +415,7 @@ public:
 
     void vacuumDB();
 
-    void addSignatures(const StorePath & storePath, const StringSet & sigs) override;
+    void addSignatures(const StorePath & storePath, const std::set<Signature> & sigs) override;
 
     /**
      * If free disk space in /nix/store if below minFree, delete
@@ -371,10 +432,10 @@ public:
     void cacheDrvOutputMapping(
         State & state, const uint64_t deriver, const std::string & outputName, const StorePath & output);
 
-    std::optional<const Realisation> queryRealisation_(State & state, const DrvOutput & id);
-    std::optional<std::pair<int64_t, Realisation>> queryRealisationCore_(State & state, const DrvOutput & id);
+    std::optional<const UnkeyedRealisation> queryRealisation_(State & state, const DrvOutput & id);
+    std::optional<std::pair<int64_t, UnkeyedRealisation>> queryRealisationCore_(State & state, const DrvOutput & id);
     void queryRealisationUncached(
-        const DrvOutput &, Callback<std::shared_ptr<const Realisation>> callback) noexcept override;
+        const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept override;
 
     std::optional<std::string> getVersion() override;
 
@@ -382,7 +443,7 @@ protected:
 
     void verifyPath(
         const StorePath & path,
-        std::function<bool(const StorePath &)> existsInStoreDir,
+        fun<bool(const StorePath &)> existsInStoreDir,
         StorePathSet & done,
         StorePathSet & validPaths,
         RepairFlag repair,
@@ -404,7 +465,7 @@ private:
 
     uint64_t queryValidPathId(State & state, const StorePath & path);
 
-    uint64_t addValidPath(State & state, const ValidPathInfo & info, bool checkOutputs = true);
+    uint64_t addValidPath(State & state, const ValidPathInfo & info);
 
     void invalidatePath(State & state, const StorePath & path);
 
@@ -417,10 +478,7 @@ private:
 
     void updatePathInfo(State & state, const ValidPathInfo & info);
 
-    PathSet queryValidPathsOld();
-    ValidPathInfo queryPathInfoOld(const Path & path);
-
-    void findRoots(const Path & path, std::filesystem::file_type type, Roots & roots);
+    void findRoots(const std::filesystem::path & path, std::filesystem::file_type type, Roots & roots);
 
     void findRootsNoTemp(Roots & roots, bool censor);
 
@@ -428,12 +486,16 @@ private:
 
     std::pair<std::filesystem::path, AutoCloseFD> createTempDirInStore();
 
-    typedef std::unordered_set<ino_t> InodeHash;
+    typedef boost::unordered_flat_set<ino_t> InodeHash;
 
     InodeHash loadInodeHash();
-    Strings readDirectoryIgnoringInodes(const Path & path, const InodeHash & inodeHash);
-    void
-    optimisePath_(Activity * act, OptimiseStats & stats, const Path & path, InodeHash & inodeHash, RepairFlag repair);
+    Strings readDirectoryIgnoringInodes(const std::filesystem::path & path, const InodeHash & inodeHash);
+    void optimisePath_(
+        Activity * act,
+        OptimiseStats & stats,
+        const std::filesystem::path & path,
+        InodeHash & inodeHash,
+        RepairFlag repair);
 
     // Internal versions that are not wrapped in retry_sqlite.
     bool isValidPath_(State & state, const StorePath & path);
@@ -442,7 +504,6 @@ private:
     void addBuildLog(const StorePath & drvPath, std::string_view log) override;
 
     friend struct PathSubstitutionGoal;
-    friend struct SubstitutionGoal;
     friend struct DerivationGoal;
 };
 

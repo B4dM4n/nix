@@ -1,16 +1,20 @@
 {
   runCommand,
-  system,
+  stdenv,
   buildPackages,
   cacert,
   nix,
+  nixComponents2,
 }:
 
 let
 
+  inherit (stdenv.hostPlatform) system;
+
   installerClosureInfo = buildPackages.closureInfo {
     rootPaths = [
       nix
+      nixComponents2.nix-manual.man
       cacert
     ];
   };
@@ -37,8 +41,12 @@ runCommand "nix-binary-tarball-${version}" env ''
   substitute ${../scripts/install-systemd-multi-user.sh} $TMPDIR/install-systemd-multi-user.sh \
     --subst-var-by nix ${nix} \
     --subst-var-by cacert ${cacert}
+  substitute ${../scripts/install-freebsd-multi-user.sh} $TMPDIR/install-freebsd-multi-user.sh \
+    --subst-var-by nix ${nix} \
+    --subst-var-by cacert ${cacert}
   substitute ${../scripts/install-multi-user.sh} $TMPDIR/install-multi-user \
     --subst-var-by nix ${nix} \
+    --subst-var-by nix-manual ${nixComponents2.nix-manual.man} \
     --subst-var-by cacert ${cacert}
 
   if type -p shellcheck; then
@@ -48,6 +56,7 @@ runCommand "nix-binary-tarball-${version}" env ''
     shellcheck $TMPDIR/create-darwin-volume.sh
     shellcheck $TMPDIR/install-darwin-multi-user.sh
     shellcheck $TMPDIR/install-systemd-multi-user.sh
+    shellcheck $TMPDIR/install-freebsd-multi-user.sh
 
     # SC1091: Don't panic about not being able to source
     #         /etc/profile
@@ -64,6 +73,7 @@ runCommand "nix-binary-tarball-${version}" env ''
   chmod +x $TMPDIR/create-darwin-volume.sh
   chmod +x $TMPDIR/install-darwin-multi-user.sh
   chmod +x $TMPDIR/install-systemd-multi-user.sh
+  chmod +x $TMPDIR/install-freebsd-multi-user.sh
   chmod +x $TMPDIR/install-multi-user
   dir=nix-${version}-${system}
   fn=$out/$dir.tar.xz
@@ -82,6 +92,7 @@ runCommand "nix-binary-tarball-${version}" env ''
     $TMPDIR/create-darwin-volume.sh \
     $TMPDIR/install-darwin-multi-user.sh \
     $TMPDIR/install-systemd-multi-user.sh \
+    $TMPDIR/install-freebsd-multi-user.sh \
     $TMPDIR/install-multi-user \
     $TMPDIR/reginfo \
     $(cat ${installerClosureInfo}/store-paths)

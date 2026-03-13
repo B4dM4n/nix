@@ -1,6 +1,7 @@
 #pragma once
 ///@file
 
+#include "nix/expr/diagnose.hh"
 #include "nix/expr/eval-profiler-settings.hh"
 #include "nix/util/configuration.hh"
 #include "nix/util/source-path.hh"
@@ -9,6 +10,36 @@ namespace nix {
 
 class EvalState;
 struct PrimOp;
+
+/**
+ * A deprecated bool setting that migrates to a `Setting<Diagnose>`.
+ * When set to true, it emits a deprecation warning and sets the target
+ * `Setting<Diagnose>` setting to `Warn`.
+ */
+class DeprecatedWarnSetting : public BaseSetting<bool>
+{
+    Setting<Diagnose> & target;
+    const char * targetName;
+
+public:
+    DeprecatedWarnSetting(
+        Config * options,
+        Setting<Diagnose> & target,
+        const char * targetName,
+        const std::string & name,
+        const std::string & description,
+        const StringSet & aliases = {})
+        : BaseSetting<bool>(false, true, name, description, aliases, std::nullopt)
+        , target(target)
+        , targetName(targetName)
+    {
+        options->addSetting(this);
+    }
+
+    void assign(const bool & v) override;
+    void appendOrSet(bool newValue, bool append) override;
+    void override(const bool & v) override;
+};
 
 struct EvalSettings : Config
 {
@@ -36,7 +67,7 @@ struct EvalSettings : Config
      * if `<scheme>` is a key in this map, then `<arbitrary string>` is
      * passed to the hook that is the value in this map.
      */
-    using LookupPathHooks = std::map<std::string, std::function<LookupPathHook>>;
+    using LookupPathHooks = std::map<std::string, fun<LookupPathHook>>;
 
     EvalSettings(bool & readOnlyMode, LookupPathHooks lookupPathHooks = {});
 
@@ -237,7 +268,7 @@ struct EvalSettings : Config
           See [Using the `eval-profiler`](@docroot@/advanced-topics/eval-profiler.md).
         )"};
 
-    Setting<Path> evalProfileFile{
+    Setting<std::filesystem::path> evalProfileFile{
         this,
         "nix.profile",
         "eval-profile-file",
@@ -327,11 +358,119 @@ struct EvalSettings : Config
 
           This option can be enabled by setting `NIX_ABORT_ON_WARN=1` in the environment.
         )"};
+
+    Setting<Diagnose> lintShortPathLiterals{
+        this,
+        Diagnose::Ignore,
+        "lint-short-path-literals",
+        R"(
+          Controls handling of relative path literals that don't start with `./` or `../`.
+
+          - `ignore`: Ignore without warning (default)
+          - `warn`: Emit a warning suggesting to use `./` prefix
+          - `fatal`: Treat as a parse error
+
+          For example, with this setting set to `warn` or `fatal`, `foo/bar` would
+          suggest using `./foo/bar` instead.
+
+          This is useful for improving code readability and making path literals
+          more explicit.
+        )",
+    };
+
+    DeprecatedWarnSetting warnShortPathLiterals{
+        this,
+        lintShortPathLiterals,
+        "lint-short-path-literals",
+        "warn-short-path-literals",
+        R"(
+          Deprecated. Use [`lint-short-path-literals`](#conf-lint-short-path-literals)` = warn` instead.
+        )",
+    };
+
+    Setting<Diagnose> lintAbsolutePathLiterals{
+        this,
+        Diagnose::Ignore,
+        "lint-absolute-path-literals",
+        R"(
+          Controls handling of absolute path literals (paths starting with `/`) and home path literals (paths starting with `~/`).
+
+          - `ignore`: Ignore without warning (default)
+          - `warn`: Emit a warning about non-portability
+          - `fatal`: Treat as a parse error
+
+          It is true that some files are more difficult to reference with relative paths,
+          because they would require lots of `../../..` upward traversing to reach them.
+          But firstly, it is probably not a good idea to reference these files ---
+          such paths often make Nix expressions less portable and reproducible,
+          as they depend on the file system layout of the machine evaluating the expression.
+
+          Secondly, with [pure evaluation mode](#conf-pure-eval), most such files are prohibited to access anyway,
+          whether by absolute or relative paths.
+          In that case, enabling this lint in fatal mode is less disruptive,
+          because the paths pure eval allows are usually not the ones that would be ergonomically expressed with absolute paths anyway.
+        )",
+    };
+
+    Setting<Diagnose> lintUrlLiterals{
+        this,
+        Diagnose::Ignore,
+        "lint-url-literals",
+        R"(
+          Controls handling of unquoted URLs as part of the Nix language syntax.
+          The Nix language allows for URL literals, like so:
+
+          ```
+          $ nix repl
+          nix-repl> http://foo
+          "http://foo"
+          ```
+
+          Setting this to `warn` or `fatal` will cause the Nix parser to
+          warn or throw an error when encountering a URL literal:
+
+          ```
+          $ nix repl --lint-url-literals fatal
+          nix-repl> http://foo
+          error: URL literal 'http://foo' is deprecated
+                 at «string»:1:1:
+
+                      1| http://foo
+                       | ^
+          ```
+
+          Unquoted URLs are being deprecated and their usage is discouraged.
+
+          The reason is that, as opposed to path literals, URLs have no
+          special properties that distinguish them from regular strings, URLs
+          containing query parameters have to be quoted anyway, and unquoted URLs
+          may confuse external tooling.
+        )",
+    };
+
+    Setting<unsigned> bindingsUpdateLayerRhsSizeThreshold{
+        this,
+        sizeof(void *) == 4 ? 8192 : 16,
+        "eval-attrset-update-layer-rhs-threshold",
+        R"(
+          Tunes the maximum size of an attribute set that, when used
+          as a right operand in an [attribute set update expression](@docroot@/language/operators.md#update),
+          uses a more space-efficient linked-list representation of attribute sets.
+
+          Setting this to larger values generally leads to less memory allocations,
+          but may lead to worse evaluation performance.
+
+          A value of `0` disables this optimization completely.
+
+          This is an advanced performance tuning option and typically should not be changed.
+          The default value is chosen to balance performance and memory usage. On 32 bit systems
+          where memory is scarce, the default is a large value to reduce the amount of allocations.
+    )"};
 };
 
 /**
  * Conventionally part of the default nix path in impure mode.
  */
-Path getNixDefExpr();
+std::filesystem::path getNixDefExpr();
 
 } // namespace nix

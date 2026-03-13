@@ -121,7 +121,7 @@ public:
         std::ostringstream oss;
         showErrorInfo(oss, ei, loggerSettings.showTrace.get());
 
-        log(ei.level, toView(oss));
+        log(ei.level, oss.view());
     }
 
     void startActivity(
@@ -150,16 +150,21 @@ public:
 
 Verbosity verbosity = lvlInfo;
 
-void writeToStderr(std::string_view s)
+static void writeFullLogging(Descriptor fd, std::string_view s)
 {
     try {
-        writeFull(getStandardError(), s, false);
+        writeFull(fd, s, false);
     } catch (SystemError & e) {
-        /* Ignore failing writes to stderr.  We need to ignore write
-           errors to ensure that cleanup code that logs to stderr runs
-           to completion if the other side of stderr has been closed
-           unexpectedly. */
+        /* Ignore failing logging writes.  We need to ignore write
+           errors to ensure that cleanup code that writes logs runs
+           to completion if the other side of the logging fd has
+           been closed unexpectedly. */
     }
+}
+
+void writeToStderr(std::string_view s)
+{
+    writeFullLogging(getStandardError(), s);
 }
 
 std::unique_ptr<Logger> makeSimpleLogger(bool printBuildLogs)
@@ -245,15 +250,15 @@ struct JSONLogger : Logger
 
     void write(const nlohmann::json & json)
     {
-        auto line =
-            (includeNixPrefix ? "@nix " : "") + json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        auto line = (includeNixPrefix ? "@nix " : "")
+                    + json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
 
         /* Acquire a lock to prevent log messages from clobbering each
            other. */
         try {
             auto state(_state.lock());
             if (state->enabled)
-                writeLine(fd, line);
+                writeFullLogging(fd, line);
         } catch (...) {
             bool enabled = false;
             std::swap(_state.lock()->enabled, enabled);
@@ -360,17 +365,17 @@ std::unique_ptr<Logger> makeJSONLogger(const std::filesystem::path & path, bool 
                          ? connect(path)
                          : toDescriptor(open(path.string().c_str(), O_CREAT | O_APPEND | O_WRONLY, 0644));
     if (!fd)
-        throw SysError("opening log file %1%", path);
+        throw SysError("opening log file %1%", PathFmt(path));
 
     return std::make_unique<JSONFileLogger>(std::move(fd), includeNixPrefix);
 }
 
 void applyJSONLogger()
 {
-    if (!loggerSettings.jsonLogPath.get().empty()) {
+    if (auto & opt = loggerSettings.jsonLogPath.get()) {
         try {
             std::vector<std::unique_ptr<Logger>> loggers;
-            loggers.push_back(makeJSONLogger(std::filesystem::path(loggerSettings.jsonLogPath.get()), false));
+            loggers.push_back(makeJSONLogger(*opt, false));
             try {
                 logger = makeTeeLogger(std::move(logger), std::move(loggers));
             } catch (...) {

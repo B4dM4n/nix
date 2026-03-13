@@ -5,9 +5,7 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-error.hh"
 #include "nix/expr/eval-settings.hh"
-
-// For `NIX_USE_BOEHMGC`, and if that's set, `GC_THREADS`
-#include "nix/expr/config.hh"
+#include <exception>
 
 namespace nix {
 
@@ -15,7 +13,7 @@ namespace nix {
  * Note: Various places expect the allocated memory to be zeroed.
  */
 [[gnu::always_inline]]
-inline void * allocBytes(size_t n)
+inline void * EvalMemory::allocBytes(size_t n)
 {
     void * p;
 #if NIX_USE_BOEHMGC
@@ -29,9 +27,14 @@ inline void * allocBytes(size_t n)
 }
 
 [[gnu::always_inline]]
-Value * EvalState::allocValue()
+Value * EvalMemory::allocValue()
 {
 #if NIX_USE_BOEHMGC
+    /* Allocation cache for GC'd Value objects. Boehm GC is already a global resource, so thread_local is
+       a natural solution. Multiple EvalState instances on the same thread will reuse the same cache. */
+    static thread_local std::shared_ptr<void *> valueAllocCache{
+        std::allocate_shared<void *>(traceable_allocator<void *>(), nullptr)};
+
     /* We use the boehm batch allocator to speed up allocations of Values (of which there are many).
        GC_malloc_many returns a linked list of objects of the given size, where the first word
        of each object is also the pointer to the next object in the list. This also means that we
@@ -51,20 +54,24 @@ Value * EvalState::allocValue()
     void * p = allocBytes(sizeof(Value));
 #endif
 
-    nrValues++;
+    stats.nrValues++;
     return (Value *) p;
 }
 
 [[gnu::always_inline]]
-Env & EvalState::allocEnv(size_t size)
+Env & EvalMemory::allocEnv(size_t size)
 {
-    nrEnvs++;
-    nrValuesInEnvs += size;
+    stats.nrEnvs++;
+    stats.nrValuesInEnvs += size;
 
     Env * env;
 
 #if NIX_USE_BOEHMGC
     if (size == 1) {
+        /* Allocation cache for size-1 Env objects. Boehm GC is already a global resource, so thread_local is
+           a natural solution. Multiple EvalState instances on the same thread will reuse the same cache. */
+        static thread_local std::shared_ptr<void *> env1AllocCache{
+            std::allocate_shared<void *>(traceable_allocator<void *>(), nullptr)};
         /* see allocValue for explanations. */
         if (!*env1AllocCache) {
             *env1AllocCache = GC_malloc_many(sizeof(Env) + sizeof(Value *));
@@ -94,18 +101,25 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
         Expr * expr = v.thunk().expr;
         try {
             v.mkBlackhole();
-            // checkInterrupt();
             if (env) [[likely]]
                 expr->eval(*this, *env, v);
             else
                 ExprBlackHole::throwInfiniteRecursionError(*this, v);
         } catch (...) {
-            v.mkThunk(env, expr);
-            tryFixupBlackHolePos(v, pos);
+            handleEvalExceptionForThunk(env, expr, v, pos);
             throw;
         }
-    } else if (v.isApp())
-        callFunction(*v.app().left, *v.app().right, v, pos);
+    } else if (v.isApp()) {
+        Value savedApp = v;
+        try {
+            callFunction(*v.app().left, *v.app().right, v, pos);
+        } catch (...) {
+            handleEvalExceptionForApp(v, savedApp);
+            throw;
+        }
+    } else if (v.isFailed()) {
+        handleEvalFailed(v, pos);
+    }
 }
 
 [[gnu::always_inline]]
@@ -142,7 +156,7 @@ inline void EvalState::forceList(Value & v, const PosIdx pos, std::string_view e
 inline CallDepth EvalState::addCallDepth(const PosIdx pos)
 {
     if (callDepth > settings.maxCallDepth)
-        error<EvalBaseError>("stack overflow; max-call-depth exceeded").atPos(pos).debugThrow();
+        error<StackOverflowError>().atPos(pos).debugThrow();
 
     return CallDepth(callDepth);
 };

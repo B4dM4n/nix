@@ -6,6 +6,7 @@
 #include "nix/main/common-args.hh"
 #include "nix/expr/search-path.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/store/store-reference.hh"
 
 #include <filesystem>
 
@@ -55,7 +56,7 @@ struct MixEvalArgs : virtual Args, virtual MixRepair
 
     LookupPath lookupPath;
 
-    std::optional<std::string> evalStoreUrl;
+    std::optional<StoreReference> evalStoreUrl;
 
 private:
     struct AutoArgExpr
@@ -82,8 +83,8 @@ private:
 };
 
 /**
- * @param baseDir Optional [base directory](https://nixos.org/manual/nix/unstable/glossary#gloss-base-directory)
+ * @param baseDir Optional [base directory](https://nix.dev/manual/nix/development/glossary#gloss-base-directory)
  */
-SourcePath lookupFileArg(EvalState & state, std::string_view s, const Path * baseDir = nullptr);
+SourcePath lookupFileArg(EvalState & state, std::string_view s, const std::filesystem::path * baseDir = nullptr);
 
 } // namespace nix

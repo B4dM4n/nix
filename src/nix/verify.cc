@@ -15,7 +15,7 @@ struct CmdVerify : StorePathsCommand
 {
     bool noContents = false;
     bool noTrust = false;
-    Strings substituterUris;
+    std::vector<StoreReference> substituterUris;
     size_t sigsNeeded = 0;
 
     CmdVerify()
@@ -37,7 +37,7 @@ struct CmdVerify : StorePathsCommand
             .shortName = 's',
             .description = "Use signatures from the specified store.",
             .labels = {"store-uri"},
-            .handler = {[&](std::string s) { substituterUris.push_back(s); }},
+            .handler = {[&](std::string s) { substituterUris.push_back(StoreReference::parse(s)); }},
         });
 
         addFlag({
@@ -65,7 +65,7 @@ struct CmdVerify : StorePathsCommand
     {
         std::vector<ref<Store>> substituters;
         for (auto & s : substituterUris)
-            substituters.push_back(openStore(s));
+            substituters.push_back(openStore(StoreReference{s}));
 
         auto publicKeys = getDefaultPublicKeys();
 
@@ -103,14 +103,14 @@ struct CmdVerify : StorePathsCommand
 
                     auto hash = hashSink.finish();
 
-                    if (hash.first != info->narHash) {
+                    if (hash.hash != info->narHash) {
                         corrupted++;
                         act2.result(resCorruptedPath, store->printStorePath(info->path));
                         printError(
                             "path '%s' was modified! expected hash '%s', got '%s'",
                             store->printStorePath(info->path),
                             info->narHash.to_string(HashFormat::Nix32, true),
-                            hash.first.to_string(HashFormat::Nix32, true));
+                            hash.hash.to_string(HashFormat::Nix32, true));
                     }
                 }
 
@@ -123,11 +123,11 @@ struct CmdVerify : StorePathsCommand
 
                     else {
 
-                        StringSet sigsSeen;
+                        std::set<Signature> sigsSeen;
                         size_t actualSigsNeeded = std::max(sigsNeeded, (size_t) 1);
                         size_t validSigs = 0;
 
-                        auto doSigs = [&](StringSet sigs) {
+                        auto doSigs = [&](std::set<Signature> sigs) {
                             for (const auto & sig : sigs) {
                                 if (!sigsSeen.insert(sig).second)
                                     continue;

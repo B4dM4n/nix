@@ -160,7 +160,6 @@ See the [corresponding section in the derivation output page](@docroot@/store/de
 ## Other output modifications
 
   - [`unsafeDiscardReferences`]{#adv-attr-unsafeDiscardReferences}\
-
     When using [structured attributes](#adv-attr-structuredAttrs), the
     attribute `unsafeDiscardReferences` is an attribute set with a boolean value for each output name.
     If set to `true`, it disables scanning the output for runtime dependencies.
@@ -195,7 +194,6 @@ See the [corresponding section in the derivation output page](@docroot@/store/de
     [`builder`]: ./derivations.md#attr-builder
 
 - [`requiredSystemFeatures`]{#adv-attr-requiredSystemFeatures}\
-
   If a derivation has the `requiredSystemFeatures` attribute, then Nix will only build it on a machine that has the corresponding features set in its [`system-features` configuration](@docroot@/command-ref/conf-file.md#conf-system-features).
 
   For example, setting
@@ -335,12 +333,12 @@ Here is more information on the `output*` attributes, and what values they may b
 
     `outputHashAlgo` can only be `null` when `outputHash` follows the SRI format, because in that case the choice of hash algorithm is determined by `outputHash`.
 
-  - [`outputHash`]{#adv-attr-outputHashAlgo}; [`outputHash`]{#adv-attr-outputHashMode}
+  - [`outputHash`]{#adv-attr-outputHash}
 
     This will specify the output hash of the single output of a [fixed-output derivation].
 
     The `outputHash` attribute must be a string containing the hash in either hexadecimal or "nix32" encoding, or following the format for integrity metadata as defined by [SRI](https://www.w3.org/TR/SRI/).
-    The "nix32" encoding is an adaptation of base-32 encoding.
+    The ["nix32" encoding](@docroot@/protocols/nix32.md) is Nix's variant of base-32 encoding.
 
     > **Note**
     >

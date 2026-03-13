@@ -11,6 +11,12 @@
 
 #include <sys/types.h>
 
+namespace nix {
+
+struct GitRepo;
+
+}
+
 namespace nix::fetchers {
 
 struct Cache;
@@ -123,7 +129,28 @@ struct Settings : public Config
         true,
         Xp::Flakes};
 
+    Setting<unsigned int> tarballTtl{
+        this,
+        60 * 60,
+        "tarball-ttl",
+        R"(
+          The number of seconds a downloaded tarball is considered fresh. If
+          the cached tarball is stale, Nix checks whether it is still up
+          to date using the ETag header. Nix downloads a new version if
+          the ETag header is unsupported, or the cached ETag doesn't match.
+
+          Setting the TTL to `0` forces Nix to always check if the tarball is
+          up to date.
+
+          Nix caches tarballs in `$XDG_CACHE_HOME/nix/tarballs`.
+
+          Files fetched via `NIX_PATH`, `fetchGit`, `fetchMercurial`,
+          `fetchTarball`, and `fetchurl` respect this TTL.
+        )"};
+
     ref<Cache> getCache() const;
+
+    ref<GitRepo> getTarballCache() const;
 
 private:
     mutable Sync<std::shared_ptr<Cache>> _cache;

@@ -1,6 +1,7 @@
 #include "nix/util/signals.hh"
 #include "nix/util/util.hh"
 #include "nix/util/error.hh"
+#include "nix/util/fun.hh"
 #include "nix/util/sync.hh"
 #include "nix/util/terminal.hh"
 
@@ -12,24 +13,14 @@ using namespace unix;
 
 std::atomic<bool> unix::_isInterrupted = false;
 
-namespace unix {
-static thread_local bool interruptThrown = false;
-}
-
 thread_local std::function<bool()> unix::interruptCheck;
-
-void setInterruptThrown()
-{
-    unix::interruptThrown = true;
-}
 
 void unix::_interrupted()
 {
     /* Block user interrupts while an exception is being handled.
        Throwing an exception while another exception is being handled
        kills the program! */
-    if (!interruptThrown && !std::uncaught_exceptions()) {
-        interruptThrown = true;
+    if (!std::uncaught_exceptions()) {
         throw Interrupted("interrupted by the user");
     }
 }
@@ -49,7 +40,7 @@ struct InterruptCallbacks
     Token nextToken = 0;
 
     /* Used as a list, see InterruptCallbacks comment. */
-    std::map<Token, std::function<void()>> callbacks;
+    std::map<Token, fun<void()>> callbacks;
 };
 
 static Sync<InterruptCallbacks> _interruptCallbacks;
@@ -98,26 +89,6 @@ void unix::triggerInterrupt()
 
 static sigset_t savedSignalMask;
 static bool savedSignalMaskIsSet = false;
-
-void unix::setChildSignalMask(sigset_t * sigs)
-{
-    assert(sigs); // C style function, but think of sigs as a reference
-
-#if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 1) || (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE) \
-    || (defined(_POSIX_SOURCE) && _POSIX_SOURCE)
-    sigemptyset(&savedSignalMask);
-    // There's no "assign" or "copy" function, so we rely on (math) idempotence
-    // of the or operator: a or a = a.
-    sigorset(&savedSignalMask, sigs, sigs);
-#else
-    // Without sigorset, our best bet is to assume that sigset_t is a type that
-    // can be assigned directly, such as is the case for a sigset_t defined as
-    // an integer type.
-    savedSignalMask = *sigs;
-#endif
-
-    savedSignalMaskIsSet = true;
-}
 
 void unix::saveSignalMask()
 {
@@ -171,6 +142,16 @@ struct InterruptCallbackImpl : InterruptCallback
 {
     InterruptCallbacks::Token token;
 
+    InterruptCallbackImpl(InterruptCallbacks::Token token)
+        : token(token)
+    {
+    }
+
+    InterruptCallbackImpl(InterruptCallbackImpl &&) = delete;
+    InterruptCallbackImpl(const InterruptCallbackImpl &) = delete;
+    InterruptCallbackImpl & operator=(InterruptCallbackImpl &&) = delete;
+    InterruptCallbackImpl & operator=(const InterruptCallbackImpl &) = delete;
+
     ~InterruptCallbackImpl() override
     {
         auto interruptCallbacks(_interruptCallbacks.lock());
@@ -178,16 +159,12 @@ struct InterruptCallbackImpl : InterruptCallback
     }
 };
 
-std::unique_ptr<InterruptCallback> createInterruptCallback(std::function<void()> callback)
+std::unique_ptr<InterruptCallback> createInterruptCallback(fun<void()> callback)
 {
     auto interruptCallbacks(_interruptCallbacks.lock());
     auto token = interruptCallbacks->nextToken++;
     interruptCallbacks->callbacks.emplace(token, callback);
-
-    std::unique_ptr<InterruptCallbackImpl> res{new InterruptCallbackImpl{}};
-    res->token = token;
-
-    return std::unique_ptr<InterruptCallback>(res.release());
+    return std::make_unique<InterruptCallbackImpl>(token);
 }
 
 } // namespace nix

@@ -7,7 +7,7 @@
 #include "nix/util/archive.hh"
 #include "nix/store/builtins/buildenv.hh"
 #include "nix/flake/flakeref.hh"
-#include "../nix-env/user-env.hh"
+#include "nix-env/user-env.hh"
 #include "nix/store/profiles.hh"
 #include "nix/store/names.hh"
 #include "nix/util/url.hh"
@@ -105,7 +105,8 @@ std::string getNameFromElement(const ProfileElement & element)
 {
     std::optional<std::string> result = std::nullopt;
     if (element.source) {
-        result = getNameFromURL(parseURL(element.source->to_string()));
+        // Seems to be for Flake URLs
+        result = getNameFromURL(parseURL(element.source->to_string(), /*lenient=*/true));
     }
     return result.value_or(element.identifier());
 }
@@ -139,7 +140,7 @@ struct ProfileManifest
                 sOriginalUrl = "originalUrl";
                 break;
             default:
-                throw Error("profile manifest '%s' has unsupported version %d", manifestPath, version);
+                throw Error("profile manifest %s has unsupported version %d", PathFmt(manifestPath), version);
             }
 
             auto elems = json["elements"];
@@ -160,11 +161,15 @@ struct ProfileManifest
                         e["outputs"].get<ExtendedOutputsSpec>()};
                 }
 
-                std::string name =
-                    elems.is_object() ? elem.key()
-                    : element.source
-                        ? getNameFromURL(parseURL(element.source->to_string())).value_or(element.identifier())
-                        : element.identifier();
+                std::string name = [&] {
+                    if (elems.is_object())
+                        return elem.key();
+                    if (element.source) {
+                        if (auto optName = getNameFromURL(parseURL(element.source->to_string(), /*lenient=*/true)))
+                            return *optName;
+                    }
+                    return element.identifier();
+                }();
 
                 addElement(name, std::move(element));
             }
@@ -172,8 +177,8 @@ struct ProfileManifest
 
         else if (std::filesystem::exists(profile / "manifest.nix")) {
             // FIXME: needed because of pure mode; ugly.
-            state.allowPath(state.store->followLinksToStore(profile.string()));
-            state.allowPath(state.store->followLinksToStore((profile / "manifest.nix").string()));
+            state.allowPath(state.store->followLinksToStorePath(profile.string()));
+            state.allowPath(state.store->followLinksToStorePath((profile / "manifest.nix").string()));
 
             auto packageInfos = queryInstalled(state, state.store->followLinksToStore(profile.string()));
 
@@ -242,17 +247,17 @@ struct ProfileManifest
             }
         }
 
-        buildProfile(tempDir, std::move(pkgs));
+        buildProfile(tempDir.string(), std::move(pkgs));
 
-        writeFile(tempDir + "/manifest.json", toJSON(*store).dump());
+        writeFile(tempDir / "manifest.json", toJSON(*store).dump());
 
         /* Add the symlink tree to the store. */
         StringSink sink;
-        dumpPath(tempDir, sink);
+        dumpPath(tempDir.string(), sink);
 
         auto narHash = hashString(HashAlgorithm::SHA256, sink.s);
 
-        ValidPathInfo info{
+        auto info = ValidPathInfo::makeFromCA(
             *store,
             "profile",
             FixedOutputInfo{
@@ -265,8 +270,7 @@ struct ProfileManifest
                         .self = false,
                     },
             },
-            narHash,
-        };
+            narHash);
         info.narSize = sink.s.size();
 
         StringSource source(sink.s);
@@ -408,7 +412,7 @@ struct CmdProfileAdd : InstallablesCommand, MixDefaultProfile
         }
 
         try {
-            updateProfile(manifest.build(store));
+            updateProfile(*store, manifest.build(store));
         } catch (BuildEnvFileConflictError & conflictError) {
             // FIXME use C++20 std::ranges once macOS has it
             //       See
@@ -417,10 +421,10 @@ struct CmdProfileAdd : InstallablesCommand, MixDefaultProfile
                 for (auto it = begin; it != end; it++) {
                     auto & [name, profileElement] = *it;
                     for (auto & storePath : profileElement.storePaths) {
-                        if (conflictError.fileA.starts_with(store->printStorePath(storePath))) {
+                        if (conflictError.fileA.string().starts_with(store->printStorePath(storePath))) {
                             return std::tuple(conflictError.fileA, name, profileElement.toInstallables(*store));
                         }
-                        if (conflictError.fileB.starts_with(store->printStorePath(storePath))) {
+                        if (conflictError.fileB.string().starts_with(store->printStorePath(storePath))) {
                             return std::tuple(conflictError.fileB, name, profileElement.toInstallables(*store));
                         }
                     }
@@ -458,8 +462,8 @@ struct CmdProfileAdd : InstallablesCommand, MixDefaultProfile
                 "To prioritise the existing package:\n"
                 "\n"
                 "  nix profile add %4% --priority %7%\n",
-                originalConflictingFilePath,
-                newConflictingFilePath,
+                PathFmt(originalConflictingFilePath),
+                PathFmt(newConflictingFilePath),
                 originalEntryName,
                 concatStringsSep(" ", newConflictingRefs),
                 conflictError.priority,
@@ -664,7 +668,7 @@ struct CmdProfileRemove : virtual EvalCommand, MixDefaultProfile, MixProfileElem
         auto removedCount = oldManifest.elements.size() - newManifest.elements.size();
         printInfo("removed %d packages, kept %d packages", removedCount, newManifest.elements.size());
 
-        updateProfile(newManifest.build(store));
+        updateProfile(*store, newManifest.build(store));
     }
 };
 
@@ -707,7 +711,7 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProf
                     element.identifier());
                 continue;
             }
-            if (element.source->originalRef.input.isLocked()) {
+            if (element.source->originalRef.input.isLocked(getEvalState()->fetchSettings)) {
                 warn(
                     "Found package '%s', but it was added from a locked flake reference so it can't be upgraded!",
                     element.identifier());
@@ -736,7 +740,8 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProf
             assert(infop);
             auto & info = *infop;
 
-            if (info.flake.lockedRef.input.isLocked() && element.source->lockedRef == info.flake.lockedRef)
+            if (info.flake.lockedRef.input.isLocked(getEvalState()->fetchSettings)
+                && element.source->lockedRef == info.flake.lockedRef)
                 continue;
 
             printInfo(
@@ -770,7 +775,7 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProf
             element.updateStorePaths(getEvalStore(), store, builtPaths.find(&*installable)->second.first);
         }
 
-        updateProfile(manifest.build(store));
+        updateProfile(*store, manifest.build(store));
     }
 };
 
@@ -844,7 +849,10 @@ struct CmdProfileDiffClosures : virtual StoreCommand, MixDefaultProfile
                 first = false;
                 logger->cout("Version %d -> %d:", prevGen->number, gen.number);
                 printClosureDiff(
-                    store, store->followLinksToStorePath(prevGen->path), store->followLinksToStorePath(gen.path), "  ");
+                    store,
+                    store->followLinksToStorePath(prevGen->path.string()),
+                    store->followLinksToStorePath(gen.path.string()),
+                    "  ");
             }
 
             prevGen = gen;

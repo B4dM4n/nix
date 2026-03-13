@@ -133,13 +133,19 @@ class SampleStack : public EvalProfiler
     FrameInfo getPrimOpFrameInfo(const PrimOp & primOp, std::span<Value *> args, PosIdx pos);
 
 public:
-    SampleStack(EvalState & state, std::filesystem::path profileFile, std::chrono::nanoseconds period)
+    SampleStack(EvalState & state, const std::filesystem::path & profileFile, std::chrono::nanoseconds period)
         : state(state)
         , sampleInterval(period)
         , profileFd([&]() {
-            AutoCloseFD fd = toDescriptor(open(profileFile.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0660));
+            auto fd = openNewFileForWrite(
+                profileFile,
+                0660,
+                {
+                    .truncateExisting = true,
+                    .followSymlinksOnTruncate = true, /* FIXME: Probably shouldn't follow symlinks. */
+                });
             if (!fd)
-                throw SysError("opening file %s", profileFile);
+                throw SysError("opening file %s", PathFmt(profileFile));
             return fd;
         }())
         , posCache(state)
@@ -185,7 +191,7 @@ FrameInfo SampleStack::getPrimOpFrameInfo(const PrimOp & primOp, std::span<Value
                 /* Error context strings don't actually matter, since we ignore all eval errors. */
                 state.forceAttrs(*args[0], pos, "");
                 auto attrs = args[0]->attrs();
-                auto nameAttr = state.getAttr(state.sName, attrs, "");
+                auto nameAttr = state.getAttr(state.s.name, attrs, "");
                 auto drvName = std::string(state.forceStringNoCtx(*nameAttr->value, pos, ""));
                 return DerivationStrictFrameInfo{.callPos = pos, .drvName = std::move(drvName)};
             } catch (...) {
@@ -211,7 +217,7 @@ FrameInfo SampleStack::getFrameInfoFromValueAndPos(const Value & v, std::span<Va
         /* Resolve primOp eagerly. Must not hold on to a reference to a Value. */
         return PrimOpFrameInfo{.expr = v.primOpAppPrimOp(), .callPos = pos};
     else if (state.isFunctor(v)) {
-        const auto functor = v.attrs()->get(state.sFunctor);
+        const auto functor = v.attrs()->get(state.s.functor);
         if (auto pos_ = posCache.lookup(pos); std::holds_alternative<std::monostate>(pos_.origin))
             /* HACK: In case callsite position is unresolved. */
             return FunctorFrameInfo{.pos = functor->pos};
@@ -324,7 +330,7 @@ void SampleStack::saveProfile()
             std::visit([&](auto && info) { info.symbolize(state, os, posCache); }, pos);
         }
         os << " " << count;
-        writeLine(profileFd.get(), std::move(os).str());
+        writeLine(profileFd.get(), os.str());
         /* Clear ostringstream. */
         os.str("");
         os.clear();

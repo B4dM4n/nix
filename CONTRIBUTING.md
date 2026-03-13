@@ -89,10 +89,12 @@ Check out the [security policy](https://github.com/NixOS/nix/security/policy).
 
 ## Making changes to the Nix manual
 
-The Nix reference manual is hosted on https://nixos.org/manual/nix.
+The Nix reference manual is hosted on https://nix.dev/manual/nix.
 The underlying source files are located in [`doc/manual/source`](./doc/manual/source).
 For small changes you can [use GitHub to edit these files](https://docs.github.com/en/repositories/working-with-files/managing-files/editing-files)
 For larger changes see the [Nix reference manual](https://nix.dev/manual/nix/development/development/contributing.html).
+
+You're encouraged to add line breaks at semantic boundaries, per [sembr](https://sembr.org).
 
 ## Getting help
 

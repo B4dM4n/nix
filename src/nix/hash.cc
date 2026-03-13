@@ -3,12 +3,13 @@
 #include "nix/store/content-address.hh"
 #include "nix/cmd/legacy.hh"
 #include "nix/main/shared.hh"
-#include "nix/util/references.hh"
+#include "nix/store/references.hh"
 #include "nix/util/archive.hh"
 #include "nix/util/git.hh"
 #include "nix/util/posix-source-accessor.hh"
 #include "nix/cmd/misc-store-flags.hh"
 #include "man-pages.hh"
+#include "nix/util/fun.hh"
 
 using namespace nix;
 
@@ -100,23 +101,22 @@ struct CmdHashBase : Command
                 // so we don't need to go low-level, or reject symlink `path`s.
                 auto hashSink = makeSink();
                 readFile(path, *hashSink);
-                h = hashSink->finish().first;
+                h = hashSink->finish().hash;
                 break;
             }
             case FileIngestionMethod::NixArchive: {
                 auto sourcePath = makeSourcePath();
                 auto hashSink = makeSink();
                 dumpPath(sourcePath, *hashSink, (FileSerialisationMethod) mode);
-                h = hashSink->finish().first;
+                h = hashSink->finish().hash;
                 break;
             }
             case FileIngestionMethod::Git: {
                 auto sourcePath = makeSourcePath();
-                std::function<git::DumpHook> hook;
-                hook = [&](const SourcePath & path) -> git::TreeEntry {
+                fun<git::DumpHook> hook = [&](const SourcePath & path) -> git::TreeEntry {
                     auto hashSink = makeSink();
                     auto mode = dump(path, *hashSink, hook);
-                    auto hash = hashSink->finish().first;
+                    auto hash = hashSink->finish().hash;
                     return {
                         .mode = mode,
                         .hash = hash,
@@ -248,11 +248,13 @@ struct CmdHashConvert : Command
     void run() override
     {
         for (const auto & s : hashStrings) {
-            Hash h = from == HashFormat::SRI ? Hash::parseSRI(s) : Hash::parseAny(s, algo);
-            if (from && from != HashFormat::SRI
-                && h.to_string(*from, false) != (from == HashFormat::Base16 ? toLower(s) : s)) {
-                auto from_as_string = printHashFormat(*from);
-                throw BadHash("input hash '%s' does not have the expected format for '--from %s'", s, from_as_string);
+            auto [h, parsedFormat] = Hash::parseAnyReturningFormat(s, algo);
+            if (from && *from != parsedFormat) {
+                throw BadHash(
+                    "input hash '%s' has format '%s', but '--from %s' was specified",
+                    s,
+                    printHashFormat(parsedFormat),
+                    printHashFormat(*from));
             }
             logger->cout(h.to_string(to, to == HashFormat::SRI));
         }

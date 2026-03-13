@@ -1,14 +1,5 @@
-{ lib, ... }:
+{ lib, nixComponents, ... }:
 
-let
-  # FIXME (roberth) reference issue
-  inputDerivation =
-    pkg:
-    (pkg.overrideAttrs (o: {
-      disallowedReferences = [ ];
-    })).inputDerivation;
-
-in
 {
   # We rarely change the script in a way that benefits from type checking, so
   # we skip it to save time.
@@ -20,7 +11,7 @@ in
 
       virtualisation.writableStore = true;
       system.extraDependencies = [
-        (inputDerivation config.nix.package)
+        config.nix.package.inputDerivation
       ];
 
       nix.settings.substituters = lib.mkForce [ ];
@@ -49,11 +40,11 @@ in
 
               cd ~
 
-              cp -r ${pkgs.nixComponents2.nix-functional-tests.src} nix
+              cp -r ${nixComponents.nix-functional-tests.src} nix
               chmod -R +w nix
 
               chmod u+w nix/.version
-              echo ${pkgs.nixComponents2.version} > nix/.version
+              echo ${nixComponents.version} > nix/.version
 
               export isTestOnNixOS=1
 

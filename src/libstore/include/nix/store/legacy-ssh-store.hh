@@ -14,21 +14,21 @@ struct LegacySSHStoreConfig : std::enable_shared_from_this<LegacySSHStoreConfig>
 {
     using CommonSSHStoreConfig::CommonSSHStoreConfig;
 
-    LegacySSHStoreConfig(std::string_view scheme, std::string_view authority, const Params & params);
+    LegacySSHStoreConfig(const ParsedURL::Authority & authority, const Params & params);
 
 #ifndef _WIN32
     // Hack for getting remote build log output.
     // Intentionally not in `LegacySSHStoreConfig` so that it doesn't appear in
     // the documentation
-    const Setting<int> logFD{this, INVALID_DESCRIPTOR, "log-fd", "file descriptor to which SSH's stderr is connected"};
+    Setting<int> logFD{this, INVALID_DESCRIPTOR, "log-fd", "file descriptor to which SSH's stderr is connected"};
 #else
     Descriptor logFD = INVALID_DESCRIPTOR;
 #endif
 
-    const Setting<Strings> remoteProgram{
+    Setting<Strings> remoteProgram{
         this, {"nix-store"}, "remote-program", "Path to the `nix-store` executable on the remote machine."};
 
-    const Setting<int> maxConnections{this, 1, "max-connections", "Maximum number of concurrent SSH connections."};
+    Setting<int> maxConnections{this, 1, "max-connections", "Maximum number of concurrent SSH connections."};
 
     /**
      * Hack for hydra
@@ -53,6 +53,8 @@ struct LegacySSHStoreConfig : std::enable_shared_from_this<LegacySSHStoreConfig>
     static std::string doc();
 
     ref<Store> openStore() const override;
+
+    StoreReference getReference() const override;
 };
 
 struct LegacySSHStore : public virtual Store
@@ -71,8 +73,6 @@ struct LegacySSHStore : public virtual Store
 
     ref<Connection> openConnection();
 
-    std::string getUri() override;
-
     void queryPathInfoUncached(
         const StorePath & path, Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept override;
 
@@ -90,7 +90,7 @@ struct LegacySSHStore : public virtual Store
      *
      * This is exposed for sake of Hydra.
      */
-    void narFromPath(const StorePath & path, std::function<void(Source &)> fun);
+    void narFromPath(const StorePath & path, fun<void(Source &)> receiveNar);
 
     std::optional<StorePath> queryPathFromHashPart(const std::string & hashPart) override
     {
@@ -109,7 +109,7 @@ struct LegacySSHStore : public virtual Store
         unsupported("addToStore");
     }
 
-    virtual StorePath addToStoreFromDump(
+    StorePath addToStoreFromDump(
         Source & dump,
         std::string_view name,
         FileSerialisationMethod dumpMethod = FileSerialisationMethod::NixArchive,
@@ -119,6 +119,11 @@ struct LegacySSHStore : public virtual Store
         RepairFlag repair = NoRepair) override
     {
         unsupported("addToStore");
+    }
+
+    void registerDrvOutput(const Realisation & output) override
+    {
+        unsupported("registerDrvOutput");
     }
 
 public:
@@ -131,7 +136,7 @@ public:
      *
      * @todo Use C++23 `std::move_only_function`.
      */
-    std::function<BuildResult()> buildDerivationAsync(
+    fun<BuildResult()> buildDerivationAsync(
         const StorePath & drvPath, const BasicDerivation & drv, const ServeProto::BuildOptions & options);
 
     void buildPaths(
@@ -142,7 +147,12 @@ public:
         unsupported("ensurePath");
     }
 
-    virtual ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
+    ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
+    {
+        unsupported("getFSAccessor");
+    }
+
+    std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath) override
     {
         unsupported("getFSAccessor");
     }
@@ -179,12 +189,6 @@ public:
      */
     StorePathSet queryValidPaths(const StorePathSet & paths, bool lock, SubstituteFlag maybeSubstitute = NoSubstitute);
 
-    /**
-     * Just exists because this is exactly what Hydra was doing, and we
-     * don't yet want an algorithmic change.
-     */
-    void addMultipleToStoreLegacy(Store & srcStore, const StorePathSet & paths);
-
     void connect() override;
 
     unsigned int getProtocol() override;
@@ -204,11 +208,17 @@ public:
      */
     std::optional<TrustedFlag> isTrustedClient() override;
 
-    void
-    queryRealisationUncached(const DrvOutput &, Callback<std::shared_ptr<const Realisation>> callback) noexcept override
+    void queryRealisationUncached(
+        const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept override
     // TODO: Implement
     {
         unsupported("queryRealisation");
+    }
+
+    StorePathSet querySubstitutablePaths(const StorePathSet & paths) override
+    {
+        // not supported
+        return {};
     }
 };
 

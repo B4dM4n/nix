@@ -12,6 +12,9 @@
 #include "nix/util/posix-source-accessor.hh"
 #include "nix/cmd/misc-store-flags.hh"
 #include "nix/util/terminal.hh"
+#include "nix/util/environment-variables.hh"
+#include "nix/util/url.hh"
+#include "nix/store/path.hh"
 
 #include "man-pages.hh"
 
@@ -55,8 +58,8 @@ std::string resolveMirrorUrl(EvalState & state, const std::string & url)
 
 std::tuple<StorePath, Hash> prefetchFile(
     ref<Store> store,
-    std::string_view url,
-    std::optional<std::string> name,
+    const VerbatimURL & url,
+    std::optional<std::string> maybeName,
     HashAlgorithm hashAlgo,
     std::optional<Hash> expectedHash,
     bool unpack,
@@ -65,11 +68,22 @@ std::tuple<StorePath, Hash> prefetchFile(
     ContentAddressMethod method =
         unpack || executable ? ContentAddressMethod::Raw::NixArchive : ContentAddressMethod::Raw::Flat;
 
-    /* Figure out a name in the Nix store. */
-    if (!name) {
-        name = baseNameOf(url);
-        if (name->empty())
-            throw Error("cannot figure out file name for '%s'", url);
+    std::string name = maybeName
+                           .or_else([&]() {
+                               /* Figure out a name in the Nix store. */
+                               auto derivedFromUrl = url.lastPathSegment();
+                               if (!derivedFromUrl || derivedFromUrl->empty())
+                                   throw Error("cannot figure out file name for '%s'", url.to_string());
+                               return derivedFromUrl;
+                           })
+                           .value();
+
+    try {
+        checkName(name);
+    } catch (BadStorePathName & e) {
+        if (!maybeName)
+            e.addTrace({}, "file name '%s' was extracted from URL '%s'", name, url.to_string());
+        throw;
     }
 
     std::optional<StorePath> storePath;
@@ -80,7 +94,7 @@ std::tuple<StorePath, Hash> prefetchFile(
     if (expectedHash) {
         hashAlgo = expectedHash->algo;
         storePath =
-            store->makeFixedOutputPathFromCA(*name, ContentAddressWithReferences::fromParts(method, *expectedHash, {}));
+            store->makeFixedOutputPathFromCA(name, ContentAddressWithReferences::fromParts(method, *expectedHash, {}));
         if (store->isValidPath(*storePath))
             hash = expectedHash;
         else
@@ -98,9 +112,9 @@ std::tuple<StorePath, Hash> prefetchFile(
             if (executable)
                 mode = 0700;
 
-            AutoCloseFD fd = toDescriptor(open(tmpFile.string().c_str(), O_WRONLY | O_CREAT | O_EXCL, mode));
+            auto fd = openNewFileForWrite(tmpFile, mode, {.truncateExisting = false});
             if (!fd)
-                throw SysError("creating temporary file '%s'", tmpFile);
+                throw SysError("creating temporary file %s", PathFmt(tmpFile));
 
             FdSink sink(fd.get());
 
@@ -111,12 +125,14 @@ std::tuple<StorePath, Hash> prefetchFile(
 
         /* Optionally unpack the file. */
         if (unpack) {
-            Activity act(*logger, lvlChatty, actUnknown, fmt("unpacking '%s'", url));
-            auto unpacked = (tmpDir.path() / "unpacked").string();
+            Activity act(*logger, lvlChatty, actUnknown, fmt("unpacking '%s'", url.to_string()));
+            auto unpacked = tmpDir.path() / "unpacked";
             createDirs(unpacked);
-            unpackTarfile(tmpFile.string(), unpacked);
+            unpackTarfile(tmpFile, unpacked);
 
             auto entries = DirectoryIterator{unpacked};
+            if (entries == DirectoryIterator{})
+                throw Error("archive '%s' is empty", url.to_string());
             /* If the archive unpacks to a single file/directory, then use
                that as the top-level. */
             tmpFile = entries->path();
@@ -127,10 +143,9 @@ std::tuple<StorePath, Hash> prefetchFile(
             }
         }
 
-        Activity act(*logger, lvlChatty, actUnknown, fmt("adding '%s' to the store", url));
+        Activity act(*logger, lvlChatty, actUnknown, fmt("adding '%s' to the store", url.to_string()));
 
-        auto info = store->addToStoreSlow(
-            *name, PosixSourceAccessor::createAtRoot(tmpFile), method, hashAlgo, {}, expectedHash);
+        auto info = store->addToStoreSlow(name, makeFSSourceAccessor(tmpFile), method, hashAlgo, {}, expectedHash);
         storePath = info.path;
         assert(info.ca);
         hash = info.ca->hash;
@@ -190,7 +205,7 @@ static int main_nix_prefetch_url(int argc, char ** argv)
         setLogFormat("bar");
 
         auto store = openStore();
-        auto state = std::make_unique<EvalState>(myArgs.lookupPath, store, fetchSettings, evalSettings);
+        auto state = std::make_shared<EvalState>(myArgs.lookupPath, store, fetchSettings, evalSettings);
 
         Bindings & autoArgs = *myArgs.getAutoArgs(*state);
 
@@ -247,7 +262,9 @@ static int main_nix_prefetch_url(int argc, char ** argv)
         if (!printPath)
             printInfo("path is '%s'", store->printStorePath(storePath));
 
-        logger->cout(printHash16or32(hash));
+        assert(static_cast<char>(hash.algo));
+        logger->cout(hash.to_string(hash.algo == HashAlgorithm::MD5 ? HashFormat::Base16 : HashFormat::Nix32, false));
+
         if (printPath)
             logger->cout(store->printStorePath(storePath));
 

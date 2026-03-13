@@ -8,18 +8,18 @@ namespace nix {
 struct LocalOverlayStoreConfig : virtual LocalStoreConfig
 {
     LocalOverlayStoreConfig(const StringMap & params)
-        : LocalOverlayStoreConfig("local-overlay", "", params)
+        : LocalOverlayStoreConfig("", params)
     {
     }
 
-    LocalOverlayStoreConfig(std::string_view scheme, PathView path, const Params & params)
+    LocalOverlayStoreConfig(const std::filesystem::path & path, const Params & params)
         : StoreConfig(params)
         , LocalFSStoreConfig(path, params)
-        , LocalStoreConfig(scheme, path, params)
+        , LocalStoreConfig(path, params)
     {
     }
 
-    const Setting<std::string> lowerStoreUri{
+    Setting<std::string> lowerStoreUri{
         (StoreConfig *) this,
         "",
         "lower-store",
@@ -31,7 +31,7 @@ struct LocalOverlayStoreConfig : virtual LocalStoreConfig
           Must be used as OverlayFS lower layer for this store's store dir.
         )"};
 
-    const PathSetting upperLayer{
+    const Setting<AbsolutePath> upperLayer{
         (StoreConfig *) this,
         "",
         "upper-layer",
@@ -53,7 +53,7 @@ struct LocalOverlayStoreConfig : virtual LocalStoreConfig
           default, but can be disabled if needed.
         )"};
 
-    const PathSetting remountHook{
+    const Setting<AbsolutePath> remountHook{
         (StoreConfig *) this,
         "",
         "remount-hook",
@@ -88,6 +88,8 @@ struct LocalOverlayStoreConfig : virtual LocalStoreConfig
 
     ref<Store> openStore() const override;
 
+    StoreReference getReference() const override;
+
 protected:
     /**
      * @return The host OS path corresponding to the store path for the
@@ -97,7 +99,7 @@ protected:
      * at that file path. It might be stored in the lower layer instead,
      * or it might not be part of this store at all.
      */
-    Path toUpperPath(const StorePath & path) const;
+    std::filesystem::path toUpperPath(const StorePath & path) const;
 
     friend struct LocalOverlayStore;
 };
@@ -115,11 +117,6 @@ struct LocalOverlayStore : virtual LocalStore
     ref<const Config> config;
 
     LocalOverlayStore(ref<const Config>);
-
-    std::string getUri() override
-    {
-        return "local-overlay://";
-    }
 
 private:
     /**
@@ -176,7 +173,7 @@ private:
      * Check lower store if upper DB does not have.
      */
     void queryRealisationUncached(
-        const DrvOutput &, Callback<std::shared_ptr<const Realisation>> callback) noexcept override;
+        const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept override;
 
     /**
      * Call `remountIfNecessary` after collecting garbage normally.
@@ -187,7 +184,7 @@ private:
      * Check which layers the store object exists in to try to avoid
      * needing to remount.
      */
-    void deleteStorePath(const Path & path, uint64_t & bytesFreed) override;
+    void deleteStorePath(const std::filesystem::path & path, uint64_t & bytesFreed, bool isKnownPath) override;
 
     /**
      * Deduplicate by removing store objects from the upper layer that

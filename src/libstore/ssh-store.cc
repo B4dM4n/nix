@@ -11,10 +11,10 @@
 
 namespace nix {
 
-SSHStoreConfig::SSHStoreConfig(std::string_view scheme, std::string_view authority, const Params & params)
+SSHStoreConfig::SSHStoreConfig(const ParsedURL::Authority & authority, const Params & params)
     : Store::Config{params}
     , RemoteStore::Config{params}
-    , CommonSSHStoreConfig{scheme, authority, params}
+    , CommonSSHStoreConfig{authority, params}
 {
 }
 
@@ -25,7 +25,20 @@ std::string SSHStoreConfig::doc()
         ;
 }
 
-struct SSHStore : virtual RemoteStore
+StoreReference SSHStoreConfig::getReference() const
+{
+    return {
+        .variant =
+            StoreReference::Specified{
+                .scheme = *uriSchemes().begin(),
+                .authority = authority.to_string(),
+            },
+        .params = getQueryParams(),
+    };
+}
+
+struct alignas(8) /* Work around ASAN failures on i686-linux. */
+    SSHStore : virtual RemoteStore
 {
     using Config = SSHStoreConfig;
 
@@ -39,11 +52,6 @@ struct SSHStore : virtual RemoteStore
               // Use SSH master only if using more than 1 connection.
               connections->capacity() > 1))
     {
-    }
-
-    std::string getUri() override
-    {
-        return *Config::uriSchemes().begin() + "://" + host;
     }
 
     // FIXME extend daemon protocol, move implementation to RemoteStore
@@ -65,8 +73,6 @@ protected:
     };
 
     ref<RemoteStore::Connection> openConnection() override;
-
-    std::string host;
 
     std::vector<std::string> extraRemoteProgramArgs;
 
@@ -91,11 +97,11 @@ MountedSSHStoreConfig::MountedSSHStoreConfig(StringMap params)
 {
 }
 
-MountedSSHStoreConfig::MountedSSHStoreConfig(std::string_view scheme, std::string_view host, StringMap params)
+MountedSSHStoreConfig::MountedSSHStoreConfig(const ParsedURL::Authority & authority, StringMap params)
     : StoreConfig(params)
     , RemoteStoreConfig(params)
-    , CommonSSHStoreConfig(scheme, host, params)
-    , SSHStoreConfig(scheme, host, params)
+    , CommonSSHStoreConfig(authority, params)
+    , SSHStoreConfig(authority, params)
     , LocalFSStoreConfig(params)
 {
 }
@@ -138,12 +144,17 @@ struct MountedSSHStore : virtual SSHStore, virtual LocalFSStore
 
     void narFromPath(const StorePath & path, Sink & sink) override
     {
-        return LocalFSStore::narFromPath(path, sink);
+        return Store::narFromPath(path, sink);
     }
 
     ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
     {
         return LocalFSStore::getFSAccessor(requireValidPath);
+    }
+
+    std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath) override
+    {
+        return LocalFSStore::getFSAccessor(path, requireValidPath);
     }
 
     std::optional<std::string> getBuildLogExact(const StorePath & path) override
@@ -166,12 +177,12 @@ struct MountedSSHStore : virtual SSHStore, virtual LocalFSStore
      * privilege escalation / symlinks in directories owned by the
      * originating requester that they cannot delete.
      */
-    Path addPermRoot(const StorePath & path, const Path & gcRoot) override
+    std::filesystem::path addPermRoot(const StorePath & path, const std::filesystem::path & gcRoot) override
     {
         auto conn(getConnection());
         conn->to << WorkerProto::Op::AddPermRoot;
         WorkerProto::write(*this, *conn, path);
-        WorkerProto::write(*this, *conn, gcRoot);
+        WorkerProto::write(*this, *conn, gcRoot.string());
         conn.processStderr();
         return readString(conn->from);
     }
@@ -197,7 +208,7 @@ ref<RemoteStore::Connection> SSHStore::openConnection()
         command.push_back(config->remoteStore.get());
     }
     command.insert(command.end(), extraRemoteProgramArgs.begin(), extraRemoteProgramArgs.end());
-    conn->sshConn = master.startCommand(std::move(command));
+    conn->sshConn = master.startCommand(toOsStrings(std::move(command)));
     conn->to = FdSink(conn->sshConn->in.get());
     conn->from = FdSource(conn->sshConn->out.get());
     return conn;

@@ -1,17 +1,15 @@
-// FIXME: Odd failures for templates that are causing the PR to break
-// for now with discussion with @Ericson2314 to comment out.
-#if 0
-#  include <gtest/gtest.h>
+#include <gtest/gtest.h>
 
-#  include "nix/store/ssh-store.hh"
+#include "nix/store/ssh-store.hh"
+#include "nix/util/config-impl.hh"
+#include "nix/util/abstract-setting-to-json.hh"
 
 namespace nix {
 
 TEST(SSHStore, constructConfig)
 {
     SSHStoreConfig config{
-        "ssh",
-        "localhost",
+        ParsedURL::Authority::parse("me@localhost:2222"),
         StoreConfig::Params{
             {
                 "remote-program",
@@ -27,13 +25,16 @@ TEST(SSHStore, constructConfig)
             "foo",
             "bar",
         }));
+
+    EXPECT_EQ(config.getReference().render(/*withParams=*/true), "ssh-ng://me@localhost:2222?remote-program=foo%20bar");
+    config.resetOverridden();
+    EXPECT_EQ(config.getReference().render(/*withParams=*/true), "ssh-ng://me@localhost:2222");
 }
 
 TEST(MountedSSHStore, constructConfig)
 {
     MountedSSHStoreConfig config{
-        "mounted-ssh",
-        "localhost",
+        {.host = "localhost"},
         StoreConfig::Params{
             {
                 "remote-program",
@@ -51,5 +52,4 @@ TEST(MountedSSHStore, constructConfig)
         }));
 }
 
-}
-#endif
+} // namespace nix

@@ -94,11 +94,15 @@ void parseBlob(
     BlobMode blobMode,
     const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
+/**
+ * @param hashAlgo must be `HashAlgo::SHA1` or `HashAlgo::SHA256` for now.
+ */
 void parseTree(
     FileSystemObjectSink & sink,
     const CanonPath & sinkPath,
     Source & source,
-    std::function<SinkHook> hook,
+    HashAlgorithm hashAlgo,
+    fun<SinkHook> hook,
     const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
 /**
@@ -107,13 +111,16 @@ void parseTree(
  * @param rootModeIfBlob How to interpret a root blob, for which there is no
  * disambiguating dir entry to answer that questino. If the root it not
  * a blob, this is ignored.
+ *
+ * @param hashAlgo must be `HashAlgo::SHA1` or `HashAlgo::SHA256` for now.
  */
 void parse(
     FileSystemObjectSink & sink,
     const CanonPath & sinkPath,
     Source & source,
     BlobMode rootModeIfBlob,
-    std::function<SinkHook> hook,
+    HashAlgorithm hashAlgo,
+    fun<SinkHook> hook,
     const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
 /**
@@ -131,8 +138,10 @@ using RestoreHook = SourcePath(Hash);
 
 /**
  * Wrapper around `parse` and `RestoreSink`
+ *
+ * @param hashAlgo must be `HashAlgo::SHA1` or `HashAlgo::SHA256` for now.
  */
-void restore(FileSystemObjectSink & sink, Source & source, std::function<RestoreHook> hook);
+void restore(FileSystemObjectSink & sink, Source & source, HashAlgorithm hashAlgo, fun<RestoreHook> hook);
 
 /**
  * Dumps a single file to a sink
@@ -162,7 +171,7 @@ using DumpHook = TreeEntry(const SourcePath & path);
 Mode dump(
     const SourcePath & path,
     Sink & sink,
-    std::function<DumpHook> hook,
+    fun<DumpHook> hook,
     PathFilter & filter = defaultPathFilter,
     const ExperimentalFeatureSettings & xpSettings = experimentalFeatureSettings);
 
