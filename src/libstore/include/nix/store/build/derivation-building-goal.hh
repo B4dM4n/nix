@@ -109,9 +109,14 @@ struct DerivationBuildingGoal : public Goal
      */
     std::string machineName;
 
-    DerivationBuildingGoal(const StorePath & drvPath, const Derivation & drv,
-        Worker & worker,
-        BuildMode buildMode = bmNormal);
+    /**
+     * Give the build hook another chance of distributing the build, if all
+     * local slots are full.
+     */
+    bool buildHookRetried = false;
+
+    DerivationBuildingGoal(
+        const StorePath & drvPath, const Derivation & drv, Worker & worker, BuildMode buildMode = bmNormal);
     ~DerivationBuildingGoal();
 
     void timedOut(Error && ex) override;

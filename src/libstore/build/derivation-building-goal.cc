@@ -528,6 +528,7 @@ Goal::Co DerivationBuildingGoal::tryToBuild()
                     actLock = std::make_unique<Activity>(*logger, lvlWarn, actBuildWaiting,
                         fmt("waiting for a machine to build '%s'", Magenta(worker.store.printStorePath(drvPath))));
                 outputLocks.unlock();
+                buildHookRetried = false;
                 co_await waitForAWhile();
                 co_return tryToBuild();
             case rpDecline:
@@ -563,7 +564,12 @@ Goal::Co DerivationBuildingGoal::tryToBuild()
         unsigned int curBuilds = worker.getNrLocalBuilds();
         if (curBuilds >= settings.maxBuildJobs) {
             outputLocks.unlock();
-            co_await waitForBuildSlot();
+            // give the build hook another chance of distributing the build
+            if (buildHookRetried || !worker.tryBuildHook) {
+                co_await waitForBuildSlot();
+            } else {
+                buildHookRetried = true;
+            }
             co_return tryToBuild();
         }
 

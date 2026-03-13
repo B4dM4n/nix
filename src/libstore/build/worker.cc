@@ -276,6 +276,16 @@ void Worker::childTerminated(Goal * goal, bool wakeSleepers)
         }
 
         wantingToBuild.clear();
+
+        if (!waitingForAWhile.empty()) {
+            lastWokenUp = steady_time_point::clock::now();
+            for (auto & i : waitingForAWhile) {
+                GoalPtr goal = i.lock();
+                if (goal)
+                    wakeUp(goal);
+            }
+            waitingForAWhile.clear();
+        }
     }
 }
 
