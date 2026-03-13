@@ -23,6 +23,8 @@ extern "C" {
 typedef struct Store Store;
 /** @brief Nix store path */
 typedef struct StorePath StorePath;
+/** @brief Nix Derivation */
+typedef struct nix_derivation nix_derivation;
 
 /**
  * @brief Initializes the Nix store library
@@ -148,7 +150,7 @@ void nix_store_path_free(StorePath * p);
  * @param[in] path Path to check
  * @return true or false, error info in context
  */
-bool nix_store_is_valid_path(nix_c_context * context, Store * store, StorePath * path);
+bool nix_store_is_valid_path(nix_c_context * context, Store * store, const StorePath * path);
 
 /**
  * @brief Get the physical location of a store path
@@ -190,7 +192,7 @@ nix_err nix_store_realise(
     Store * store,
     StorePath * path,
     void * userdata,
-    void (*callback)(void * userdata, const char * outname, const char * out));
+    void (*callback)(void * userdata, const char * outname, const StorePath * out));
 
 /**
  * @brief get the version of a nix store.
@@ -206,6 +208,32 @@ nix_err nix_store_realise(
  */
 nix_err
 nix_store_get_version(nix_c_context * context, Store * store, nix_get_string_callback callback, void * user_data);
+
+/**
+ * @brief Create a `nix_derivation` from a JSON representation of that derivation.
+ *
+ * @param[out] context Optional, stores error information.
+ * @param[in] store nix store reference.
+ * @param[in] json JSON of the derivation as a string.
+ */
+nix_derivation * nix_derivation_from_json(nix_c_context * context, Store * store, const char * json);
+
+/**
+ * @brief Add the given `nix_derivation` to the given store
+ *
+ * @param[out] context Optional, stores error information.
+ * @param[in] store nix store reference. The derivation will be inserted here.
+ * @param[in] derivation nix_derivation to insert into the given store.
+ */
+StorePath * nix_add_derivation(nix_c_context * context, Store * store, nix_derivation * derivation);
+
+/**
+ * @brief Deallocate a `nix_derivation`
+ *
+ * Does not fail.
+ * @param[in] drv the derivation to free
+ */
+void nix_derivation_free(nix_derivation * drv);
 
 /**
  * @brief Copy the closure of `path` from `srcStore` to `dstStore`.

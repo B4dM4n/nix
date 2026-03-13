@@ -28,6 +28,8 @@ public:
     }
 };
 
+class StaticSymbolTable;
+
 /**
  * Symbols have the property that they can be compared efficiently
  * (using an equality test), because the symbol table stores only one
@@ -37,36 +39,38 @@ class Symbol
 {
     friend class SymbolStr;
     friend class SymbolTable;
+    friend class StaticSymbolTable;
 
 private:
     uint32_t id;
 
-    explicit Symbol(uint32_t id) noexcept
+    explicit constexpr Symbol(uint32_t id) noexcept
         : id(id)
     {
     }
 
 public:
-    Symbol() noexcept
+    constexpr Symbol() noexcept
         : id(0)
     {
     }
 
     [[gnu::always_inline]]
-    explicit operator bool() const noexcept
+    constexpr explicit operator bool() const noexcept
     {
         return id > 0;
     }
 
-    auto operator<=>(const Symbol other) const noexcept
+    /**
+     * The ID is a private implementation detail that should generally not be observed. However, we expose here just for
+     * sake of `switch...case`, which needs to dispatch on numbers. */
+    [[gnu::always_inline]]
+    constexpr uint32_t getId() const noexcept
     {
-        return id <=> other.id;
+        return id;
     }
 
-    bool operator==(const Symbol other) const noexcept
-    {
-        return id == other.id;
-    }
+    constexpr auto operator<=>(const Symbol & other) const noexcept = default;
 
     friend class std::hash<Symbol>;
 };
@@ -118,12 +122,12 @@ public:
         // for multi-threaded implementations: lock store and allocator here
         const auto & [v, idx] = key.store.add(SymbolValue{});
         if (size == 0) {
-            v.mkString("", nullptr);
+            v.mkStringNoCopy("", nullptr);
         } else {
             auto s = key.alloc.allocate(size + 1);
             memcpy(s, key.s.data(), size);
             s[size] = '\0';
-            v.mkString(s, nullptr);
+            v.mkStringNoCopy(s, nullptr);
         }
         v.size_ = size;
         v.idx = idx;
@@ -210,6 +214,39 @@ public:
     };
 };
 
+class SymbolTable;
+
+/**
+ * Convenience class to statically assign symbol identifiers at compile-time.
+ */
+class StaticSymbolTable
+{
+    static constexpr std::size_t maxSize = 1024;
+
+    struct StaticSymbolInfo
+    {
+        std::string_view str;
+        Symbol sym;
+    };
+
+    std::array<StaticSymbolInfo, maxSize> symbols;
+    std::size_t size = 0;
+
+public:
+    constexpr StaticSymbolTable() = default;
+
+    constexpr Symbol create(std::string_view str)
+    {
+        /* No need to check bounds because out of bounds access is
+           a compilation error. */
+        auto sym = Symbol(size + 1); //< +1 because Symbol with id = 0 is reserved
+        symbols[size++] = {str, sym};
+        return sym;
+    }
+
+    void copyIntoSymbolTable(SymbolTable & symtab) const;
+};
+
 /**
  * Symbol table used by the parser and evaluator to represent and look
  * up identifiers and attributes efficiently.
@@ -232,6 +269,10 @@ private:
     boost::unordered_flat_set<SymbolStr, SymbolStr::Hash, SymbolStr::Equal> symbols{SymbolStr::chunkSize};
 
 public:
+    SymbolTable(const StaticSymbolTable & staticSymtab)
+    {
+        staticSymtab.copyIntoSymbolTable(*this);
+    }
 
     /**
      * Converts a string into a symbol.
@@ -275,6 +316,16 @@ public:
         store.forEach(callback);
     }
 };
+
+inline void StaticSymbolTable::copyIntoSymbolTable(SymbolTable & symtab) const
+{
+    for (std::size_t i = 0; i < size; ++i) {
+        auto [str, staticSym] = symbols[i];
+        auto sym = symtab.create(str);
+        if (sym != staticSym) [[unlikely]]
+            unreachable();
+    }
+}
 
 } // namespace nix
 
