@@ -33,6 +33,27 @@ struct MaxBuildJobsSetting : public BaseSetting<unsigned int>
     unsigned int parse(const std::string & str) const override;
 };
 
+struct Builders : public std::string
+{
+    Builders(const std::string & s)
+        : std::string(s) {};
+};
+
+template<>
+Builders BaseSetting<Builders>::parse(const std::string & str) const;
+
+template<>
+std::string BaseSetting<Builders>::to_string() const;
+
+template<>
+struct BaseSetting<Builders>::trait
+{
+    static constexpr bool appendable = true;
+};
+
+template<>
+void BaseSetting<Builders>::appendOrSet(Builders newValue, bool append);
+
 const uint32_t maxIdsPerBuild =
     #ifdef __linux__
     1 << 16
@@ -250,7 +271,7 @@ public:
           > Change this setting only if you really know what you’re doing.
         )"};
 
-    Setting<std::string> builders{
+    Setting<Builders> builders{
         this, "@" + nixConfDir + "/machines", "builders",
         R"(
           A semicolon- or newline-separated list of build machines.

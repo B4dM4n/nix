@@ -1,10 +1,39 @@
 #include "nix/store/machines.hh"
 #include "nix/store/globals.hh"
 #include "nix/store/store-open.hh"
+#include "nix/util/json-utils.hh"
 
 #include <algorithm>
 
 namespace nix {
+
+template<>
+Builders BaseSetting<Builders>::parse(const std::string & str) const
+{
+    return {str};
+}
+
+template<>
+std::string BaseSetting<Builders>::to_string() const
+{
+    return value;
+}
+
+template<>
+void BaseSetting<Builders>::appendOrSet(Builders newValue, bool append)
+{
+    if (!append)
+        value.clear();
+    if (!value.empty())
+        value.append("\n");
+    value.append(newValue);
+}
+
+template<>
+struct json_avoids_null<Builders> : std::true_type
+{};
+
+template class BaseSetting<Builders>;
 
 Machine::Machine(
     const std::string & storeUri,
