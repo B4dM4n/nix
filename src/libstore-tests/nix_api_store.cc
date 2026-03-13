@@ -5,6 +5,7 @@
 
 #include "nix/store/tests/nix_api_store.hh"
 #include "nix/util/tests/string_callback.hh"
+#include "nix/util/url.hh"
 
 #include "store-tests-config.hh"
 
@@ -23,15 +24,17 @@ TEST_F(nix_api_store_test, nix_store_get_uri)
     std::string str;
     auto ret = nix_store_get_uri(ctx, store, OBSERVE_STRING(str));
     ASSERT_EQ(NIX_OK, ret);
-    ASSERT_STREQ("local", str.c_str());
+    auto expectedStoreURI = "local://?"
+                            + nix::encodeQuery({
+                                {"log", nixLogDir},
+                                {"state", nixStateDir},
+                                {"store", nixStoreDir},
+                            });
+    ASSERT_EQ(expectedStoreURI, str);
 }
 
 TEST_F(nix_api_util_context, nix_store_get_storedir_default)
 {
-    if (nix::getEnv("HOME").value_or("") == "/homeless-shelter") {
-        // skipping test in sandbox because nix_store_open tries to create /nix/var/nix/profiles
-        GTEST_SKIP();
-    }
     nix_libstore_init(ctx);
     Store * store = nix_store_open(ctx, nullptr, nullptr);
     assert_ctx_ok();
@@ -101,7 +104,7 @@ TEST_F(nix_api_util_context, nix_store_open_dummy)
     nix_libstore_init(ctx);
     Store * store = nix_store_open(ctx, "dummy://", nullptr);
     ASSERT_EQ(NIX_OK, ctx->last_err_code);
-    ASSERT_STREQ("dummy", store->ptr->getUri().c_str());
+    ASSERT_STREQ("dummy://", store->ptr->config.getReference().render(/*withParams=*/true).c_str());
 
     std::string str;
     nix_store_get_version(ctx, store, OBSERVE_STRING(str));
@@ -141,10 +144,6 @@ TEST_F(nix_api_store_test, nix_store_real_path)
 
 TEST_F(nix_api_util_context, nix_store_real_path_relocated)
 {
-    if (nix::getEnv("HOME").value_or("") == "/homeless-shelter") {
-        // Can't open default store from within sandbox
-        GTEST_SKIP();
-    }
     auto tmp = nix::createTempDir();
     std::string storeRoot = tmp + "/store";
     std::string stateDir = tmp + "/state";
@@ -184,13 +183,7 @@ TEST_F(nix_api_util_context, nix_store_real_path_relocated)
 
 TEST_F(nix_api_util_context, nix_store_real_path_binary_cache)
 {
-    if (nix::getEnv("HOME").value_or("") == "/homeless-shelter") {
-        // TODO: override NIX_CACHE_HOME?
-        // skipping test in sandbox because narinfo cache can't be written
-        GTEST_SKIP();
-    }
-
-    Store * store = nix_store_open(ctx, "https://cache.nixos.org", nullptr);
+    Store * store = nix_store_open(ctx, nix::fmt("file://%s/binary-cache", nix::createTempDir()).c_str(), nullptr);
     assert_ctx_ok();
     ASSERT_NE(store, nullptr);
 

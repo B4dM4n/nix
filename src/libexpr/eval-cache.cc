@@ -4,6 +4,7 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/store/store-api.hh"
+#include "nix/store/globals.hh"
 // Need specialization involving `SymbolStr` just in this one module.
 #include "nix/util/strings-inline.hh"
 
@@ -69,10 +70,10 @@ struct AttrDb
     {
         auto state(_state->lock());
 
-        Path cacheDir = getCacheDir() + "/eval-cache-v5";
+        auto cacheDir = std::filesystem::path(getCacheDir()) / "eval-cache-v6";
         createDirs(cacheDir);
 
-        Path dbPath = cacheDir + "/" + fingerprint.to_string(HashFormat::Base16, false) + ".sqlite";
+        auto dbPath = cacheDir / (fingerprint.to_string(HashFormat::Base16, false) + ".sqlite");
 
         state->db = SQLite(dbPath);
         state->db.isCache();
