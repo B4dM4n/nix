@@ -19,14 +19,10 @@ struct HookInstance;
 struct DerivationBuilder;
 #endif
 
-typedef enum {rpAccept, rpDecline, rpPostpone} HookReply;
+typedef enum { rpAccept, rpDecline, rpPostpone } HookReply;
 
 /** Used internally */
-void runPostBuildHook(
-    Store & store,
-    Logger & logger,
-    const StorePath & drvPath,
-    const StorePathSet & outputPaths);
+void runPostBuildHook(Store & store, Logger & logger, const StorePath & drvPath, const StorePathSet & outputPaths);
 
 /**
  * A goal for building some or all of the outputs of a derivation.
@@ -182,18 +178,16 @@ struct DerivationBuildingGoal : public Goal
 
     void started();
 
-    Done done(
-        BuildResult::Status status,
-        SingleDrvOutputs builtOutputs = {},
-        std::optional<Error> ex = {});
+    Done done(BuildResult::Status status, SingleDrvOutputs builtOutputs = {}, std::optional<Error> ex = {});
 
     void appendLogTailErrorMsg(std::string & msg);
 
     StorePathSet exportReferences(const StorePathSet & storePaths);
 
-    JobCategory jobCategory() const override {
+    JobCategory jobCategory() const override
+    {
         return JobCategory::Build;
     };
 };
 
-}
+} // namespace nix
