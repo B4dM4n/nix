@@ -2,11 +2,13 @@
 ///@file
 
 #include <cassert>
+#include <filesystem>
 #include <map>
 #include <set>
 
 #include <nlohmann/json_fwd.hpp>
 
+#include "nix/util/json-non-null.hh"
 #include "nix/util/types.hh"
 #include "nix/util/experimental-features.hh"
 
@@ -217,6 +219,30 @@ protected:
 };
 
 /**
+ * For `Setting<AbsolutePath>`. `parse()` calls `canonPath`,
+ * rejecting empty and relative paths.
+ */
+struct AbsolutePath : std::filesystem::path
+{
+    using path::path;
+    using path::operator=;
+
+    AbsolutePath(const std::filesystem::path & p)
+        : path(p)
+    {
+    }
+
+    AbsolutePath(std::filesystem::path && p)
+        : path(std::move(p))
+    {
+    }
+};
+
+template<>
+struct json_avoids_null<AbsolutePath> : std::true_type
+{};
+
+/**
  * A setting of type T.
  */
 template<typename T>
@@ -379,57 +405,8 @@ public:
     }
 };
 
-/**
- * A special setting for Paths. These are automatically canonicalised
- * (e.g. "/foo//bar/" becomes "/foo/bar").
- *
- * It is mandatory to specify a path; i.e. the empty string is not
- * permitted.
- */
-class PathSetting : public BaseSetting<Path>
-{
-public:
-
-    PathSetting(
-        Config * options,
-        const Path & def,
-        const std::string & name,
-        const std::string & description,
-        const StringSet & aliases = {});
-
-    Path parse(const std::string & str) const override;
-
-    Path operator+(const char * p) const
-    {
-        return value + p;
-    }
-
-    void operator=(const Path & v)
-    {
-        this->assign(v);
-    }
-};
-
-/**
- * Like `PathSetting`, but the absence of a path is also allowed.
- *
- * `std::optional` is used instead of the empty string for clarity.
- */
-class OptionalPathSetting : public BaseSetting<std::optional<Path>>
-{
-public:
-
-    OptionalPathSetting(
-        Config * options,
-        const std::optional<Path> & def,
-        const std::string & name,
-        const std::string & description,
-        const StringSet & aliases = {});
-
-    std::optional<Path> parse(const std::string & str) const override;
-
-    void operator=(const std::optional<Path> & v);
-};
+template<>
+void BaseSetting<std::set<std::filesystem::path>>::appendOrSet(std::set<std::filesystem::path> newValue, bool append);
 
 struct ExperimentalFeatureSettings : Config
 {
@@ -463,7 +440,20 @@ struct ExperimentalFeatureSettings : Config
      * Require an experimental feature be enabled, throwing an error if it is
      * not.
      */
-    void require(const ExperimentalFeature &) const;
+    void require(const ExperimentalFeature &, std::string reason = "") const;
+
+    /**
+     * Require an experimental feature be enabled, throwing an error if it is
+     * not. The reason is lazily evaluated only if the feature is disabled.
+     */
+    template<typename GetReason>
+        requires std::invocable<GetReason> && std::convertible_to<std::invoke_result_t<GetReason>, std::string>
+    void require(const ExperimentalFeature & feature, GetReason && getReason) const
+    {
+        if (isEnabled(feature))
+            return;
+        require(feature, getReason());
+    }
 
     /**
      * `std::nullopt` pointer means no feature, which means there is nothing that could be

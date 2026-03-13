@@ -1,11 +1,15 @@
 #pragma once
 ///@file
 
+#include <filesystem>
 #include <ranges>
 #include <span>
 
 #include "nix/util/error.hh"
 #include "nix/util/canon-path.hh"
+#include "nix/util/split.hh"
+#include "nix/util/util.hh"
+#include "nix/util/variant-wrapper.hh"
 
 namespace nix {
 
@@ -255,14 +259,10 @@ std::string percentDecode(std::string_view in);
 std::string percentEncode(std::string_view s, std::string_view keep = "");
 
 /**
- * Get the path part of the URL as an absolute or relative Path.
- *
- * @throws if any path component contains an slash (which would have
- * been escaped `%2F` in the rendered URL). This is because OS file
- * paths have no escape sequences --- file names cannot contain a
- * `/`.
+ * Render URL path segments to a string by joining with `/`.
+ * Does not percent-encode the segments.
  */
-Path renderUrlPathEnsureLegal(const std::vector<std::string> & urlPath);
+std::string renderUrlPathNoPctEncoding(std::span<const std::string> urlPath);
 
 /**
  * Percent encode path. `%2F` for "interior slashes" is the most
@@ -280,7 +280,7 @@ std::string encodeQuery(const StringMap & query);
 /**
  * Parse a URL into a ParsedURL.
  *
- * @parm lenient Also allow some long-supported Nix URIs that are not quite compliant with RFC3986.
+ * @param lenient Also allow some long-supported Nix URIs that are not quite compliant with RFC3986.
  * Here are the deviations:
  * - Fragments can contain unescaped (not URL encoded) '^', '"' or space literals.
  * - Queries may contain unescaped '"' or spaces.
@@ -327,10 +327,13 @@ struct ParsedUrlScheme
 
 ParsedUrlScheme parseUrlScheme(std::string_view scheme);
 
-/* Detects scp-style uris (e.g. git@github.com:NixOS/nix) and fixes
-   them by removing the `:` and assuming a scheme of `ssh://`. Also
-   changes absolute paths into file:// URLs. */
-ParsedURL fixGitURL(const std::string & url);
+/**
+ * Detects scp-style uris (e.g. `git@github.com:NixOS/nix`) and fixes
+ * them by removing the `:` and assuming a scheme of `ssh://`. Also
+ * drops `git+` from the scheme (e.g. `git+https://` to `https://`)
+ * and changes absolute paths into `file://` URLs.
+ */
+ParsedURL fixGitURL(std::string url);
 
 /**
  * Whether a string is valid as RFC 3986 scheme name.
@@ -342,8 +345,23 @@ ParsedURL fixGitURL(const std::string & url);
 bool isValidSchemeName(std::string_view scheme);
 
 /**
- * Either a ParsedURL or a verbatim string, but the string must be a valid
- * ParsedURL. This is necessary because in certain cases URI must be passed
+ * Convert a filesystem path to a URL path vector.
+ *
+ * On Windows, converts backslashes to forward slashes and prepends a `/`
+ * before the drive letter (e.g., `C:\foo\bar` becomes `/C:/foo/bar`).
+ */
+std::vector<std::string> pathToUrlPath(const std::filesystem::path & path);
+
+/**
+ * Convert a URL path vector to a native filesystem path.
+ *
+ * On Windows, strips the leading `/` before the drive letter and converts
+ * to native format (e.g., `/C:/foo/bar` becomes `C:\foo\bar`).
+ */
+std::filesystem::path urlPathToPath(std::span<const std::string> urlPath);
+
+/**
+ * Either a ParsedURL or a verbatim string. This is necessary because in certain cases URI must be passed
  * verbatim (e.g. in builtin fetchers), since those are specified by the user.
  * In those cases normalizations performed by the ParsedURL might be surprising
  * and undesirable, since Nix must be a universal client that has to work with
@@ -354,23 +372,23 @@ bool isValidSchemeName(std::string_view scheme);
  *
  * Though we perform parsing and validation for internal needs.
  */
-struct ValidURL : private ParsedURL
+struct VerbatimURL
 {
-    std::optional<std::string> encoded;
+    using Raw = std::variant<std::string, ParsedURL>;
+    Raw raw;
 
-    ValidURL(std::string str)
-        : ParsedURL(parseURL(str, /*lenient=*/false))
-        , encoded(std::move(str))
+    VerbatimURL(std::string_view s)
+        : raw(std::string{s})
     {
     }
 
-    ValidURL(std::string_view str)
-        : ValidURL(std::string{str})
+    VerbatimURL(std::string s)
+        : raw(std::move(s))
     {
     }
 
-    ValidURL(ParsedURL parsed)
-        : ParsedURL{std::move(parsed)}
+    VerbatimURL(ParsedURL url)
+        : raw(std::move(url))
     {
     }
 
@@ -379,25 +397,46 @@ struct ValidURL : private ParsedURL
      */
     std::string to_string() const
     {
-        return encoded.or_else([&]() -> std::optional<std::string> { return ParsedURL::to_string(); }).value();
+        return std::visit(
+            overloaded{
+                [](const std::string & str) { return str; }, [](const ParsedURL & url) { return url.to_string(); }},
+            raw);
     }
 
-    const ParsedURL & parsed() const &
+    const ParsedURL parsed() const
     {
-        return *this;
+        return std::visit(
+            overloaded{
+                [](const std::string & str) { return parseURL(str); }, [](const ParsedURL & url) { return url; }},
+            raw);
     }
 
     std::string_view scheme() const &
     {
-        return ParsedURL::scheme;
+        return std::visit(
+            overloaded{
+                [](std::string_view str) {
+                    auto scheme = splitPrefixTo(str, ':');
+                    if (!scheme)
+                        throw BadURL("URL '%s' doesn't have a scheme", str);
+                    return *scheme;
+                },
+                [](const ParsedURL & url) -> std::string_view { return url.scheme; }},
+            raw);
     }
 
-    const auto & path() const &
-    {
-        return ParsedURL::path;
-    }
+    /**
+     * Get the last non-empty path segment from the URL.
+     *
+     * This is useful for extracting filenames from URLs.
+     * For example, "https://example.com/path/to/file.txt?query=value"
+     * returns "file.txt".
+     *
+     * @return The last non-empty path segment, or std::nullopt if no such segment exists.
+     */
+    std::optional<std::string> lastPathSegment() const;
 };
 
-std::ostream & operator<<(std::ostream & os, const ValidURL & url);
+std::ostream & operator<<(std::ostream & os, const VerbatimURL & url);
 
 } // namespace nix

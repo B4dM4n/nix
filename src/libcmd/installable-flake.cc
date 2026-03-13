@@ -171,7 +171,7 @@ std::vector<ref<eval_cache::AttrCursor>> InstallableFlake::getCursors(EvalState 
     for (auto & attrPath : attrPaths) {
         debug("trying flake output attribute '%s'", attrPath);
 
-        auto attr = root->findAlongAttrPath(parseAttrPath(state, attrPath));
+        auto attr = root->findAlongAttrPath(AttrPath::parse(state, attrPath));
         if (attr) {
             res.push_back(ref(*attr));
         } else {
@@ -185,16 +185,16 @@ std::vector<ref<eval_cache::AttrCursor>> InstallableFlake::getCursors(EvalState 
     return res;
 }
 
-std::shared_ptr<flake::LockedFlake> InstallableFlake::getLockedFlake() const
+ref<flake::LockedFlake> InstallableFlake::getLockedFlake() const
 {
     if (!_lockedFlake) {
         flake::LockFlags lockFlagsApplyConfig = lockFlags;
         // FIXME why this side effect?
         lockFlagsApplyConfig.applyNixConfig = true;
-        _lockedFlake =
-            std::make_shared<flake::LockedFlake>(lockFlake(flakeSettings, *state, flakeRef, lockFlagsApplyConfig));
+        _lockedFlake = make_ref<flake::LockedFlake>(lockFlake(flakeSettings, *state, flakeRef, lockFlagsApplyConfig));
     }
-    return _lockedFlake;
+    // _lockedFlake is now non-null but still just a shared_ptr
+    return ref<flake::LockedFlake>(_lockedFlake);
 }
 
 FlakeRef InstallableFlake::nixpkgsFlakeRef() const
@@ -203,8 +203,10 @@ FlakeRef InstallableFlake::nixpkgsFlakeRef() const
 
     if (auto nixpkgsInput = lockedFlake->lockFile.findInput({"nixpkgs"})) {
         if (auto lockedNode = std::dynamic_pointer_cast<const flake::LockedNode>(nixpkgsInput)) {
-            debug("using nixpkgs flake '%s'", lockedNode->lockedRef);
-            return std::move(lockedNode->lockedRef);
+            if (lockedNode->isFlake) {
+                debug("using nixpkgs flake '%s'", lockedNode->lockedRef);
+                return std::move(lockedNode->lockedRef);
+            }
         }
     }
 

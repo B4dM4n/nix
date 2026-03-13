@@ -166,7 +166,7 @@ printf 4.0 > "$flake1Dir"/version
 printf Utrecht > "$flake1Dir"/who
 nix profile add "$flake1Dir"
 [[ $("$TEST_HOME"/.nix-profile/bin/hello) = "Hello Utrecht" ]]
-[[ $(nix path-info --json "$(realpath "$TEST_HOME"/.nix-profile/bin/hello)" | jq -r .[].ca) =~ fixed:r:sha256: ]]
+nix path-info --json --json-format 2 "$(realpath "$TEST_HOME"/.nix-profile/bin/hello)" | jq -e '.info.[].ca | .method == "nar" and (.hash | startswith("sha256-"))'
 
 # Override the outputs.
 nix profile remove simple flake1
@@ -210,11 +210,11 @@ diff -u <(
 ) <(cat << EOF
 error: An existing package already provides the following file:
 
-         $(nix build --no-link --print-out-paths "${flake1Dir}""#default.out")/bin/hello
+         "$(nix build --no-link --print-out-paths "${flake1Dir}""#default.out")/bin/hello"
 
        This is the conflicting file from the new package:
 
-         $(nix build --no-link --print-out-paths "${flake2Dir}""#default.out")/bin/hello
+         "$(nix build --no-link --print-out-paths "${flake2Dir}""#default.out")/bin/hello"
 
        To remove the existing package:
 

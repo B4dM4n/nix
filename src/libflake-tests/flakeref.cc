@@ -1,8 +1,15 @@
 #include <gtest/gtest.h>
+#include <set>
+#include <string>
+#include <utility>
 
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/flake/flakeref.hh"
 #include "nix/fetchers/attrs.hh"
+#include "nix/fetchers/fetchers.hh"
+#include "nix/util/configuration.hh"
+#include "nix/util/error.hh"
+#include "nix/util/experimental-features.hh"
 
 namespace nix {
 
@@ -200,6 +207,28 @@ INSTANTIATE_TEST_SUITE_P(
             .expectedUrl = "flake:nixpkgs/branch/2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
         },
         InputFromURLTestCase{
+            .url = "git://somewhere/repo?ref=branch",
+            .attrs =
+                {
+                    {"type", Attr("git")},
+                    {"ref", Attr("branch")},
+                    {"url", Attr("git://somewhere/repo")},
+                },
+            .description = "plain_git_with_ref",
+            .expectedUrl = "git://somewhere/repo?ref=branch",
+        },
+        InputFromURLTestCase{
+            .url = "git+https://somewhere.aaaaaaa/repo?ref=branch",
+            .attrs =
+                {
+                    {"type", Attr("git")},
+                    {"ref", Attr("branch")},
+                    {"url", Attr("https://somewhere.aaaaaaa/repo")},
+                },
+            .description = "git_https_with_ref",
+            .expectedUrl = "git+https://somewhere.aaaaaaa/repo?ref=branch",
+        },
+        InputFromURLTestCase{
             // Note that this is different from above because the "flake id" shorthand
             // doesn't allow this.
             .url = "flake:/nixpkgs///branch////",
@@ -252,6 +281,20 @@ TEST(to_string, doesntReencodeUrl)
     auto expected = "http://localhost:8181/test/%2B3d.tar.gz";
 
     ASSERT_EQ(unparsed, expected);
+}
+
+TEST(parseFlakeRef, malformedGithubUrlDoesNotCrash)
+{
+    experimentalFeatureSettings.experimentalFeatures.get().insert(Xp::Flakes);
+
+    fetchers::Settings fetchSettings;
+
+    // Using ref= instead of rev= with a github: URL should produce an
+    // error, not an assertion failure in renderAuthorityAndPath
+    // (https://github.com/NixOS/nix/issues/15196).
+    EXPECT_THROW(
+        parseFlakeRef(fetchSettings, "github:nixos/nixpkgs/nixpkgs.git?ref=aead170c1a49253ebfa5027010dfd89a77b73ca4"),
+        Error);
 }
 
 } // namespace nix

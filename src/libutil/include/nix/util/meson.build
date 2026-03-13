@@ -2,8 +2,14 @@
 
 include_dirs = [ include_directories('../..') ]
 
-headers = files(
+config_pub_h = configure_file(
+  configuration : configdata_pub,
+  output : 'config.hh',
+)
+
+headers = [ config_pub_h ] + files(
   'abstract-setting-to-json.hh',
+  'alignment.hh',
   'ansicolor.hh',
   'archive.hh',
   'args.hh',
@@ -17,12 +23,15 @@ headers = files(
   'chunked-vector.hh',
   'closure.hh',
   'comparator.hh',
+  'compression-algo.hh',
+  'compression-settings.hh',
   'compression.hh',
   'compute-levels.hh',
   'config-global.hh',
   'config-impl.hh',
   'configuration.hh',
   'current-process.hh',
+  'demangle.hh',
   'english.hh',
   'environment-variables.hh',
   'error.hh',
@@ -34,10 +43,12 @@ headers = files(
   'file-descriptor.hh',
   'file-path-impl.hh',
   'file-path.hh',
+  'file-system-at.hh',
   'file-system.hh',
   'finally.hh',
   'fmt.hh',
   'fs-sink.hh',
+  'fun.hh',
   'git.hh',
   'hash.hh',
   'hilite.hh',
@@ -49,6 +60,9 @@ headers = files(
   'memory-source-accessor.hh',
   'mounted-source-accessor.hh',
   'muxable-pipe.hh',
+  'nar-accessor.hh',
+  'nar-cache.hh',
+  'nar-listing.hh',
   'os-string.hh',
   'pool.hh',
   'pos-idx.hh',
@@ -63,6 +77,7 @@ headers = files(
   'signals.hh',
   'signature/local-keys.hh',
   'signature/signer.hh',
+  'socket.hh',
   'sort.hh',
   'source-accessor.hh',
   'source-path.hh',
@@ -72,6 +87,7 @@ headers = files(
   'strings.hh',
   'suggestions.hh',
   'sync.hh',
+  'table.hh',
   'tarfile.hh',
   'terminal.hh',
   'thread-pool.hh',

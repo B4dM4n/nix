@@ -8,11 +8,9 @@ clearStoreIfPossible
 
 repo="$TEST_ROOT/git"
 
-rm -rf "$repo" "${repo}-tmp" "$TEST_HOME/.cache/nix"
+rm -rf "${repo}-tmp" "$TEST_HOME/.cache/nix"
 
-git init "$repo"
-git -C "$repo" config user.email "foobar@example.com"
-git -C "$repo" config user.name "Foobar"
+createGitRepo "$repo"
 
 echo utrecht > "$repo/hello"
 git -C "$repo" add hello
@@ -59,6 +57,9 @@ invalid_ref() {
 }
 
 
+valid_ref 'A/b'
+valid_ref 'AaA/b'
+valid_ref 'FOO/BAR/BAZ'
 valid_ref 'foox'
 valid_ref '1337'
 valid_ref 'foo.baz'

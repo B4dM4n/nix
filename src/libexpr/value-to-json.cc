@@ -16,6 +16,8 @@ json printValueAsJSON(
 {
     checkInterrupt();
 
+    auto _level = state.addCallDepth(pos);
+
     if (strict)
         state.forceValue(v, pos);
 
@@ -33,7 +35,7 @@ json printValueAsJSON(
 
     case nString:
         copyContext(v, context);
-        out = v.c_str();
+        out = v.string_view();
         break;
 
     case nPath:
@@ -96,6 +98,7 @@ json printValueAsJSON(
         break;
 
     case nThunk:
+    case nFailed:
     case nFunction:
         state.error<TypeError>("cannot convert %1% to JSON", showType(v)).atPos(v.determinePos(pos)).debugThrow();
     }

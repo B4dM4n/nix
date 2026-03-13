@@ -8,10 +8,6 @@ namespace nix {
 #define SERVE_MAGIC_1 0x390c9deb
 #define SERVE_MAGIC_2 0x5452eecb
 
-#define SERVE_PROTOCOL_VERSION (2 << 8 | 7)
-#define GET_PROTOCOL_MAJOR(x) ((x) & 0xff00)
-#define GET_PROTOCOL_MINOR(x) ((x) & 0x00ff)
-
 struct StoreDirConfig;
 struct Source;
 
@@ -37,7 +33,38 @@ struct ServeProto
      *
      * @todo Convert to struct with separate major vs minor fields.
      */
-    using Version = unsigned int;
+    struct Version
+    {
+        unsigned int major;
+        uint8_t minor;
+
+        constexpr auto operator<=>(const Version &) const = default;
+
+        /**
+         * Convert to wire format for protocol compatibility.
+         * Format: (major << 8) | minor
+         */
+        constexpr unsigned int toWire() const
+        {
+            return (major << 8) | minor;
+        }
+
+        /**
+         * Convert from wire format.
+         */
+        static constexpr Version fromWire(unsigned int wire)
+        {
+            return {
+                .major = (wire & 0xff00) >> 8,
+                .minor = static_cast<uint8_t>(wire & 0x00ff),
+            };
+        }
+    };
+
+    static constexpr Version latest = {
+        .major = 2,
+        .minor = 7,
+    };
 
     /**
      * A unidirectional read connection, to be used by the read half of the
@@ -108,6 +135,13 @@ enum struct ServeProto::Command : uint64_t {
     QueryValidPaths = 1,
     QueryPathInfos = 2,
     DumpStorePath = 3,
+    /**
+     * @note This is no longer used by Nix (as a client), but it is used
+     * by Hydra. We should therefore not remove it until Hydra no longer
+     * uses it either.
+     */
+    ImportPaths = 4,
+    // ExportPaths = 5,
     BuildPaths = 6,
     QueryClosure = 7,
     BuildDerivation = 8,

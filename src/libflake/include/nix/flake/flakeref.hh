@@ -2,15 +2,21 @@
 ///@file
 
 #include <regex>
+#include <iosfwd>
+#include <string>
+#include <tuple>
+#include <utility>
 
-#include "nix/util/types.hh"
-#include "nix/fetchers/fetchers.hh"
 #include "nix/store/outputs-spec.hh"
 #include "nix/fetchers/registry.hh"
 
 namespace nix {
 
 class Store;
+
+namespace fetchers {
+struct Settings;
+} // namespace fetchers
 
 typedef std::string FlakeId;
 
@@ -44,8 +50,10 @@ struct FlakeRef
 
     /**
      * sub-path within the fetched input that represents this input
+     *
+     * @todo Should probably use `CanonPath` instead of `std::string`?
      */
-    Path subdir;
+    std::string subdir;
 
     bool operator==(const FlakeRef & other) const = default;
 
@@ -54,7 +62,7 @@ struct FlakeRef
         return std::tie(input, subdir) < std::tie(other.input, other.subdir);
     }
 
-    FlakeRef(fetchers::Input && input, const Path & subdir)
+    FlakeRef(fetchers::Input && input, const std::string & subdir)
         : input(std::move(input))
         , subdir(subdir)
     {
@@ -65,11 +73,14 @@ struct FlakeRef
 
     fetchers::Attrs toAttrs() const;
 
-    FlakeRef resolve(ref<Store> store, fetchers::UseRegistries useRegistries = fetchers::UseRegistries::All) const;
+    FlakeRef resolve(
+        const fetchers::Settings & fetchSettings,
+        Store & store,
+        fetchers::UseRegistries useRegistries = fetchers::UseRegistries::All) const;
 
     static FlakeRef fromAttrs(const fetchers::Settings & fetchSettings, const fetchers::Attrs & attrs);
 
-    std::pair<ref<SourceAccessor>, FlakeRef> lazyFetch(ref<Store> store) const;
+    std::pair<ref<SourceAccessor>, FlakeRef> lazyFetch(const fetchers::Settings & fetchSettings, Store & store) const;
 
     /**
      * Canonicalize a flakeref for the purpose of comparing "old" and
@@ -86,7 +97,7 @@ std::ostream & operator<<(std::ostream & str, const FlakeRef & flakeRef);
 FlakeRef parseFlakeRef(
     const fetchers::Settings & fetchSettings,
     const std::string & url,
-    const std::optional<Path> & baseDir = {},
+    const std::optional<std::filesystem::path> & baseDir = {},
     bool allowMissing = false,
     bool isFlake = true,
     bool preserveRelativePaths = false);
@@ -97,7 +108,7 @@ FlakeRef parseFlakeRef(
 std::pair<FlakeRef, std::string> parseFlakeRefWithFragment(
     const fetchers::Settings & fetchSettings,
     const std::string & url,
-    const std::optional<Path> & baseDir = {},
+    const std::optional<std::filesystem::path> & baseDir = {},
     bool allowMissing = false,
     bool isFlake = true,
     bool preserveRelativePaths = false);
@@ -108,7 +119,7 @@ std::pair<FlakeRef, std::string> parseFlakeRefWithFragment(
 std::tuple<FlakeRef, std::string, ExtendedOutputsSpec> parseFlakeRefWithFragmentAndExtendedOutputsSpec(
     const fetchers::Settings & fetchSettings,
     const std::string & url,
-    const std::optional<Path> & baseDir = {},
+    const std::optional<std::filesystem::path> & baseDir = {},
     bool allowMissing = false,
     bool isFlake = true);
 

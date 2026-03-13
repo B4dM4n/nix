@@ -1,3 +1,5 @@
+#include "nix/cmd/common-eval-args.hh"
+#include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/args/root.hh"
 #include "nix/util/current-process.hh"
 #include "nix/cmd/command.hh"
@@ -27,7 +29,6 @@
 #include "cli-config-private.hh"
 
 #include <sys/types.h>
-#include <regex>
 #include <nlohmann/json.hpp>
 
 #ifndef _WIN32
@@ -193,20 +194,38 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs, virtual RootArgs
 
     std::string dumpCli()
     {
-        auto res = nlohmann::json::object();
+        using nlohmann::json;
+
+        auto res = json::object();
 
         res["args"] = toJSON();
 
-        auto stores = nlohmann::json::object();
-        for (auto & [storeName, implem] : Implementations::registered()) {
-            auto & j = stores[storeName];
-            j["doc"] = implem.doc;
-            j["uri-schemes"] = implem.uriSchemes;
-            j["settings"] = implem.getConfig()->toJSON();
-            j["experimentalFeature"] = implem.experimentalFeature;
+        {
+            auto & stores = res["stores"] = json::object();
+            for (auto & [storeName, implem] : Implementations::registered()) {
+                auto & j = stores[storeName];
+                j["doc"] = implem.doc;
+                j["uri-schemes"] = implem.uriSchemes;
+                j["settings"] = implem.getConfig()->toJSON();
+                j["experimentalFeature"] = implem.experimentalFeature;
+            }
         }
-        res["stores"] = std::move(stores);
-        res["fetchers"] = fetchers::dumpRegisterInputSchemeInfo();
+
+        {
+            auto & fetchers = res["fetchers"] = json::object();
+
+            for (const auto & [schemeName, scheme] : fetchers::getAllInputSchemes()) {
+                auto & s = fetchers[schemeName] = json::object();
+                s["description"] = scheme->schemeDescription();
+                auto & attrs = s["allowedAttrs"] = json::object();
+                for (auto & [fieldName, field] : scheme->allowedAttrs()) {
+                    auto & f = attrs[fieldName] = json::object();
+                    f["type"] = field.type;
+                    f["required"] = field.required;
+                    f["doc"] = stripIndentation(field.doc);
+                }
+            }
+        };
 
         return res.dump();
     }
@@ -228,7 +247,12 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
 
     evalSettings.restrictEval = true;
     evalSettings.pureEval = true;
-    EvalState state({}, openStore("dummy://"), fetchSettings, evalSettings);
+    auto statePtr = std::make_shared<EvalState>(
+        LookupPath{},
+        openStore(StoreReference{.variant = StoreReference::Specified{.scheme = "dummy"}}),
+        fetchSettings,
+        evalSettings);
+    auto & state = *statePtr;
 
     auto vGenerateManpage = state.allocValue();
     state.eval(
@@ -253,11 +277,11 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
     );
 
     auto vDump = state.allocValue();
-    vDump->mkString(toplevel.dumpCli());
+    vDump->mkString(toplevel.dumpCli(), state.mem);
 
     auto vRes = state.allocValue();
-    state.callFunction(*vGenerateManpage, state.getBuiltin("false"), *vRes, noPos);
-    state.callFunction(*vRes, *vDump, *vRes, noPos);
+    Value * args[]{&state.getBuiltin("false"), vDump};
+    state.callFunction(*vGenerateManpage, args, *vRes, noPos);
 
     auto attr = vRes->attrs()->get(state.symbols.create(mdName + ".md"));
     if (!attr)
@@ -357,21 +381,21 @@ void mainWrapped(int argc, char ** argv)
     }
 #endif
 
-    initNix();
-    initGC();
-    flakeSettings.configureEvalSettings(evalSettings);
-
     /* Set the build hook location
 
        For builds we perform a self-invocation, so Nix has to be
        self-aware. That is, it has to know where it is installed. We
        don't think it's sentient.
      */
-    settings.buildHook.setDefault(
+    settings.getWorkerSettings().buildHook.setDefault(
         Strings{
             getNixBin({}).string(),
             "__build-remote",
         });
+
+    initNix();
+    initGC();
+    flakeSettings.configureEvalSettings(evalSettings);
 
 #ifdef __linux__
     if (isRootUser()) {
@@ -397,14 +421,15 @@ void mainWrapped(int argc, char ** argv)
     }
 
     {
-        auto legacy = RegisterLegacyCommand::commands()[programName];
-        if (legacy)
-            return legacy(argc, argv);
+        if (auto legacy = get(RegisterLegacyCommand::commands(), programName))
+            return (*legacy)(argc, argv);
     }
 
     evalSettings.pureEval = true;
 
+#ifndef _WIN32
     setLogFormat("bar");
+#endif
     settings.verboseBuild = false;
 
     // If on a terminal, progress will be displayed via progress bars etc. (thus verbosity=notice)
@@ -429,7 +454,12 @@ void mainWrapped(int argc, char ** argv)
             Xp::FetchTree,
         };
         evalSettings.pureEval = false;
-        EvalState state({}, openStore("dummy://"), fetchSettings, evalSettings);
+        auto statePtr = std::make_shared<EvalState>(
+            LookupPath{},
+            openStore(StoreReference{.variant = StoreReference::Specified{.scheme = "dummy"}}),
+            fetchSettings,
+            evalSettings);
+        auto & state = *statePtr;
         auto builtinsJson = nlohmann::json::object();
         for (auto & builtinPtr : state.getBuiltins().attrs()->lexicographicOrder(state.symbols)) {
             auto & builtin = *builtinPtr;
@@ -440,7 +470,7 @@ void mainWrapped(int argc, char ** argv)
             if (!primOp->doc)
                 continue;
             b["args"] = primOp->args;
-            b["doc"] = trim(stripIndentation(primOp->doc));
+            b["doc"] = trim(stripIndentation(*primOp->doc));
             if (primOp->experimentalFeature)
                 b["experimental-feature"] = primOp->experimentalFeature;
             builtinsJson.emplace(state.symbols[builtin.name], std::move(b));
@@ -483,7 +513,7 @@ void mainWrapped(int argc, char ** argv)
     });
 
     try {
-        auto isNixCommand = std::regex_search(programName, std::regex("nix$"));
+        auto isNixCommand = programName.ends_with("nix");
         auto allowShebang = isNixCommand && argc > 1;
         args.parseCmdline(argvToStrings(argc, argv), allowShebang);
     } catch (UsageError &) {
@@ -527,20 +557,24 @@ void mainWrapped(int argc, char ** argv)
 
     if (!args.useNet) {
         // FIXME: should check for command line overrides only.
-        if (!settings.useSubstitutes.overridden)
-            settings.useSubstitutes = false;
-        if (!settings.tarballTtl.overridden)
-            settings.tarballTtl = std::numeric_limits<unsigned int>::max();
+        if (!settings.getWorkerSettings().useSubstitutes.overridden)
+            settings.getWorkerSettings().useSubstitutes = false;
+        if (!fetchSettings.tarballTtl.overridden)
+            fetchSettings.tarballTtl = std::numeric_limits<unsigned int>::max();
         if (!fileTransferSettings.tries.overridden)
             fileTransferSettings.tries = 0;
         if (!fileTransferSettings.connectTimeout.overridden)
             fileTransferSettings.connectTimeout = 1;
+        auto & ttlMeta = settings.getNarInfoDiskCacheSettings().ttlMeta;
+        if (!ttlMeta.overridden)
+            ttlMeta = std::numeric_limits<unsigned int>::max();
     }
 
     if (args.refresh) {
-        settings.tarballTtl = 0;
-        settings.ttlNegativeNarInfoCache = 0;
-        settings.ttlPositiveNarInfoCache = 0;
+        fetchSettings.tarballTtl = 0;
+        settings.getNarInfoDiskCacheSettings().ttlNegative = 0;
+        settings.getNarInfoDiskCacheSettings().ttlPositive = 0;
+        settings.getNarInfoDiskCacheSettings().ttlMeta = 0;
     }
 
     if (args.command->second->forceImpureByDefault() && !evalSettings.pureEval.overridden) {
@@ -566,7 +600,9 @@ int main(int argc, char ** argv)
 #ifndef _WIN32
     // Increase the default stack size for the evaluator and for
     // libstdc++'s std::regex.
-    nix::setStackSize(64 * 1024 * 1024);
+    // This used to be 64 MiB, but macOS as deployed on GitHub Actions has a
+    // hard limit slightly under that, so we round it down a bit.
+    nix::setStackSize(60 * 1024 * 1024);
 #endif
 
     return nix::handleExceptions(argv[0], [&]() { nix::mainWrapped(argc, argv); });

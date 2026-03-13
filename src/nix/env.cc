@@ -1,5 +1,6 @@
-#include <unordered_set>
 #include <queue>
+
+#include <boost/unordered/unordered_flat_set.hpp>
 
 #include "nix/cmd/command.hh"
 #include "nix/expr/eval.hh"
@@ -96,7 +97,7 @@ struct CmdShell : InstallablesCommand, MixEnvironment
             auto propPath = state->storeFS->resolveSymlinks(
                 CanonPath(store->printStorePath(path)) / "nix-support" / "propagated-user-env-packages");
             if (auto st = state->storeFS->maybeLstat(propPath); st && st->type == SourceAccessor::tRegular) {
-                for (auto & p : tokenizeString<Paths>(state->storeFS->readFile(propPath)))
+                for (auto & p : tokenizeString<Strings>(state->storeFS->readFile(propPath)))
                     todo.push(store->parseStorePath(p));
             }
         }

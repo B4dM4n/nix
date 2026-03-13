@@ -11,6 +11,7 @@
 
 #include "nix/util/types.hh"
 #include "nix/util/experimental-features.hh"
+#include "nix/util/fun.hh"
 #include "nix/util/ref.hh"
 
 namespace nix {
@@ -59,7 +60,9 @@ public:
      *
      * This only returns the correct value after parseCmdline() has run.
      */
-    virtual Path getCommandBaseDir() const;
+    virtual std::filesystem::path getCommandBaseDir() const;
+
+    virtual ~Args() = default;
 
 protected:
 
@@ -202,8 +205,12 @@ public:
         Strings labels;
         Handler handler;
         CompleterClosure completer;
+        bool required = false;
 
         std::optional<ExperimentalFeature> experimentalFeature;
+
+        // FIXME: this should be private, but that breaks designated initializers.
+        size_t timesUsed = 0;
     };
 
 protected:
@@ -282,6 +289,8 @@ protected:
     }
 
     StringSet hiddenCategories;
+
+    virtual void checkArgs();
 
     /**
      * Called after all command line flags before the first non-flag
@@ -377,7 +386,7 @@ struct Command : virtual public Args
     }
 };
 
-using Commands = std::map<std::string, std::function<ref<Command>()>>;
+using Commands = std::map<std::string, fun<ref<Command>()>>;
 
 /**
  * An argument parser that supports multiple subcommands,
@@ -428,6 +437,8 @@ public:
 protected:
     std::string commandName = "";
     bool aliasUsed = false;
+
+    void checkArgs() override;
 };
 
 Strings argvToStrings(int argc, char ** argv);
@@ -473,6 +484,8 @@ public:
      * Add a single completion to the collection
      */
     virtual void add(std::string completion, std::string description = "") = 0;
+
+    virtual ~AddCompletions() = default;
 };
 
 Strings parseShebangContent(std::string_view s);

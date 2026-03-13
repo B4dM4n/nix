@@ -31,6 +31,7 @@ MakeError(SubstituterDisabled, Error);
 
 MakeError(InvalidStoreReference, Error);
 
+struct UnkeyedRealisation;
 struct Realisation;
 struct RealisedPath;
 struct DrvOutput;
@@ -39,7 +40,8 @@ struct BasicDerivation;
 struct Derivation;
 
 struct SourceAccessor;
-class NarInfoDiskCache;
+struct NarInfoDiskCache;
+struct NarInfoDiskCacheSettings;
 class Store;
 
 typedef std::map<std::string, StorePath> OutputPathMap;
@@ -71,6 +73,32 @@ struct MissingPaths
 };
 
 /**
+ * A setting for the Nix store directory. Automatically canonicalises the
+ * path and rejects the empty string. Stored as `std::string` because
+ * store directory are valid file paths on *some* OS, but not neccessarily the OS of this build of Nix.
+ *
+ * (For example, consider `SSHStore` from Linux to Windows, or vice versa, the foreign path will not be a valid
+ * `std::filesystem::path`.)
+ */
+class StoreDirSetting : public BaseSetting<std::string>
+{
+public:
+    StoreDirSetting(
+        Config * options,
+        const std::string & def,
+        const std::string & name,
+        const std::string & description,
+        const StringSet & aliases = {});
+
+    std::string parse(const std::string & str) const override;
+
+    void operator=(const std::string & v)
+    {
+        this->assign(v);
+    }
+};
+
+/**
  * Need to make this a separate class so I can get the right
  * initialization order in the constructor for `StoreConfig`.
  */
@@ -81,14 +109,14 @@ struct StoreConfigBase : Config
 private:
 
     /**
-     * An indirection so that we don't need to refer to global settings
-     * in headers.
+     * Compute the default Nix store directory from environment variables
+     * (`NIX_STORE_DIR`, `NIX_STORE`) or the compile-time default.
      */
-    static Path getDefaultNixStoreDir();
+    static std::string getDefaultNixStoreDir();
 
 public:
 
-    const PathSetting storeDir_{
+    StoreDirSetting storeDir_{
         this,
         getDefaultNixStoreDir(),
         "store",
@@ -218,6 +246,12 @@ struct StoreConfig : public StoreConfigBase, public StoreDirConfig
         false};
 
     /**
+     * Whether we're allowed to write to this store, also takes into account
+     * global `readOnly`'s mode setting, not just any per-store settings.
+     */
+    virtual bool getReadOnly() const;
+
+    /**
      * Open a store of the type corresponding to this configuration
      * type.
      */
@@ -293,7 +327,7 @@ protected:
          * Whether the value is valid as a cache entry. The path may not
          * exist.
          */
-        bool isKnownNow();
+        bool isKnownNow(const NarInfoDiskCacheSettings & settings);
 
         /**
          * Past tense, because a path can only be assumed to exists when
@@ -309,7 +343,7 @@ protected:
 
     // Note: this is a `ref` to avoid false sharing with immutable
     // bits of `Store`.
-    ref<SharedSync<LRUCache<std::string, PathInfoCacheValue>>> pathInfoCache;
+    ref<SharedSync<LRUCache<StorePath, PathInfoCacheValue>>> pathInfoCache;
 
     std::shared_ptr<NarInfoDiskCache> diskCache;
 
@@ -327,7 +361,7 @@ public:
     /**
      * Follow symlinks until we end up with a path in the Nix store.
      */
-    Path followLinksToStore(std::string_view path) const;
+    std::filesystem::path followLinksToStore(std::string_view path) const;
 
     /**
      * Same as followLinksToStore(), but apply toStorePath() to the
@@ -398,12 +432,12 @@ public:
     /**
      * Query the information about a realisation.
      */
-    std::shared_ptr<const Realisation> queryRealisation(const DrvOutput &);
+    std::shared_ptr<const UnkeyedRealisation> queryRealisation(const DrvOutput &);
 
     /**
      * Asynchronous version of queryRealisation().
      */
-    void queryRealisation(const DrvOutput &, Callback<std::shared_ptr<const Realisation>> callback) noexcept;
+    void queryRealisation(const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept;
 
     /**
      * Check whether the given valid path info is sufficiently attested, by
@@ -430,8 +464,8 @@ protected:
 
     virtual void
     queryPathInfoUncached(const StorePath & path, Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept = 0;
-    virtual void
-    queryRealisationUncached(const DrvOutput &, Callback<std::shared_ptr<const Realisation>> callback) noexcept = 0;
+    virtual void queryRealisationUncached(
+        const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept = 0;
 
 public:
 
@@ -496,10 +530,7 @@ public:
     /**
      * Query which of the given paths have substitutes.
      */
-    virtual StorePathSet querySubstitutablePaths(const StorePathSet & paths)
-    {
-        return {};
-    };
+    virtual StorePathSet querySubstitutablePaths(const StorePathSet & paths);
 
     /**
      * Query substitute info (i.e. references, derivers and download
@@ -608,7 +639,7 @@ public:
     /**
      * Write a NAR dump of a store path.
      */
-    virtual void narFromPath(const StorePath & path, Sink & sink) = 0;
+    virtual void narFromPath(const StorePath & path, Sink & sink);
 
     /**
      * For each path, if it's a derivation, build it.  Building a
@@ -724,9 +755,27 @@ public:
      * the Nix store.
      *
      * @return nullptr if the store doesn't contain an object at the
-     * givine path.
+     * given path.
      */
     virtual std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath = true) = 0;
+
+    /**
+     * Get an accessor for the store object or throw an Error if it's invalid or
+     * doesn't exist.
+     *
+     * @throws InvalidPath if the store object doesn't exist or (if requireValidPath = true) is
+     * invalid.
+     */
+    [[nodiscard]] ref<SourceAccessor> requireStoreObjectAccessor(const StorePath & path, bool requireValidPath = true)
+    {
+        auto accessor = getFSAccessor(path, requireValidPath);
+        if (!accessor) {
+            throw InvalidPath(
+                requireValidPath ? "path '%1%' is not a valid store path" : "store path '%1%' does not exist",
+                printStorePath(path));
+        }
+        return ref<SourceAccessor>{accessor};
+    }
 
     /**
      * Repair the contents of the given path by redownloading it using
@@ -738,7 +787,7 @@ public:
      * Add signatures to the specified store path. The signatures are
      * not verified.
      */
-    virtual void addSignatures(const StorePath & storePath, const StringSet & sigs)
+    virtual void addSignatures(const StorePath & storePath, const std::set<Signature> & sigs)
     {
         unsupported("addSignatures");
     }
@@ -760,14 +809,19 @@ public:
     Derivation derivationFromPath(const StorePath & drvPath);
 
     /**
+     * Write a derivation to the Nix store, and return its path.
+     */
+    virtual StorePath writeDerivation(const Derivation & drv, RepairFlag repair = NoRepair);
+
+    /**
      * Read a derivation (which must already be valid).
      */
-    Derivation readDerivation(const StorePath & drvPath);
+    virtual Derivation readDerivation(const StorePath & drvPath);
 
     /**
      * Read a derivation from a potentially invalid path.
      */
-    Derivation readInvalidDerivation(const StorePath & drvPath);
+    virtual Derivation readInvalidDerivation(const StorePath & drvPath);
 
     /**
      * @param [out] out Place in here the set of all store paths in the
@@ -871,16 +925,6 @@ public:
      */
     virtual std::optional<TrustedFlag> isTrustedClient() = 0;
 
-    virtual Path toRealPath(const Path & storePath)
-    {
-        return storePath;
-    }
-
-    Path toRealPath(const StorePath & storePath)
-    {
-        return toRealPath(printStorePath(storePath));
-    }
-
     /**
      * Synchronises the options of the client with those of the daemon
      * (a no-op when there’s no daemon)
@@ -976,18 +1020,15 @@ void removeTempRoots();
 StorePath resolveDerivedPath(Store &, const SingleDerivedPath &, Store * evalStore = nullptr);
 OutputPathMap resolveDerivedPath(Store &, const DerivedPath::Built &, Store * evalStore = nullptr);
 
-/**
- * Display a set of paths in human-readable form (i.e., between quotes
- * and separated by commas).
- */
-std::string showPaths(const PathSet & paths);
-
 std::optional<ValidPathInfo>
 decodeValidPathInfo(const Store & store, std::istream & str, std::optional<HashResult> hashGiven = std::nullopt);
 
 const ContentAddress * getDerivationCA(const BasicDerivation & drv);
 
-std::map<DrvOutput, StorePath>
-drvOutputReferences(Store & store, const Derivation & drv, const StorePath & outputPath, Store * evalStore = nullptr);
+template<>
+struct json_avoids_null<TrustedFlag> : std::true_type
+{};
 
 } // namespace nix
+
+JSON_IMPL(nix::TrustedFlag)

@@ -33,6 +33,9 @@ deps_private += rapidcheck
 gtest = dependency('gtest', main : true)
 deps_private += gtest
 
+gmock = dependency('gmock')
+deps_private += gmock
+
 configdata = configuration_data()
 configdata.set_quoted('PACKAGE_VERSION', meson.project_version())
 
@@ -42,9 +45,9 @@ config_priv_h = configure_file(
 )
 
 subdir('nix-meson-build-support/common')
-subdir('nix-meson-build-support/asan-options')
 
 sources = files(
+  'alignment.cc',
   'archive.cc',
   'args.cc',
   'base-n.cc',
@@ -56,28 +59,41 @@ sources = files(
   'config.cc',
   'executable-path.cc',
   'file-content-address.cc',
+  'file-descriptor.cc',
+  'file-system-at.cc',
   'file-system.cc',
+  'fun.cc',
   'git.cc',
   'hash.cc',
   'hilite.cc',
   'json-utils.cc',
   'logging.cc',
   'lru-cache.cc',
+  'memory-source-accessor.cc',
   'monitorfdhup.cc',
+  'nar-listing.cc',
   'nix_api_util.cc',
   'nix_api_util_internal.cc',
   'pool.cc',
   'position.cc',
   'processes.cc',
+  'ref.cc',
+  'serialise.cc',
   'sort.cc',
+  'source-accessor.cc',
   'spawn.cc',
   'strings.cc',
   'suggestions.cc',
   'terminal.cc',
+  'topo-sort.cc',
   'url.cc',
   'util.cc',
   'xml-writer.cc',
 )
+
+if host_machine.system() != 'windows'
+  subdir('unix')
+endif
 
 include_dirs = [ include_directories('.') ]
 
@@ -98,7 +114,7 @@ this_exe = executable(
 test(
   meson.project_name(),
   this_exe,
-  env : asan_test_options_env + {
+  env : {
     '_NIX_TEST_UNIT_DATA' : meson.current_source_dir() / 'data',
   },
   protocol : 'gtest',

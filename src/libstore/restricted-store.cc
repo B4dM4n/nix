@@ -53,7 +53,7 @@ struct RestrictedStore : public virtual IndirectRootStore, public virtual GcStor
     {
     }
 
-    Path getRealStoreDir() override
+    std::filesystem::path getRealStoreDir() override
     {
         return next->config->realStoreDir;
     }
@@ -107,7 +107,7 @@ struct RestrictedStore : public virtual IndirectRootStore, public virtual GcStor
     void registerDrvOutput(const Realisation & info) override;
 
     void queryRealisationUncached(
-        const DrvOutput & id, Callback<std::shared_ptr<const Realisation>> callback) noexcept override;
+        const DrvOutput & id, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept override;
 
     void
     buildPaths(const std::vector<DerivedPath> & paths, BuildMode buildMode, std::shared_ptr<Store> evalStore) override;
@@ -125,7 +125,7 @@ struct RestrictedStore : public virtual IndirectRootStore, public virtual GcStor
 
     void addTempRoot(const StorePath & path) override {}
 
-    void addIndirectRoot(const Path & path) override {}
+    void addIndirectRoot(const std::filesystem::path & path) override {}
 
     Roots findRoots(bool censor) override
     {
@@ -134,7 +134,7 @@ struct RestrictedStore : public virtual IndirectRootStore, public virtual GcStor
 
     void collectGarbage(const GCOptions & options, GCResults & results) override {}
 
-    void addSignatures(const StorePath & storePath, const StringSet & sigs) override
+    void addSignatures(const StorePath & storePath, const std::set<Signature> & sigs) override
     {
         unsupported("addSignatures");
     }
@@ -226,7 +226,7 @@ void RestrictedStore::narFromPath(const StorePath & path, Sink & sink)
 {
     if (!goal.isAllowed(path))
         throw InvalidPath("cannot dump unknown path '%s' in recursive Nix", printStorePath(path));
-    LocalFSStore::narFromPath(path, sink);
+    Store::narFromPath(path, sink);
 }
 
 void RestrictedStore::ensurePath(const StorePath & path)
@@ -244,7 +244,7 @@ void RestrictedStore::registerDrvOutput(const Realisation & info)
 }
 
 void RestrictedStore::queryRealisationUncached(
-    const DrvOutput & id, Callback<std::shared_ptr<const Realisation>> callback) noexcept
+    const DrvOutput & id, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept
 // XXX: This should probably be allowed if the realisation corresponds to
 // an allowed derivation
 {
@@ -257,8 +257,7 @@ void RestrictedStore::buildPaths(
     const std::vector<DerivedPath> & paths, BuildMode buildMode, std::shared_ptr<Store> evalStore)
 {
     for (auto & result : buildPathsWithResults(paths, buildMode, evalStore))
-        if (auto * failureP = result.tryGetFailure())
-            failureP->rethrow();
+        result.tryThrowBuildError();
 }
 
 std::vector<KeyedBuildResult> RestrictedStore::buildPathsWithResults(
@@ -292,7 +291,7 @@ std::vector<KeyedBuildResult> RestrictedStore::buildPathsWithResults(
     next->computeFSClosure(newPaths, closure);
     for (auto & path : closure)
         goal.addDependency(path);
-    for (auto & real : Realisation::closure(*next, newRealisations))
+    for (auto & real : newRealisations)
         goal.addedDrvOutputs.insert(real.id);
 
     return results;

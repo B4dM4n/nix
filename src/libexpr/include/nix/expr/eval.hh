@@ -108,7 +108,7 @@ struct PrimOp
     /**
      * Optional free-form documentation about the primop.
      */
-    const char * doc = nullptr;
+    std::optional<std::string> doc;
 
     /**
      * Add a trace item, while calling the `<name>` builtin.
@@ -120,7 +120,7 @@ struct PrimOp
     /**
      * Implementation of the primop.
      */
-    std::function<PrimOpFun> fun;
+    fun<PrimOpFun> impl;
 
     /**
      * Optional experimental for this to be gated on.
@@ -191,7 +191,7 @@ std::ostream & operator<<(std::ostream & os, const ValueType t);
 
 struct RegexCache;
 
-std::shared_ptr<RegexCache> makeRegexCache();
+ref<RegexCache> makeRegexCache();
 
 struct DebugTrace
 {
@@ -305,18 +305,6 @@ struct StaticEvalSymbols
 
 class EvalMemory
 {
-#if NIX_USE_BOEHMGC
-    /**
-     * Allocation cache for GC'd Value objects.
-     */
-    std::shared_ptr<void *> valueAllocCache;
-
-    /**
-     * Allocation cache for size-1 Env objects.
-     */
-    std::shared_ptr<void *> env1AllocCache;
-#endif
-
 public:
     struct Statistics
     {
@@ -335,6 +323,7 @@ public:
     EvalMemory & operator=(const EvalMemory &) = delete;
     EvalMemory & operator=(EvalMemory &&) = delete;
 
+    inline void * allocBytes(size_t n);
     inline Value * allocValue();
     inline Env & allocEnv(size_t size);
 
@@ -348,7 +337,7 @@ public:
     ListBuilder buildList(size_t size)
     {
         stats.nrListElems += size;
-        return ListBuilder(size);
+        return ListBuilder(*this, size);
     }
 
     const Statistics & getStats() const &
@@ -372,6 +361,7 @@ public:
 
     const fetchers::Settings & fetchSettings;
     const EvalSettings & settings;
+
     SymbolTable symbols;
     PosTable positions;
 
@@ -418,7 +408,7 @@ public:
 
     RootValue vImportedDrvToDerivation = nullptr;
 
-    ref<fetchers::InputCache> inputCache;
+    const ref<fetchers::InputCache> inputCache;
 
     /**
      * Debugger
@@ -471,18 +461,18 @@ private:
 
     /* Cache for calls to addToStore(); maps source paths to the store
        paths. */
-    ref<boost::concurrent_flat_map<SourcePath, StorePath>> srcToStore;
+    const ref<boost::concurrent_flat_map<SourcePath, StorePath>> srcToStore;
 
     /**
      * A cache that maps paths to "resolved" paths for importing Nix
      * expressions, i.e. `/foo` to `/foo/default.nix`.
      */
-    ref<boost::concurrent_flat_map<SourcePath, SourcePath>> importResolutionCache;
+    const ref<boost::concurrent_flat_map<SourcePath, SourcePath>> importResolutionCache;
 
     /**
      * A cache from resolved paths to values.
      */
-    ref<boost::concurrent_flat_map<
+    const ref<boost::concurrent_flat_map<
         SourcePath,
         Value *,
         std::hash<SourcePath>,
@@ -504,12 +494,19 @@ private:
     /**
      * Cache used by prim_match().
      */
-    std::shared_ptr<RegexCache> regexCache;
+    const ref<RegexCache> regexCache;
 
 public:
 
+    /**
+     * @param lookupPath     Only used during construction.
+     * @param store          The store to use for instantiation
+     * @param fetchSettings  Must outlive the lifetime of this EvalState!
+     * @param settings       Must outlive the lifetime of this EvalState!
+     * @param buildStore     The store to use for builds ("import from derivation", C API `nix_string_realise`)
+     */
     EvalState(
-        const LookupPath & _lookupPath,
+        const LookupPath & lookupPath,
         ref<Store> store,
         const fetchers::Settings & fetchSettings,
         const EvalSettings & settings,
@@ -539,7 +536,7 @@ public:
     /**
      * Variant which accepts relative paths too.
      */
-    SourcePath rootPath(PathView path);
+    SourcePath rootPath(std::string_view path);
 
     /**
      * Return a `SourcePath` that refers to `path` in the store.
@@ -556,7 +553,7 @@ public:
      * Only for restrict eval: pure eval just whitelist store paths,
      * never arbitrary paths.
      */
-    void allowPathLegacy(const Path & path);
+    void allowPathLegacy(const std::string & path);
 
     /**
      * Allow access to a store path. Note that this gets remapped to
@@ -585,13 +582,26 @@ public:
      * Parse a Nix expression from the specified file.
      */
     Expr * parseExprFromFile(const SourcePath & path);
-    Expr * parseExprFromFile(const SourcePath & path, std::shared_ptr<StaticEnv> & staticEnv);
+    Expr * parseExprFromFile(const SourcePath & path, const std::shared_ptr<StaticEnv> & staticEnv);
 
     /**
      * Parse a Nix expression from the specified string.
      */
-    Expr * parseExprFromString(std::string s, const SourcePath & basePath, std::shared_ptr<StaticEnv> & staticEnv);
+    Expr *
+    parseExprFromString(std::string s, const SourcePath & basePath, const std::shared_ptr<StaticEnv> & staticEnv);
     Expr * parseExprFromString(std::string s, const SourcePath & basePath);
+
+    /**
+     * Parse REPL bindings from the specified string.
+     * Returns ExprAttrs with bindings to add to scope.
+     */
+    ExprAttrs *
+    parseReplBindings(std::string s, const SourcePath & basePath, const std::shared_ptr<StaticEnv> & staticEnv);
+    ExprAttrs * parseReplBindings(
+        std::string s,
+        std::string errorSource,
+        const SourcePath & basePath,
+        const std::shared_ptr<StaticEnv> & staticEnv);
 
     Expr * parseStdin();
 
@@ -642,7 +652,27 @@ public:
      */
     inline void forceValue(Value & v, const PosIdx pos);
 
+private:
+
+    /**
+     * Internal support function for forceValue
+     *
+     * This code is factored out so that it's not in the heavily inlined hot path.
+     */
+    void handleEvalExceptionForThunk(Env * env, Expr * expr, Value & v, const PosIdx pos);
+
+    /**
+     * Internal support function for forceValue
+     *
+     * This code is factored out so that it's not in the heavily inlined hot path.
+     */
+    void handleEvalExceptionForApp(Value & v, const Value & savedApp);
+
+    void handleEvalFailed(Value & v, PosIdx pos);
+
     void tryFixupBlackHolePos(Value & v, PosIdx pos);
+
+public:
 
     /**
      * Force a value, then recursively force list elements and
@@ -759,7 +789,7 @@ public:
 
 #if NIX_USE_BOEHMGC
     /** A GC root for the baseEnv reference. */
-    std::shared_ptr<Env *> baseEnvP;
+    const std::shared_ptr<Env *> baseEnvP;
 #endif
 
 public:
@@ -773,7 +803,7 @@ public:
     /**
      * The same, but used during parsing to resolve variables.
      */
-    std::shared_ptr<StaticEnv> staticBaseEnv; // !!! should be private
+    const std::shared_ptr<StaticEnv> staticBaseEnv; // !!! should be private
 
     /**
      * Internal primops not exposed to the user.
@@ -855,7 +885,14 @@ private:
         size_t length,
         Pos::Origin origin,
         const SourcePath & basePath,
-        std::shared_ptr<StaticEnv> & staticEnv);
+        const std::shared_ptr<StaticEnv> & staticEnv);
+
+    ExprAttrs * parseReplBindings(
+        char * text,
+        size_t length,
+        Pos::Origin origin,
+        const SourcePath & basePath,
+        const std::shared_ptr<StaticEnv> & staticEnv);
 
     /**
      * Current Nix call stack depth, used with `max-call-depth` setting to throw stack overflow hopefully before we run
@@ -991,6 +1028,12 @@ public:
      */
     [[nodiscard]] StringMap
     realiseContext(const NixStringContext & context, StorePathSet * maybePaths = nullptr, bool isIFD = true);
+
+    /**
+     * Coerce `v` to a path and realise it, i.e. build anything in the value's string context using `realiseContext()`.
+     */
+    SourcePath realisePath(
+        const PosIdx pos, Value & v, std::optional<SymlinkResolution> resolveSymlinks = SymlinkResolution::Full);
 
     /**
      * Realise the given string with context, and return the string with outputs instead of downstream output

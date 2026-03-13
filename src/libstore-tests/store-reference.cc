@@ -15,7 +15,7 @@ class StoreReferenceTest : public CharacterizationTest, public LibStoreTest
 {
     std::filesystem::path unitTestData = getUnitTestData() / "store-reference";
 
-    std::filesystem::path goldenMaster(PathView testStem) const override
+    std::filesystem::path goldenMaster(std::string_view testStem) const override
     {
         return unitTestData / (testStem + ".txt");
     }
@@ -85,6 +85,20 @@ static StoreReference localExample_2{
         },
 };
 
+#ifdef _WIN32
+static StoreReference localExample_windows{
+    .variant =
+        StoreReference::Specified{
+            .scheme = "local",
+            .authority = "/C:/foo/bar/baz",
+        },
+    .params =
+        {
+            {"trusted", "true"},
+        },
+};
+#endif
+
 static StoreReference localExample_3{
     .variant =
         StoreReference::Specified{
@@ -100,12 +114,19 @@ URI_TEST(local_1, localExample_1)
 
 URI_TEST(local_2, localExample_2)
 
-/* Test path with spaces */
+/* Test path with encoded spaces */
 URI_TEST(local_3, localExample_3)
+
+/* Test path with spaces that are improperly not encoded */
+URI_TEST_READ(local_3_no_percent, localExample_3)
 
 URI_TEST_READ(local_shorthand_1, localExample_1)
 
-URI_TEST_READ(local_shorthand_2, localExample_2)
+#ifndef _WIN32
+URI_TEST_READ(local_shorthand_path_unix, localExample_2)
+#else
+URI_TEST_READ(local_shorthand_path_windows, localExample_windows)
+#endif
 
 URI_TEST(
     local_shorthand_3,
@@ -182,5 +203,65 @@ static StoreReference sshIPv6AuthorityWithUserinfoAndParams{
 };
 
 URI_TEST_READ(ssh_unbracketed_ipv6_3, sshIPv6AuthorityWithUserinfoAndParams)
+
+static const StoreReference sshIPv6AuthorityWithUserinfoAndParamsAndZoneId{
+    .variant =
+        StoreReference::Specified{
+            .scheme = "ssh",
+            .authority = "userinfo@[fea5:23e1:3916:fc24:cb52:2837:2ecb:ea8e%25eth0]",
+        },
+    .params =
+        {
+            {"a", "b"},
+            {"c", "d"},
+        },
+};
+
+URI_TEST_READ(ssh_unbracketed_ipv6_4, sshIPv6AuthorityWithUserinfoAndParamsAndZoneId)
+URI_TEST_READ(ssh_unbracketed_ipv6_5, sshIPv6AuthorityWithUserinfoAndParamsAndZoneId)
+
+static const StoreReference sshIPv6AuthorityWithUserinfoAndParamsAndZoneIdTricky{
+    .variant =
+        StoreReference::Specified{
+            .scheme = "ssh",
+            .authority = "userinfo@[fea5:23e1:3916:fc24:cb52:2837:2ecb:ea8e%2525]",
+        },
+    .params =
+        {
+            {"a", "b"},
+            {"c", "d"},
+        },
+};
+
+// Non-standard syntax where the IPv6 literal appears without brackets. In
+// this case don't considering %25 to be a pct-encoded % and just take it as a
+// literal value. 25 is a perfectly legal ZoneId value in theory.
+URI_TEST_READ(ssh_unbracketed_ipv6_6, sshIPv6AuthorityWithUserinfoAndParamsAndZoneIdTricky)
+URI_TEST_READ(ssh_unbracketed_ipv6_7, sshIPv6AuthorityWithUserinfoAndParamsAndZoneId)
+
+static const StoreReference sshIPv6AuthorityWithParamsAndZoneId{
+    .variant =
+        StoreReference::Specified{
+            .scheme = "ssh",
+            .authority = "[fea5:23e1:3916:fc24:cb52:2837:2ecb:ea8e%25eth0]",
+        },
+    .params =
+        {
+            {"a", "b"},
+            {"c", "d"},
+        },
+};
+
+URI_TEST_READ(ssh_unbracketed_ipv6_8, sshIPv6AuthorityWithParamsAndZoneId)
+
+static const StoreReference sshIPv6AuthorityWithZoneId{
+    .variant =
+        StoreReference::Specified{
+            .scheme = "ssh",
+            .authority = "[fea5:23e1:3916:fc24:cb52:2837:2ecb:ea8e%25eth0]",
+        },
+};
+
+URI_TEST_READ(ssh_unbracketed_ipv6_9, sshIPv6AuthorityWithZoneId)
 
 } // namespace nix

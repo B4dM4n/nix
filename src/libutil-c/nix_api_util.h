@@ -109,6 +109,13 @@ enum nix_err {
      */
     NIX_ERR_NIX_ERROR = -4,
 
+    /**
+     * @brief A recoverable error occurred.
+     *
+     * This is used primarily by C API *consumers* to communicate that a failed
+     * primop call should be retried on the next evaluation attempt.
+     */
+    NIX_ERR_RECOVERABLE = -5,
 };
 
 typedef enum nix_err nix_err;
@@ -154,6 +161,8 @@ typedef struct nix_c_context nix_c_context;
 
 /**
  * @brief Called to get the value of a string owned by Nix.
+ *
+ * The `start` data is borrowed and the function must not assume that the buffer persists after it returns.
  *
  * @param[in] start the string to copy.
  * @param[in] n the string length.
