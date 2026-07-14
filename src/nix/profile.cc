@@ -12,6 +12,7 @@
 #include "nix/store/names.hh"
 #include "nix/util/url.hh"
 #include "nix/flake/url-name.hh"
+#include "nix/fetchers/fetch-settings.hh"
 
 #include <nlohmann/json.hpp>
 #include <regex>
@@ -19,7 +20,7 @@
 
 #include "nix/util/strings.hh"
 
-using namespace nix;
+namespace nix {
 
 struct ProfileElementSource
 {
@@ -124,7 +125,7 @@ struct ProfileManifest
         auto manifestPath = profile / "manifest.json";
 
         if (std::filesystem::exists(manifestPath)) {
-            auto json = nlohmann::json::parse(readFile(manifestPath.string()));
+            auto json = nlohmann::json::parse(readFile(manifestPath));
 
             auto version = json.value("version", 0);
             std::string sUrl;
@@ -247,13 +248,13 @@ struct ProfileManifest
             }
         }
 
-        buildProfile(tempDir.string(), std::move(pkgs));
+        buildProfile(tempDir, std::move(pkgs));
 
         writeFile(tempDir / "manifest.json", toJSON(*store).dump());
 
         /* Add the symlink tree to the store. */
         StringSink sink;
-        dumpPath(tempDir.string(), sink);
+        dumpPath(tempDir, sink);
 
         auto narHash = hashString(HashAlgorithm::SHA256, sink.s);
 
@@ -558,9 +559,23 @@ struct AllMatcher final : public Matcher
 
 AllMatcher all;
 
-class MixProfileElementMatchers : virtual Args, virtual StoreCommand
+class MixProfileElementMatchers : virtual Args, virtual StoreCommand, public virtual MixDefaultProfile
 {
     std::vector<ref<Matcher>> _matchers;
+
+    void completeProfileElements(AddCompletions & completions, std::string_view prefix)
+    {
+        auto * evalCmd = dynamic_cast<EvalCommand *>(this);
+        if (!evalCmd)
+            return;
+
+        auto evalState = evalCmd->getEvalState();
+        ProfileManifest manifest(*evalState, *profile);
+
+        for (auto & [name, element] : manifest.elements)
+            if (name.starts_with(prefix))
+                completions.add(name, element.identifier());
+    }
 
 public:
 
@@ -592,6 +607,9 @@ public:
                          _matchers.push_back(make_ref<NameMatcher>(arg));
                      }
                  }
+             }},
+             .completer = {[this](AddCompletions & completions, size_t, std::string_view prefix) {
+                 completeProfileElements(completions, prefix);
              }}});
     }
 
@@ -632,7 +650,7 @@ public:
     }
 };
 
-struct CmdProfileRemove : virtual EvalCommand, MixDefaultProfile, MixProfileElementMatchers
+struct CmdProfileRemove : virtual EvalCommand, MixProfileElementMatchers
 {
     std::string description() override
     {
@@ -672,7 +690,7 @@ struct CmdProfileRemove : virtual EvalCommand, MixDefaultProfile, MixProfileElem
     }
 };
 
-struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProfileElementMatchers
+struct CmdProfileUpgrade : virtual SourceExprCommand, MixProfileElementMatchers, MixDryRun
 {
     std::string description() override
     {
@@ -688,6 +706,7 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProf
 
     void run(ref<Store> store) override
     {
+        fetchSettings.tarballTtl = 0;
         ProfileManifest manifest(*getEvalState(), *profile);
 
         Installables installables;
@@ -765,6 +784,9 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixDefaultProfile, MixProf
             warn("Found some packages but none of them could be upgraded.");
             return;
         }
+
+        if (dryRun)
+            return;
 
         auto builtPaths = builtPathsPerInstallable(
             Installable::build2(getEvalStore(), store, Realise::Outputs, installables, bmNormal));
@@ -1007,3 +1029,5 @@ struct CmdProfile : NixMultiCommand
 };
 
 static auto rCmdProfile = registerCommand<CmdProfile>("profile");
+
+} // namespace nix

@@ -13,6 +13,7 @@
 #include "nix/util/util.hh"
 #include "nix/util/thread-pool.hh"
 #include "nix/util/pool.hh"
+#include "nix/util/deleter.hh"
 
 #include <git2/attr.h>
 #include <git2/blob.h>
@@ -42,9 +43,7 @@
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <iostream>
-#include <queue>
 #include <regex>
-#include <span>
 #include <ranges>
 
 namespace std {
@@ -75,6 +74,8 @@ namespace nix {
 
 struct GitSourceAccessor;
 
+namespace {
+
 struct GitError final : public CloneableError<GitError, Error>
 {
     template<typename... Ts>
@@ -97,6 +98,8 @@ struct GitError final : public CloneableError<GitError, Error>
     {
     }
 };
+
+} // namespace
 
 typedef std::unique_ptr<git_repository, Deleter<git_repository_free>> Repository;
 typedef std::unique_ptr<git_tree_entry, Deleter<git_tree_entry_free>> TreeEntry;
@@ -227,7 +230,7 @@ static git_packbuilder_progress PACKBUILDER_PROGRESS_CHECK_INTERRUPT = &packBuil
 
 static void initRepoAtomically(std::filesystem::path & path, GitRepo::Options options)
 {
-    if (pathExists(path.string()))
+    if (pathExists(path))
         return;
 
     if (!options.create)
@@ -571,7 +574,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
 
         /* Get submodule info. */
         auto modulesFile = path / ".gitmodules";
-        if (pathExists(modulesFile.string()))
+        if (pathExists(modulesFile))
             info.submodules = parseSubmodules(modulesFile);
 
         return info;
@@ -638,6 +641,11 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         //       then use code that was removed in this commit (see blame)
 
         auto dir = this->path;
+
+        // Remove shallow.lock left behind by a previously interrupted `git fetch`, as it would prevent `git fetch`
+        // from running. Note that we already have a repository-wide `PathLock` (see git.cc), so this is safe.
+        tryUnlink(dir / "shallow.lock");
+
         OsStrings gitArgs = {
             OS_STR("-C"),
             dir.native(),
@@ -780,6 +788,9 @@ ref<GitRepo> GitRepo::openRepo(const std::filesystem::path & path, GitRepo::Opti
 
 struct GitSourceAccessor : SourceAccessor
 {
+private:
+    void anchor() override {};
+public:
     struct State
     {
         ref<GitRepoImpl> repo;
@@ -808,20 +819,16 @@ struct GitSourceAccessor : SourceAccessor
 
         if (state->lfsFetch) {
             if (state->lfsFetch->shouldFetch(path)) {
-                StringSink s;
                 try {
                     // FIXME: do we need to hold the state lock while
                     // doing this?
                     auto contents =
                         std::string((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
-                    state->lfsFetch->fetch(contents, path, s, [&s](uint64_t size) { s.s.reserve(size); });
+                    state->lfsFetch->fetch(contents, path, sink, sizeCallback);
                 } catch (Error & e) {
                     e.addTrace({}, "while smudging git-lfs file '%s'", path);
                     throw;
                 }
-                sizeCallback(s.s.size());
-                StringSource source{s.s};
-                source.drainInto(sink);
                 return;
             }
         }
@@ -1058,6 +1065,9 @@ struct GitSourceAccessor : SourceAccessor
 
 struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
 {
+private:
+    void anchor() override {};
+public:
     ref<GitRepoImpl> repo;
     std::optional<Hash> rev;
 
@@ -1115,6 +1125,10 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
         return !isExportIgnored(path);
     }
 };
+
+void GitFileSystemObjectSink::anchor() {}
+
+namespace {
 
 struct GitFileSystemObjectSinkImpl : GitFileSystemObjectSink
 {
@@ -1411,6 +1425,8 @@ struct GitFileSystemObjectSinkImpl : GitFileSystemObjectSink
     }
 };
 
+} // namespace
+
 ref<GitSourceAccessor> GitRepoImpl::getRawAccessor(const Hash & rev, const GitAccessorOptions & options)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
@@ -1433,13 +1449,15 @@ ref<SourceAccessor> GitRepoImpl::getAccessor(
     const WorkdirInfo & wd, const GitAccessorOptions & options, MakeNotAllowedError makeNotAllowedError)
 {
     auto self = ref<GitRepoImpl>(shared_from_this());
-    ref<SourceAccessor> fileAccessor = AllowListSourceAccessor::create(
-                                           makeFSSourceAccessor(path),
-                                           std::set<CanonPath>{wd.files},
-                                           // Always allow access to the root, but not its children.
-                                           boost::unordered_flat_set<CanonPath>{CanonPath::root},
-                                           std::move(makeNotAllowedError))
-                                           .cast<SourceAccessor>();
+    ref<SourceAccessor> fileAccessor =
+        AllowListSourceAccessor::create(
+            // Follow the final symlink to the repo. Older nix versions used to do this (maybe somewhat accidentally).
+            makeFSSourceAccessor(path, /*trackLastModified=*/false, FinalSymlink::Follow),
+            /*allowedPrefixes=*/wd.files,
+            // Always allow access to the root, but not its children.
+            /*allowedPaths=*/{CanonPath::root},
+            std::move(makeNotAllowedError))
+            .cast<SourceAccessor>();
     if (options.exportIgnore)
         fileAccessor = make_ref<GitExportIgnoreSourceAccessor>(self, fileAccessor, std::nullopt);
     return fileAccessor;
@@ -1463,6 +1481,7 @@ std::vector<std::tuple<GitRepoImpl::Submodule, Hash>> GitRepoImpl::getSubmodules
     auto configS = accessor->readFile(modulesFile);
 
     auto [fdTemp, pathTemp] = createTempFile("nix-git-submodules");
+    AutoDelete delTemp(pathTemp, /*recursive=*/false);
     try {
         writeFull(fdTemp.get(), configS);
     } catch (SystemError & e) {
@@ -1481,6 +1500,7 @@ std::vector<std::tuple<GitRepoImpl::Submodule, Hash>> GitRepoImpl::getSubmodules
             result.push_back({std::move(submodule), *rev});
     }
 
+    delTemp.deletePath();
     return result;
 }
 
@@ -1498,9 +1518,11 @@ ref<GitRepo> Settings::getTarballCache() const
 
 } // namespace fetchers
 
+static Sync<std::map<std::filesystem::path, GitRepo::WorkdirInfo>> workdirInfoCache_;
+
 GitRepo::WorkdirInfo GitRepo::getCachedWorkdirInfo(const std::filesystem::path & path)
 {
-    static Sync<std::map<std::filesystem::path, WorkdirInfo>> _cache;
+    auto & _cache = workdirInfoCache_;
     {
         auto cache(_cache.lock());
         auto i = cache->find(path);
@@ -1510,6 +1532,11 @@ GitRepo::WorkdirInfo GitRepo::getCachedWorkdirInfo(const std::filesystem::path &
     auto workdirInfo = GitRepo::openRepo(path, {})->getWorkdirInfo();
     _cache.lock()->emplace(path, workdirInfo);
     return workdirInfo;
+}
+
+void GitRepo::invalidateWorkdirInfoCache()
+{
+    workdirInfoCache_.lock()->clear();
 }
 
 bool isLegalRefName(const std::string & refName)

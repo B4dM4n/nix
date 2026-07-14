@@ -46,6 +46,9 @@ void BaseSetting<Builders>::appendOrSet(Builders newValue, bool append);
 
 struct WorkerSettings : public virtual Config
 {
+private:
+    void anchor() override;
+
 protected:
     WorkerSettings() = default;
 
@@ -203,7 +206,7 @@ public:
           4. The maximum number of builds that Nix executes in parallel on the machine.
              Typically this should be equal to the number of CPU cores.
 
-          5. The “speed factor”, indicating the relative speed of the machine as a positive integer.
+          5. The “speed factor”, indicating the relative speed of the machine as a positive integer or decimal number.
              If there are multiple machines of the right type, Nix prefers the fastest, taking load into account.
 
           6. A comma-separated list of supported [system features](#conf-system-features).
