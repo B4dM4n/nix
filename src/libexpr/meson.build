@@ -8,7 +8,7 @@ project(
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
   ],
-  meson_version : '>= 1.1',
+  meson_version : '>= 1.8',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -91,6 +91,10 @@ configdata_priv.set(
 
 deps_other += toml11
 
+cpuid = dependency('libcpuid', 'cpuid', required : false)
+configdata_priv.set('HAVE_LIBCPUID', cpuid.found().to_int())
+deps_private += cpuid
+
 config_priv_h = configure_file(
   configuration : configdata_priv,
   output : 'expr-config-private.hh',
@@ -164,7 +168,6 @@ sources = files(
   'function-trace.cc',
   'get-drvs.cc',
   'json-to-value.cc',
-  'lexer-helpers.cc',
   'nixexpr.cc',
   'paths.cc',
   'primops.cc',
@@ -215,6 +218,7 @@ parser_library = static_library(
   'nixexpr-parser',
   parser_tab,
   lexer_tab,
+  'lexer-helpers.cc',
   cpp_args : parser_library_cpp_args,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
@@ -225,6 +229,8 @@ parser_library = static_library(
   override_options : [
     'b_ndebug=@0@'.format(not get_option('debug')),
     'b_lto=@0@'.format(get_option('b_lto') and cxx.get_id() != 'gcc'),
+    # Unity builds mess up the recursive header dependency between flex and bison generated code.
+    'unity=off',
   ],
 )
 
