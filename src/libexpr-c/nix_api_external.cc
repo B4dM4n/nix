@@ -14,6 +14,8 @@
 
 #include <nlohmann/json.hpp>
 
+extern "C" {
+
 void nix_set_string_return(nix_string_return * str, const char * c)
 {
     str->str = c;
@@ -39,6 +41,8 @@ nix_err nix_external_add_string_context(nix_c_context * context, nix_string_cont
     }
     NIXC_CATCH_ERRS
 }
+
+} // extern "C"
 
 class NixCExternalValue : public nix::ExternalValueBase
 {
@@ -149,7 +153,7 @@ public:
         bool location,
         nix::XMLWriter & doc,
         nix::NixStringContext & context,
-        nix::PathSet & drvsSeen,
+        nix::StringSet & drvsSeen,
         const nix::PosIdx pos) const override
     {
         if (!desc.printValueAsXML) {
@@ -169,6 +173,8 @@ public:
 
     virtual ~NixCExternalValue() override {};
 };
+
+extern "C" {
 
 ExternalValue * nix_create_external_value(nix_c_context * context, NixCExternalValueDesc * desc, void * v)
 {
@@ -198,3 +204,5 @@ void * nix_get_external_value_content(nix_c_context * context, ExternalValue * b
     }
     NIXC_CATCH_ERRS_NULL
 }
+
+} // extern "C"

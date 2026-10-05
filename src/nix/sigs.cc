@@ -3,6 +3,7 @@
 #include "nix/main/shared.hh"
 #include "nix/store/store-open.hh"
 #include "nix/util/thread-pool.hh"
+#include "nix/store/filetransfer.hh"
 
 #include <atomic>
 
@@ -10,7 +11,7 @@ using namespace nix;
 
 struct CmdCopySigs : StorePathsCommand
 {
-    Strings substituterUris;
+    std::vector<StoreReference> substituterUris;
 
     CmdCopySigs()
     {
@@ -19,13 +20,20 @@ struct CmdCopySigs : StorePathsCommand
             .shortName = 's',
             .description = "Copy signatures from the specified store.",
             .labels = {"store-uri"},
-            .handler = {[&](std::string s) { substituterUris.push_back(s); }},
+            .handler = {[&](std::string s) { substituterUris.push_back(StoreReference::parse(s)); }},
         });
     }
 
     std::string description() override
     {
         return "copy store path signatures from substituters";
+    }
+
+    std::string doc() override
+    {
+        return
+#include "store-copy-sigs.md"
+            ;
     }
 
     void run(ref<Store> store, StorePaths && storePaths) override
@@ -36,24 +44,22 @@ struct CmdCopySigs : StorePathsCommand
         // FIXME: factor out commonality with MixVerify.
         std::vector<ref<Store>> substituters;
         for (auto & s : substituterUris)
-            substituters.push_back(openStore(s));
+            substituters.push_back(openStore(StoreReference{s}));
 
-        ThreadPool pool;
+        ThreadPool pool{fileTransferSettings.httpConnections};
 
         std::atomic<size_t> added{0};
 
         // logger->setExpected(doneLabel, storePaths.size());
 
-        auto doPath = [&](const Path & storePathS) {
+        auto doPath = [&](const StorePath & storePath) {
             // Activity act(*logger, lvlInfo, "getting signatures for '%s'", storePath);
 
             checkInterrupt();
 
-            auto storePath = store->parseStorePath(storePathS);
-
             auto info = store->queryPathInfo(storePath);
 
-            StringSet newSigs;
+            std::set<Signature> newSigs;
 
             for (auto & store2 : substituters) {
                 try {
@@ -81,7 +87,7 @@ struct CmdCopySigs : StorePathsCommand
         };
 
         for (auto & storePath : storePaths)
-            pool.enqueue(std::bind(doPath, store->printStorePath(storePath)));
+            pool.enqueue(std::bind(doPath, storePath));
 
         pool.process();
 
@@ -93,7 +99,7 @@ static auto rCmdCopySigs = registerCommand2<CmdCopySigs>({"store", "copy-sigs"})
 
 struct CmdSign : StorePathsCommand
 {
-    Path secretKeyFile;
+    std::filesystem::path secretKeyFile;
 
     CmdSign()
     {
@@ -104,6 +110,7 @@ struct CmdSign : StorePathsCommand
             .labels = {"file"},
             .handler = {&secretKeyFile},
             .completer = completePath,
+            .required = true,
         });
     }
 
@@ -114,9 +121,6 @@ struct CmdSign : StorePathsCommand
 
     void run(ref<Store> store, StorePaths && storePaths) override
     {
-        if (secretKeyFile.empty())
-            throw UsageError("you must specify a secret key file using '-k'");
-
         SecretKey secretKey(readFile(secretKeyFile));
         LocalSigner signer(std::move(secretKey));
 
@@ -144,7 +148,7 @@ static auto rCmdSign = registerCommand2<CmdSign>({"store", "sign"});
 
 struct CmdKeyGenerateSecret : Command
 {
-    std::optional<std::string> keyName;
+    std::string keyName;
 
     CmdKeyGenerateSecret()
     {
@@ -153,6 +157,7 @@ struct CmdKeyGenerateSecret : Command
             .description = "Identifier of the key (e.g. `cache.example.org-1`).",
             .labels = {"name"},
             .handler = {&keyName},
+            .required = true,
         });
     }
 
@@ -170,11 +175,8 @@ struct CmdKeyGenerateSecret : Command
 
     void run() override
     {
-        if (!keyName)
-            throw UsageError("required argument '--key-name' is missing");
-
         logger->stop();
-        writeFull(getStandardOutput(), SecretKey::generate(*keyName).to_string());
+        writeFull(getStandardOutput(), SecretKey::generate(keyName).to_string());
     }
 };
 

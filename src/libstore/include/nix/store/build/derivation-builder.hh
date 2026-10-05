@@ -1,26 +1,54 @@
 #pragma once
 ///@file
 
+#include <filesystem>
+#include <nlohmann/json_fwd.hpp>
+
 #include "nix/store/build-result.hh"
 #include "nix/store/derivation-options.hh"
 #include "nix/store/build/derivation-building-misc.hh"
 #include "nix/store/derivations.hh"
 #include "nix/store/parsed-derivations.hh"
 #include "nix/util/processes.hh"
+#include "nix/util/json-impls.hh"
 #include "nix/store/restricted-store.hh"
+#include "nix/store/build/derivation-env-desugar.hh"
 
 namespace nix {
+
+/**
+ * Denotes a build failure that stemmed from the builder exiting with a
+ * failing exist status.
+ */
+struct BuilderFailureError final : CloneableError<BuilderFailureError, BuildError>
+{
+    int builderStatus;
+
+    std::string extraMsgAfter;
+
+    BuilderFailureError(BuildResult::Failure::Status status, int builderStatus, std::string extraMsgAfter)
+        : CloneableError{
+            status,
+              /* No message for now, because the caller will make for
+                 us, with extra context */
+              "",
+          }
+        , builderStatus{std::move(builderStatus)}
+        , extraMsgAfter{std::move(extraMsgAfter)}
+    {
+    }
+};
 
 /**
  * Stuff we need to pass to initChild().
  */
 struct ChrootPath
 {
-    Path source;
+    std::filesystem::path source;
     bool optional = false;
 };
 
-typedef std::map<Path, ChrootPath> PathsInChroot; // maps target path to source path
+typedef std::map<std::filesystem::path, ChrootPath> PathsInChroot; // maps target path to source path
 
 /**
  * Parameters by (mostly) `const` reference for `DerivationBuilder`.
@@ -35,14 +63,14 @@ struct DerivationBuilderParams
     /**
      * The derivation stored at drvPath.
      */
-    const Derivation & drv;
+    const BasicDerivation & drv;
 
     /**
      * The derivation options of `drv`.
      *
      * @todo this should be part of `Derivation`.
      */
-    const DerivationOptions & drvOptions;
+    const DerivationOptions<StorePath> & drvOptions;
 
     // The remainder is state held during the build.
 
@@ -52,10 +80,7 @@ struct DerivationBuilderParams
      */
     const StorePathSet & inputPaths;
 
-    /**
-     * @note we do in fact mutate this
-     */
-    std::map<std::string, InitialOutput> & initialOutputs;
+    const std::map<std::string, InitialOutput> initialOutputs;
 
     const BuildMode & buildMode;
 
@@ -65,60 +90,15 @@ struct DerivationBuilderParams
      */
     PathsInChroot defaultPathsInChroot;
 
-    struct EnvEntry
-    {
-        /**
-         * Actually, this should be passed as a file, but with a custom
-         * name (rather than hash-derived name for usual "pass as file").
-         */
-        std::optional<std::string> nameOfPassAsFile;
-
-        /**
-         * String value of env var, or contents of the file
-         */
-        std::string value;
-    };
-
     /**
-     * The final environment variables to additionally set, possibly
-     * indirectly via a file.
+     * May be used to control various platform-specific functionality.
      *
-     * This is used by the caller to desugar the "structured attrs"
-     * mechanism, so `DerivationBuilder` doesn't need to know about it.
+     * For example, on Linux, the `kvm` system feature controls whether
+     * `/dev/kvm` should be exposed to the builder within the sandbox.
      */
-    std::map<std::string, EnvEntry, std::less<>> finalEnv;
+    StringSet systemFeatures;
 
-    /**
-     * Inserted in the temp dir, but no file names placed in env, unlike
-     * `EnvEntry::nameOfPassAsFile` above.
-     */
-    StringMap extraFiles;
-
-    DerivationBuilderParams(
-        const StorePath & drvPath,
-        const BuildMode & buildMode,
-        BuildResult & buildResult,
-        const Derivation & drv,
-        const DerivationOptions & drvOptions,
-        const StorePathSet & inputPaths,
-        std::map<std::string, InitialOutput> & initialOutputs,
-        PathsInChroot defaultPathsInChroot,
-        std::map<std::string, EnvEntry, std::less<>> finalEnv,
-        StringMap extraFiles)
-        : drvPath{drvPath}
-        , buildResult{buildResult}
-        , drv{drv}
-        , drvOptions{drvOptions}
-        , inputPaths{inputPaths}
-        , initialOutputs{initialOutputs}
-        , buildMode{buildMode}
-        , defaultPathsInChroot{std::move(defaultPathsInChroot)}
-        , finalEnv{std::move(finalEnv)}
-        , extraFiles{std::move(extraFiles)}
-    {
-    }
-
-    DerivationBuilderParams(DerivationBuilderParams &&) = default;
+    DesugaredEnv desugaredEnv;
 };
 
 /**
@@ -131,31 +111,17 @@ struct DerivationBuilderCallbacks
     /**
      * Open a log file and a pipe to it.
      */
-    virtual Path openLogFile() = 0;
+    virtual void openLogFile() = 0;
 
     /**
      * Close the log file.
      */
     virtual void closeLogFile() = 0;
 
-    virtual void appendLogTailErrorMsg(std::string & msg) = 0;
-
-    /**
-     * Hook up `builderOut` to some mechanism to ingest the log
-     *
-     * @todo this should be reworked
-     */
-    virtual void childStarted(Descriptor builderOut) = 0;
-
     /**
      * @todo this should be reworked
      */
     virtual void childTerminated() = 0;
-
-    virtual void noteHashMismatch(void) = 0;
-    virtual void noteCheckMismatch(void) = 0;
-
-    virtual void markContentsGood(const StorePath & path) = 0;
 };
 
 /**
@@ -171,11 +137,6 @@ struct DerivationBuilderCallbacks
  */
 struct DerivationBuilder : RestrictionContext
 {
-    /**
-     * The process ID of the builder.
-     */
-    Pid pid;
-
     DerivationBuilder() = default;
     virtual ~DerivationBuilder() = default;
 
@@ -190,15 +151,15 @@ struct DerivationBuilder : RestrictionContext
      * locks as needed). After this is run, the builder should be
      * started.
      *
-     * @returns true if successful, false if we could not acquire a build
-     * user. In that case, the caller must wait and then try again.
+     * @returns logging pipe if successful, `std::nullopt` if we could
+     * not acquire a build user. In that case, the caller must wait and
+     * then try again.
+     *
+     * @note "success" just means that we were able to set up the environment
+     * and start the build. The builder could have immediately exited with
+     * failure, and that would still be considered a successful start.
      */
-    virtual bool prepareBuild() = 0;
-
-    /**
-     * Start building a derivation.
-     */
-    virtual void startBuilder() = 0;
+    virtual std::optional<Descriptor> startBuild() = 0;
 
     /**
      * Tear down build environment after the builder exits (either on
@@ -208,30 +169,62 @@ struct DerivationBuilder : RestrictionContext
      * processing. A status code and exception are returned, providing
      * more information. The second case indicates success, and
      * realisations for each output of the derivation are returned.
+     *
+     * @throws BuildError
      */
-    virtual std::variant<std::pair<BuildResult::Status, Error>, SingleDrvOutputs> unprepareBuild() = 0;
+    virtual SingleDrvOutputs unprepareBuild() = 0;
 
     /**
-     * Stop the in-process nix daemon thread.
-     * @see startDaemon
+     * Forcibly kill the child process, if any.
+     *
+     * @returns whether the child was still alive and needed to be
+     * killed.
      */
-    virtual void stopDaemon() = 0;
-
-    /**
-     * Delete the temporary directory, if we have one.
-     */
-    virtual void deleteTmpDir(bool force) = 0;
-
-    /**
-     * Kill any processes running under the build user UID or in the
-     * cgroup of the build.
-     */
-    virtual void killSandbox(bool getStats) = 0;
+    virtual bool killChild() = 0;
 };
 
+/**
+ * Run a callback that may change process credentials (setuid, setgid, etc.)
+ * while preserving the parent-death signal.
+ *
+ * The parent-death signal setting is cleared by the Linux kernel upon changes
+ * to EUID, EGID.
+ *
+ * @note Does nothing on non-Linux systems.
+ * @see man PR_SET_PDEATHSIG
+ * @see https://github.com/golang/go/issues/9686
+ */
+void preserveDeathSignal(fun<void()> setCredentials);
+
+struct ExternalBuilder
+{
+    StringSet systems;
+    std::filesystem::path program;
+    std::vector<std::string> args;
+};
+
+struct DerivationBuilderDeleter
+{
+    void operator()(DerivationBuilder * builder) noexcept;
+};
+
+using DerivationBuilderUnique = std::unique_ptr<DerivationBuilder, DerivationBuilderDeleter>;
+
 #ifndef _WIN32 // TODO enable `DerivationBuilder` on Windows
-std::unique_ptr<DerivationBuilder> makeDerivationBuilder(
+DerivationBuilderUnique makeDerivationBuilder(
     LocalStore & store, std::unique_ptr<DerivationBuilderCallbacks> miscMethods, DerivationBuilderParams params);
+
+/**
+ * @param handler Must be chosen such that it supports the given
+ * derivation.
+ */
+DerivationBuilderUnique makeExternalDerivationBuilder(
+    LocalStore & store,
+    std::unique_ptr<DerivationBuilderCallbacks> miscMethods,
+    DerivationBuilderParams params,
+    const ExternalBuilder & handler);
 #endif
 
 } // namespace nix
+
+JSON_IMPL(nix::ExternalBuilder)

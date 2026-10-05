@@ -1,5 +1,4 @@
 #include <limits>
-#include <unordered_set>
 #include <sstream>
 
 #include "nix/expr/print.hh"
@@ -9,6 +8,8 @@
 #include "nix/util/terminal.hh"
 #include "nix/util/english.hh"
 #include "nix/expr/eval.hh"
+
+#include <boost/unordered/unordered_flat_set.hpp>
 
 namespace nix {
 
@@ -81,7 +82,7 @@ std::ostream & printLiteralBool(std::ostream & str, bool boolean)
 // For example `or' doesn't need to be quoted.
 bool isReservedKeyword(const std::string_view str)
 {
-    static const std::unordered_set<std::string_view> reservedKeywords = {
+    static const boost::unordered_flat_set<std::string_view> reservedKeywords = {
         "if", "then", "else", "assert", "with", "let", "in", "rec", "inherit"};
     return reservedKeywords.contains(str);
 }
@@ -272,7 +273,7 @@ private:
     void printDerivation(Value & v)
     {
         std::optional<StorePath> storePath;
-        if (auto i = v.attrs()->get(state.sDrvPath)) {
+        if (auto i = v.attrs()->get(state.s.drvPath)) {
             NixStringContext context;
             storePath =
                 state.coerceToStorePath(i->pos, *i->value, context, "while evaluating the drvPath of a derivation");
@@ -460,7 +461,7 @@ private:
 
                 std::ostringstream s;
                 s << state.positions[v.lambda().fun->pos];
-                output << " @ " << filterANSIEscapes(toView(s));
+                output << " @ " << filterANSIEscapes(s.view());
             }
         } else if (v.isPrimOp()) {
             if (v.primOp())
@@ -508,6 +509,17 @@ private:
         }
     }
 
+    void printFailed()
+    {
+        if (options.ansiColors)
+            output << ANSI_MAGENTA;
+        // Historically, a tried and then ignored value (e.g. through tryEval) was
+        // reverted to the original thunk.
+        output << "«thunk»";
+        if (options.ansiColors)
+            output << ANSI_NORMAL;
+    }
+
     void printExternal(Value & v)
     {
         v.external()->print(output);
@@ -535,6 +547,16 @@ private:
     {
         output.flush();
         checkInterrupt();
+
+        // Catch infinite recursion before it overflows the C++ stack.
+        // Non-cyclic structures can be infinitely deep when values are
+        // lazily produced (e.g., `let f = n: { inner = f (n + 1); }; in f 0`).
+        // We check print depth against max-call-depth rather than incrementing
+        // the callDepth counter, because accessing an attribute is not a call.
+        // Other places do increment callDepth for simplicity, but that is
+        // technically incorrect.
+        if (depth > state.settings.maxCallDepth)
+            state.error<StackOverflowError>().atPos(v.determinePos(noPos)).debugThrow();
 
         try {
             if (options.force) {
@@ -579,6 +601,10 @@ private:
                 printFunction(v);
                 break;
 
+            case nFailed:
+                printFailed();
+                break;
+
             case nThunk:
                 printThunk(v);
                 break;
@@ -591,6 +617,11 @@ private:
                 printUnknown();
                 break;
             }
+        } catch (StackOverflowError &) {
+            // Always re-throw because stack overflow is a serious condition
+            // that expressions should avoid, unlike say `throw`, which can
+            // be part of legitimate expression patterns.
+            throw;
         } catch (Error & e) {
             if (options.errors == ErrorPrintBehavior::Throw
                 || (options.errors == ErrorPrintBehavior::ThrowTopLevel && depth == 0)) {

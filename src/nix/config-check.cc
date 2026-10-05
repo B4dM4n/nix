@@ -11,10 +11,6 @@
 #include "nix/util/executable-path.hh"
 #include "nix/store/globals.hh"
 
-namespace nix::fs {
-using namespace std::filesystem;
-}
-
 using namespace nix;
 
 namespace {
@@ -22,9 +18,8 @@ namespace {
 std::string formatProtocol(unsigned int proto)
 {
     if (proto) {
-        auto major = GET_PROTOCOL_MAJOR(proto) >> 8;
-        auto minor = GET_PROTOCOL_MINOR(proto);
-        return fmt("%1%.%2%", major, minor);
+        auto version = WorkerProto::Version::Number::fromWire(proto);
+        return fmt("%1%.%2%", version.major, version.minor);
     }
     return "unknown";
 }
@@ -95,12 +90,14 @@ struct CmdConfigCheck : StoreCommand
                 dirs.insert(std::filesystem::canonical(candidate).parent_path());
         }
 
-        if (dirs.size() != 1) {
+        if (dirs.empty()) {
+            return checkFail("No nix-env found in PATH.");
+        } else if (dirs.size() > 1) {
             std::ostringstream ss;
             ss << "Multiple versions of nix found in PATH:\n";
             for (auto & dir : dirs)
                 ss << "  " << dir << "\n";
-            return checkFail(toView(ss));
+            return checkFail(ss.view());
         }
 
         return checkPass("PATH contains only one nix version.");
@@ -143,7 +140,7 @@ struct CmdConfigCheck : StoreCommand
             for (auto & dir : dirs)
                 ss << "  " << dir << "\n";
             ss << "\n";
-            return checkFail(toView(ss));
+            return checkFail(ss.view());
         }
 
         return checkPass("All profiles are gcroots.");
@@ -151,9 +148,10 @@ struct CmdConfigCheck : StoreCommand
 
     bool checkStoreProtocol(unsigned int storeProto)
     {
-        unsigned int clientProto = GET_PROTOCOL_MAJOR(SERVE_PROTOCOL_VERSION) == GET_PROTOCOL_MAJOR(storeProto)
-                                       ? SERVE_PROTOCOL_VERSION
-                                       : PROTOCOL_VERSION;
+        auto storeVersion = WorkerProto::Version::Number::fromWire(storeProto);
+        unsigned int clientProto = (storeVersion.major == ServeProto::latest.major)
+                                       ? ServeProto::latest.toWire()
+                                       : WorkerProto::latest.number.toWire();
 
         if (clientProto != storeProto) {
             std::ostringstream ss;
@@ -162,7 +160,7 @@ struct CmdConfigCheck : StoreCommand
                << "sync with the daemon.\n\n"
                << "Client protocol: " << formatProtocol(clientProto) << "\n"
                << "Store protocol: " << formatProtocol(storeProto) << "\n\n";
-            return checkFail(toView(ss));
+            return checkFail(ss.view());
         }
 
         return checkPass("Client protocol matches store protocol.");

@@ -113,6 +113,7 @@ nix_sources = [ config_priv_h ] + files(
 if host_machine.system() != 'windows'
   nix_sources += files(
     'unix/daemon.cc',
+    'unix/store-roots-daemon.cc',
   )
 endif
 
@@ -229,6 +230,7 @@ foreach linkname : nix_symlinks
     env : {'MSYS' : 'winsymlinks:lnk'},
     # TODO(Ericson2314): Don't do this once we have the `meson.override_find_program` working)
     build_by_default : true,
+    depends : this_exe,
   )
   # TODO(Ericson3214): Doesn't yet work
   #meson.override_find_program(linkname, t)
@@ -250,6 +252,7 @@ custom_target(
   env : {'MSYS' : 'winsymlinks:lnk'},
   # TODO(Ericson2314): Don't do this once we have the `meson.override_find_program` working)
   build_by_default : true,
+  depends : this_exe,
 )
 # TODO(Ericson3214): Doesn't yet work
 #meson.override_find_program(linkname, t)

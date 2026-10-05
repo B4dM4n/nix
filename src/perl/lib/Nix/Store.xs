@@ -11,6 +11,7 @@
 #include "nix/store/globals.hh"
 #include "nix/store/store-open.hh"
 #include "nix/util/posix-source-accessor.hh"
+#include "nix/store/export-import.hh"
 
 #include <sodium.h>
 #include <nlohmann/json.hpp>
@@ -155,7 +156,7 @@ StoreWrapper::queryPathInfo(char * path, int base32)
             XPUSHs(sv_2mortal(newRV((SV *) refs)));
             AV * sigs = newAV();
             for (auto & i : info->sigs)
-                av_push(sigs, newSVpv(i.c_str(), 0));
+                av_push(sigs, newSVpv(i.to_string().c_str(), 0));
             XPUSHs(sv_2mortal(newRV((SV *) sigs)));
         } catch (Error & e) {
             croak("%s", e.what());
@@ -167,7 +168,7 @@ StoreWrapper::queryRawRealisation(char * outputId)
       try {
         auto realisation = THIS->store->queryRealisation(DrvOutput::parse(outputId));
         if (realisation)
-            XPUSHs(sv_2mortal(newSVpv(realisation->toJSON().dump().c_str(), 0)));
+            XPUSHs(sv_2mortal(newSVpv(static_cast<nlohmann::json>(*realisation).dump().c_str(), 0)));
         else
             XPUSHs(sv_2mortal(newSVpv("", 0)));
       } catch (Error & e) {
@@ -233,7 +234,7 @@ StoreWrapper::exportPaths(int fd, ...)
             StorePathSet paths;
             for (int n = 2; n < items; ++n) paths.insert(THIS->store->parseStorePath(SvPV_nolen(ST(n))));
             FdSink sink(fd);
-            THIS->store->exportPaths(paths, sink);
+            exportPaths(*THIS->store, paths, sink);
         } catch (Error & e) {
             croak("%s", e.what());
         }
@@ -244,7 +245,7 @@ StoreWrapper::importPaths(int fd, int dontCheckSigs)
     PPCODE:
         try {
             FdSource source(fd);
-            THIS->store->importPaths(source, dontCheckSigs ? NoCheckSigs : CheckSigs);
+            importPaths(*THIS->store, source, dontCheckSigs ? NoCheckSigs : CheckSigs);
         } catch (Error & e) {
             croak("%s", e.what());
         }
@@ -300,7 +301,7 @@ SV * convertHash(char * algo, char * s, int toBase32)
 SV * signString(char * secretKey_, char * msg)
     PPCODE:
         try {
-            auto sig = SecretKey(secretKey_).signDetached(msg);
+            auto sig = SecretKey(secretKey_).signDetached(msg).to_string();
             XPUSHs(sv_2mortal(newSVpv(sig.c_str(), sig.size())));
         } catch (Error & e) {
             croak("%s", e.what());
@@ -423,4 +424,4 @@ StoreWrapper::addTempRoot(char * storePath)
 
 SV * getStoreDir()
     PPCODE:
-        XPUSHs(sv_2mortal(newSVpv(settings.nixStore.c_str(), 0)));
+        XPUSHs(sv_2mortal(newSVpv(resolveStoreConfig(StoreReference{settings.storeUri.get()})->storeDir.c_str(), 0)));

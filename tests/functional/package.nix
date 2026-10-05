@@ -10,8 +10,8 @@
   jq,
   git,
   mercurial,
-  util-linux,
   unixtools,
+  util-linux,
 
   nix-store,
   nix-expr,
@@ -46,8 +46,7 @@ mkMesonDerivation (
       ./.
     ];
 
-    # Hack for sake of the dev shell
-    passthru.externalNativeBuildInputs = [
+    nativeBuildInputs = [
       meson
       ninja
       pkg-config
@@ -56,6 +55,11 @@ mkMesonDerivation (
       git
       mercurial
       unixtools.script
+
+      # Explicitly splice the hostHost variant to fix LLVM tests. The nix-cli
+      # has to be in PATH, but must come from the host context where it's built
+      # with libc++.
+      (nix-cli.__spliced.hostHost or nix-cli)
     ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       # For various sandboxing tests that needs a statically-linked shell,
@@ -65,10 +69,6 @@ mkMesonDerivation (
       # For `script` command (ensuring a TTY)
       # TODO use `unixtools` to be precise over which executables instead?
       util-linux
-    ];
-
-    nativeBuildInputs = finalAttrs.passthru.externalNativeBuildInputs ++ [
-      nix-cli
     ];
 
     buildInputs = [

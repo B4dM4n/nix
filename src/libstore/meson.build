@@ -39,35 +39,37 @@ deps_public_maybe_subproject = [
 ]
 subdir('nix-meson-build-support/subprojects')
 
-run_command(
-  'ln',
-  '-s',
-  meson.project_build_root() / '__nothing_link_target',
-  meson.project_build_root() / '__nothing_symlink',
-  # native doesn't allow dangling symlinks, which the tests require
-  env : {'MSYS' : 'winsymlinks:lnk'},
-  check : true,
-)
-can_link_symlink = run_command(
-  'ln',
-  meson.project_build_root() / '__nothing_symlink',
-  meson.project_build_root() / '__nothing_hardlink',
-  check : false,
-).returncode() == 0
-run_command(
-  'rm',
-  '-f',
-  meson.project_build_root() / '__nothing_symlink',
-  meson.project_build_root() / '__nothing_hardlink',
-  check : true,
-)
+can_link_symlink = false
+native_ln = find_program('ln', required : false, native : true)
+if native_ln.found()
+  run_command(
+    native_ln,
+    '-s',
+    meson.project_build_root() / '__nothing_link_target',
+    meson.project_build_root() / '__nothing_symlink',
+    # native doesn't allow dangling symlinks, which the tests require
+    env : {'MSYS' : 'winsymlinks:lnk'},
+    check : true,
+  )
+  can_link_symlink = run_command(
+    native_ln,
+    meson.project_build_root() / '__nothing_symlink',
+    meson.project_build_root() / '__nothing_hardlink',
+    check : false,
+  ).returncode() == 0
+  run_command(
+    'rm',
+    '-f',
+    meson.project_build_root() / '__nothing_symlink',
+    meson.project_build_root() / '__nothing_hardlink',
+    check : true,
+  )
+endif
 summary('can hardlink to symlink', can_link_symlink, bool_yn : true)
 configdata_priv.set('CAN_LINK_SYMLINK', can_link_symlink.to_int())
 
-# Check for each of these functions, and create a define like `#define HAVE_LCHOWN 1`.
+# Check for each of these functions, and create a define like `#define HAVE_POSIX_FALLOCATE 1`.
 check_funcs = [
-  # Optionally used for canonicalising files from the build
-  'lchown',
   'posix_fallocate',
   'statvfs',
 ]
@@ -101,14 +103,23 @@ subdir('nix-meson-build-support/libatomic')
 
 boost = dependency(
   'boost',
-  modules : [ 'container', 'regex' ],
+  modules : [
+    'container',
+    # Shouldn't list, because can header-only, and Meson currently looks for libs
+    #'regex',
+    'url',
+  ],
   include_type : 'system',
 )
 # boost is a public dependency, but not a pkg-config dependency unfortunately, so we
 # put in `deps_other`.
 deps_other += boost
 
-curl = dependency('libcurl', 'curl')
+# This is quite new, but curl has a bunch of known issues with write pausing and decompression.
+# Please use libcurl >= 8.17. See https://github.com/curl/curl/issues/19334, https://github.com/curl/curl/issues/16280, https://github.com/curl/curl/issues/16955 if in doubt.
+# Patch out this check at your own risk.
+curl = dependency('libcurl', 'curl', version : '>= 8.17.0')
+
 deps_private += curl
 
 # seccomp only makes sense on Linux
@@ -137,27 +148,19 @@ deps_public += nlohmann_json
 sqlite = dependency('sqlite3', 'sqlite', version : '>=3.6.19')
 deps_private += sqlite
 
-# AWS C++ SDK has bad pkg-config. See
-# https://github.com/aws/aws-sdk-cpp/issues/2673 for details.
-aws_s3 = dependency('aws-cpp-sdk-s3', required : false)
-# The S3 store definitions in the header will be hidden based on this variables.
-configdata_pub.set('NIX_WITH_S3_SUPPORT', aws_s3.found().to_int())
-if aws_s3.found()
-  aws_s3 = declare_dependency(
-    include_directories : include_directories(aws_s3.get_variable('includedir')),
-    link_args : [
-      '-L' + aws_s3.get_variable('libdir'),
-      '-laws-cpp-sdk-transfer',
-      '-laws-cpp-sdk-s3',
-      '-laws-cpp-sdk-identity-management',
-      '-laws-cpp-sdk-cognito-identity',
-      '-laws-cpp-sdk-sts',
-      '-laws-cpp-sdk-core',
-      '-laws-crt-cpp',
-    ],
-  ).as_system('system')
+s3_aws_auth = get_option('s3-aws-auth')
+aws_crt_cpp = dependency(
+  'aws-crt-cpp',
+  required : s3_aws_auth,
+  method : 'cmake',
+  modules : [ 'AWS::aws-crt-cpp' ],
+)
+
+if s3_aws_auth.enabled()
+  deps_other += aws_crt_cpp
 endif
-deps_other += aws_s3
+
+configdata_pub.set('NIX_WITH_AWS_AUTH', s3_aws_auth.enabled().to_int())
 
 subdir('nix-meson-build-support/generate-header')
 
@@ -202,7 +205,6 @@ prefix = get_option('prefix')
 # it is already an absolute path (which is the default for store-dir, localstatedir, and log-dir).
 path_opts = [
   # Meson built-ins.
-  'datadir',
   'mandir',
   'libdir',
   'includedir',
@@ -230,20 +232,24 @@ endforeach
 
 # sysconfdir doesn't get anything installed to directly, and is only used to
 # tell Nix where to look for nix.conf, so it doesn't get appended to prefix.
-sysconfdir = get_option('sysconfdir')
-if not fs.is_absolute(sysconfdir)
-  sysconfdir = '/' / sysconfdir
+if host_machine.system() != 'windows'
+  sysconfdir = get_option('sysconfdir')
+  if not fs.is_absolute(sysconfdir)
+    sysconfdir = '/' / sysconfdir
+  endif
 endif
 
 # Aside from prefix itself, each of these was made into an absolute path
 # by joining it with prefix, unless it was already an absolute path
 # (which is the default for store-dir, localstatedir, and log-dir).
-configdata_priv.set_quoted('NIX_PREFIX', prefix)
 configdata_priv.set_quoted('NIX_STORE_DIR', store_dir)
-configdata_priv.set_quoted('NIX_DATA_DIR', datadir)
 configdata_priv.set_quoted('NIX_STATE_DIR', localstatedir / 'nix')
 configdata_priv.set_quoted('NIX_LOG_DIR', log_dir)
-configdata_priv.set_quoted('NIX_CONF_DIR', sysconfdir / 'nix')
+# On Windows, NIX_CONF_DIR is determined at runtime using the Windows known
+# folders API (FOLDERID_ProgramData), so we don't define it at compile time.
+if host_machine.system() != 'windows'
+  configdata_priv.set_quoted('NIX_CONF_DIR', sysconfdir / 'nix')
+endif
 configdata_priv.set_quoted('NIX_MAN_DIR', mandir)
 
 lsof = find_program('lsof', required : false)
@@ -264,8 +270,13 @@ subdir('nix-meson-build-support/common')
 sources = files(
   'binary-cache-store.cc',
   'build-result.cc',
+  'build/build-log.cc',
+  'build/derivation-builder.cc',
   'build/derivation-building-goal.cc',
+  'build/derivation-check.cc',
+  'build/derivation-env-desugar.cc',
   'build/derivation-goal.cc',
+  'build/derivation-resolution-goal.cc',
   'build/derivation-trampoline-goal.cc',
   'build/drv-output-substitution-goal.cc',
   'build/entry-points.cc',
@@ -295,6 +306,7 @@ sources = files(
   'legacy-ssh-store.cc',
   'local-binary-cache-store.cc',
   'local-fs-store.cc',
+  'local-gc.cc',
   'local-overlay-store.cc',
   'local-store.cc',
   'log-store.cc',
@@ -302,7 +314,6 @@ sources = files(
   'make-content-addressed.cc',
   'misc.cc',
   'names.cc',
-  'nar-accessor.cc',
   'nar-info-disk-cache.cc',
   'nar-info.cc',
   'optimise-store.cc',
@@ -321,7 +332,7 @@ sources = files(
   'remote-store.cc',
   'restricted-store.cc',
   's3-binary-cache-store.cc',
-  's3.cc',
+  's3-url.cc',
   'serve-protocol-connection.cc',
   'serve-protocol.cc',
   'sqlite.cc',
@@ -335,6 +346,11 @@ sources = files(
   'worker-protocol-connection.cc',
   'worker-protocol.cc',
 )
+
+# AWS credentials code requires AWS CRT, so only compile when enabled
+if s3_aws_auth.enabled()
+  sources += files('aws-creds.cc')
+endif
 
 subdir('include/nix/store')
 
@@ -356,6 +372,7 @@ this_library = library(
   generated_headers,
   sources,
   config_priv_h,
+  soversion : nix_soversion,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
   link_args : linker_export_flags,

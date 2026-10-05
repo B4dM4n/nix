@@ -74,6 +74,7 @@ sources = files(
   'command.cc',
   'common-eval-args.cc',
   'editor-for.cc',
+  'get-build-log.cc',
   'installable-attr-path.cc',
   'installable-derived-path.cc',
   'installable-flake.cc',
@@ -86,6 +87,12 @@ sources = files(
   'repl.cc',
 )
 
+if host_machine.system() != 'windows'
+  sources += files(
+    'unix/unix-socket-server.cc',
+  )
+endif
+
 subdir('include/nix/cmd')
 
 subdir('nix-meson-build-support/export-all-symbols')
@@ -95,6 +102,7 @@ this_library = library(
   'nixcmd',
   sources,
   config_priv_h,
+  soversion : nix_soversion,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
   link_args : linker_export_flags,

@@ -7,7 +7,7 @@ TODO_NixOS
 requireGit
 
 clearStore
-rm -rf $TEST_HOME/.cache $TEST_HOME/.config
+rm -rf "$TEST_HOME"/.cache "$TEST_HOME"/.config
 
 createFlake1
 createFlake2
@@ -59,7 +59,7 @@ nix flake metadata flake1
 nix flake metadata flake1 | grepQuiet 'Locked URL:.*flake1.*'
 
 # Test 'nix flake metadata' on a chroot store.
-nix flake metadata --store $TEST_ROOT/chroot-store flake1
+nix flake metadata --store "$TEST_ROOT"/chroot-store flake1
 
 # Test 'nix flake metadata' on a local flake.
 (cd "$flake1Dir" && nix flake metadata) | grepQuiet 'URL:.*flake1.*'
@@ -75,17 +75,18 @@ hash1=$(echo "$json" | jq -r .revision)
 [[ -n $(echo "$json" | jq -r .fingerprint) ]]
 
 echo foo > "$flake1Dir/foo"
-git -C "$flake1Dir" add $flake1Dir/foo
+git -C "$flake1Dir" add "$flake1Dir"/foo
 [[ $(nix flake metadata flake1 --json --refresh | jq -r .dirtyRevision) == "$hash1-dirty" ]]
 [[ "$(nix flake metadata flake1 --json | jq -r .fingerprint)" != null ]]
 
 echo -n '# foo' >> "$flake1Dir/flake.nix"
 flake1OriginalCommit=$(git -C "$flake1Dir" rev-parse HEAD)
 git -C "$flake1Dir" commit -a -m 'Foo'
+# shellcheck disable=SC2034
 flake1NewCommit=$(git -C "$flake1Dir" rev-parse HEAD)
 hash2=$(nix flake metadata flake1 --json --refresh | jq -r .revision)
 [[ $(nix flake metadata flake1 --json --refresh | jq -r .dirtyRevision) == "null" ]]
-[[ $hash1 != $hash2 ]]
+[[ $hash1 != "$hash2" ]]
 
 # Test 'nix build' on a flake.
 nix build -o "$TEST_ROOT/result" flake1#foo
@@ -204,8 +205,8 @@ git -C "$flake3Dir" add flake.nix
 git -C "$flake3Dir" commit -m 'Update flake.nix'
 
 # Check whether `nix build` works with an incomplete lockfile
-nix build -o $TEST_ROOT/result "$flake3Dir#sth sth"
-nix build -o $TEST_ROOT/result "$flake3Dir#sth%20sth"
+nix build -o "$TEST_ROOT"/result "$flake3Dir#sth sth"
+nix build -o "$TEST_ROOT"/result "$flake3Dir#sth%20sth"
 
 # Check whether it saved the lockfile
 [[ -n $(git -C "$flake3Dir" diff master) ]]
@@ -220,6 +221,12 @@ mv "$registry" "$registry.tmp"
 nix store gc
 nix registry list --flake-registry "file://$registry" --refresh | grepQuiet flake3
 mv "$registry.tmp" "$registry"
+
+# A symlinked registry file should work even when the symlink target is
+# an absolute path. The source accessor needs to be rooted at `/` for this.
+ln -sfn "$registry" "$TEST_ROOT/registry-symlink.json"
+nix registry list --flake-registry "$TEST_ROOT/registry-symlink.json" | grepQuiet flake1
+rm "$TEST_ROOT/registry-symlink.json"
 
 # Ensure that locking ignores the user registry.
 mkdir -p "$TEST_HOME/.config/nix"
@@ -249,20 +256,22 @@ nix flake lock "$flake3Dir"
 [[ -z $(git -C "$flake3Dir" diff master || echo failed) ]]
 
 nix flake update --flake "$flake3Dir" --override-flake flake2 nixpkgs
-[[ ! -z $(git -C "$flake3Dir" diff master || echo failed) ]]
+[[ -n $(git -C "$flake3Dir" diff master || echo failed) ]]
 
-# Testing the nix CLI
+# Test `nix registry` commands.
 nix registry add flake1 flake3
 [[ $(nix registry list | wc -l) == 5 ]]
+[[ $(nix registry resolve flake1) = "git+file://$percentEncodedFlake3Dir" ]]
 nix registry pin flake1
 [[ $(nix registry list | wc -l) == 5 ]]
 nix registry pin flake1 flake3
 [[ $(nix registry list | wc -l) == 5 ]]
 nix registry remove flake1
 [[ $(nix registry list | wc -l) == 4 ]]
+[[ $(nix registry resolve flake1) = "git+file://$flake1Dir" ]]
 
 # Test 'nix registry list' with a disabled global registry.
-nix registry add user-flake1 git+file://$flake1Dir
+nix registry add user-flake1 git+file://"$flake1Dir"
 nix registry add user-flake2 "git+file://$percentEncodedFlake2Dir"
 [[ $(nix --flake-registry "" registry list | wc -l) == 2 ]]
 nix --flake-registry "" registry list | grepQuietInverse '^global' # nothing in global registry
@@ -273,9 +282,9 @@ nix registry remove user-flake2
 [[ $(nix registry list | wc -l) == 4 ]]
 
 # Test 'nix flake clone'.
-rm -rf $TEST_ROOT/flake1-v2
-nix flake clone flake1 --dest $TEST_ROOT/flake1-v2
-[ -e $TEST_ROOT/flake1-v2/flake.nix ]
+rm -rf "$TEST_ROOT"/flake1-v2
+nix flake clone flake1 --dest "$TEST_ROOT"/flake1-v2
+[ -e "$TEST_ROOT"/flake1-v2/flake.nix ]
 
 # Test 'follows' inputs.
 cat > "$flake3Dir/flake.nix" <<EOF
@@ -319,15 +328,15 @@ nix flake lock "$flake3Dir"
 [[ $(jq -c .nodes.root.inputs.bar "$flake3Dir/flake.lock") = '["flake2"]' ]]
 
 # Test overriding inputs of inputs.
-writeTrivialFlake $flake7Dir
-git -C $flake7Dir add flake.nix
-git -C $flake7Dir commit -m 'Initial'
+writeTrivialFlake "$flake7Dir"
+git -C "$flake7Dir" add flake.nix
+git -C "$flake7Dir" commit -m 'Initial'
 
 cat > "$flake3Dir/flake.nix" <<EOF
 {
   inputs.flake2.inputs.flake1 = {
     type = "git";
-    url = file://$flake7Dir;
+    url = "file://$flake7Dir";
   };
 
   outputs = { self, flake2 }: {
@@ -341,7 +350,7 @@ nix flake lock "$flake3Dir"
 cat > "$flake3Dir/flake.nix" <<EOF
 {
   inputs.flake2.inputs.flake1.follows = "foo";
-  inputs.foo.url = git+file://$flake7Dir;
+  inputs.foo.url = "git+file://$flake7Dir";
 
   outputs = { self, flake2 }: {
   };
@@ -349,54 +358,68 @@ cat > "$flake3Dir/flake.nix" <<EOF
 EOF
 
 nix flake update --flake "$flake3Dir"
+# shellcheck disable=SC2076
 [[ $(jq -c .nodes.flake2.inputs.flake1 "$flake3Dir/flake.lock") =~ '["foo"]' ]]
 [[ $(jq .nodes.foo.locked.url "$flake3Dir/flake.lock") =~ flake7 ]]
 
 # Test git+file with bare repo.
-rm -rf $flakeGitBare
-git clone --bare $flake1Dir $flakeGitBare
-nix build -o $TEST_ROOT/result git+file://$flakeGitBare
+rm -rf "$flakeGitBare"
+git clone --bare "$flake1Dir" "$flakeGitBare"
+nix build -o "$TEST_ROOT"/result git+file://"$flakeGitBare"
 
 # Test path flakes.
-mkdir -p $flake5Dir
-writeDependentFlake $flake5Dir
-nix flake lock path://$flake5Dir
+mkdir -p "$flake5Dir"
+writeDependentFlake "$flake5Dir"
+nix flake lock path://"$flake5Dir"
 
 # Test tarball flakes.
-tar cfz $TEST_ROOT/flake.tar.gz -C $TEST_ROOT flake5
+tar cfz "$TEST_ROOT"/flake.tar.gz -C "$TEST_ROOT" flake5
 
-nix build -o $TEST_ROOT/result file://$TEST_ROOT/flake.tar.gz
+nix build -o "$TEST_ROOT"/result file://"$TEST_ROOT"/flake.tar.gz
+
+nix flake clone "file://$TEST_ROOT/flake.tar.gz" --dest "$TEST_ROOT/unpacked"
+[[ -e $TEST_ROOT/unpacked/flake.nix ]]
+expectStderr 1 nix flake clone "file://$TEST_ROOT/flake.tar.gz" --dest "$TEST_ROOT/unpacked" | grep 'existing path'
 
 # Building with a tarball URL containing a SRI hash should also work.
-url=$(nix flake metadata --json file://$TEST_ROOT/flake.tar.gz | jq -r .url)
+url=$(nix flake metadata --json file://"$TEST_ROOT"/flake.tar.gz | jq -r .url)
 [[ $url =~ sha256- ]]
 
-nix build -o $TEST_ROOT/result $url
+nix build -o "$TEST_ROOT"/result "$url"
 
 # Building with an incorrect SRI hash should fail.
-expectStderr 102 nix build -o $TEST_ROOT/result "file://$TEST_ROOT/flake.tar.gz?narHash=sha256-qQ2Zz4DNHViCUrp6gTS7EE4+RMqFQtUfWF2UNUtJKS0=" | grep 'NAR hash mismatch'
+expectStderr 102 nix build -o "$TEST_ROOT"/result "file://$TEST_ROOT/flake.tar.gz?narHash=sha256-qQ2Zz4DNHViCUrp6gTS7EE4+RMqFQtUfWF2UNUtJKS0=" | grep 'NAR hash mismatch'
 
 # Test --override-input.
 git -C "$flake3Dir" reset --hard
-nix flake lock "$flake3Dir" --override-input flake2/flake1 file://$TEST_ROOT/flake.tar.gz -vvvvv
+nix flake lock "$flake3Dir" --override-input flake2/flake1 file://"$TEST_ROOT"/flake.tar.gz -vvvvv
 [[ $(jq .nodes.flake1_2.locked.url "$flake3Dir/flake.lock") =~ flake.tar.gz ]]
 
 nix flake lock "$flake3Dir" --override-input flake2/flake1 flake1
 [[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") =~ $hash2 ]]
 
-nix flake lock "$flake3Dir" --override-input flake2/flake1 flake1/master/$hash1
+nix flake lock "$flake3Dir" --override-input flake2/flake1 flake1/master/"$hash1"
 [[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") =~ $hash1 ]]
+
+# Test that --override-input with empty input path is rejected (issue #14816).
+expectStderr 1 nix flake lock "$flake3Dir" --override-input '' . | grepQuiet -- "--override-input was passed a zero-length input path, which would refer to the flake itself, not an input"
+
+# Test that deprecated --update-input with empty input path is rejected.
+expectStderr 1 nix flake lock "$flake3Dir" --update-input '' | grepQuiet -- "--update-input was passed a zero-length input path, which would refer to the flake itself, not an input"
 
 # Test --update-input.
 nix flake lock "$flake3Dir"
-[[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") = $hash1 ]]
+[[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") = "$hash1" ]]
 
 nix flake update flake2/flake1 --flake "$flake3Dir"
 [[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") =~ $hash2 ]]
 
+# Test that 'nix flake update' with empty input path is rejected.
+expectStderr 1 nix flake update '' --flake "$flake3Dir" | grepQuiet -- "input path to be updated cannot be zero-length; it would refer to the flake itself, not an input"
+
 # Test updating multiple inputs.
-nix flake lock "$flake3Dir" --override-input flake1 flake1/master/$hash1
-nix flake lock "$flake3Dir" --override-input flake2/flake1 flake1/master/$hash1
+nix flake lock "$flake3Dir" --override-input flake1 flake1/master/"$hash1"
+nix flake lock "$flake3Dir" --override-input flake2/flake1 flake1/master/"$hash1"
 [[ $(jq -r .nodes.flake1.locked.rev "$flake3Dir/flake.lock") =~ $hash1 ]]
 [[ $(jq -r .nodes.flake1_2.locked.rev "$flake3Dir/flake.lock") =~ $hash1 ]]
 
@@ -406,15 +429,16 @@ nix flake update flake1 flake2/flake1 --flake "$flake3Dir"
 
 # Test 'nix flake metadata --json'.
 nix flake metadata "$flake3Dir" --json | jq .
+nix flake metadata "$flake3Dir" --json --eval-store "dummy://?read-only=false" | jq .
 
 # Test flake in store does not evaluate.
-rm -rf $badFlakeDir
-mkdir $badFlakeDir
-echo INVALID > $badFlakeDir/flake.nix
-nix store delete $(nix store add-path $badFlakeDir)
+rm -rf "$badFlakeDir"
+mkdir "$badFlakeDir"
+echo INVALID > "$badFlakeDir"/flake.nix
+nix store delete "$(nix store add-path "$badFlakeDir")"
 
-[[ $(nix path-info      $(nix store add-path $flake1Dir)) =~ flake1 ]]
-[[ $(nix path-info path:$(nix store add-path $flake1Dir)) =~ simple ]]
+[[ $(nix path-info      "$(nix store add-path "$flake1Dir")") =~ flake1 ]]
+[[ $(nix path-info path:"$(nix store add-path "$flake1Dir")") =~ simple ]]
 
 # Test fetching flakerefs in the legacy CLI.
 [[ $(nix-instantiate --eval flake:flake3 -A x) = 123 ]]
@@ -423,15 +447,15 @@ nix store delete $(nix store add-path $badFlakeDir)
 [[ $(NIX_PATH=flake3=flake:flake3 nix-instantiate --eval '<flake3>' -A x) = 123 ]]
 
 # Test alternate lockfile paths.
-nix flake lock "$flake2Dir" --output-lock-file $TEST_ROOT/flake2.lock
-cmp "$flake2Dir/flake.lock" $TEST_ROOT/flake2.lock >/dev/null # lockfiles should be identical, since we're referencing flake2's original one
+nix flake lock "$flake2Dir" --output-lock-file "$TEST_ROOT"/flake2.lock
+cmp "$flake2Dir/flake.lock" "$TEST_ROOT"/flake2.lock >/dev/null # lockfiles should be identical, since we're referencing flake2's original one
 
-nix flake lock "$flake2Dir" --output-lock-file $TEST_ROOT/flake2-overridden.lock --override-input flake1 git+file://$flake1Dir?rev=$flake1OriginalCommit
-expectStderr 1 cmp "$flake2Dir/flake.lock" $TEST_ROOT/flake2-overridden.lock
-nix flake metadata "$flake2Dir" --reference-lock-file $TEST_ROOT/flake2-overridden.lock | grepQuiet $flake1OriginalCommit
+nix flake lock "$flake2Dir" --output-lock-file "$TEST_ROOT"/flake2-overridden.lock --override-input flake1 git+file://"$flake1Dir"?rev="$flake1OriginalCommit"
+expectStderr 1 cmp "$flake2Dir/flake.lock" "$TEST_ROOT"/flake2-overridden.lock
+nix flake metadata "$flake2Dir" --reference-lock-file "$TEST_ROOT"/flake2-overridden.lock | grepQuiet "$flake1OriginalCommit"
 
 # reference-lock-file can only be used if allow-dirty is set.
-expectStderr 1 nix flake metadata "$flake2Dir" --no-allow-dirty --reference-lock-file $TEST_ROOT/flake2-overridden.lock
+expectStderr 1 nix flake metadata "$flake2Dir" --no-allow-dirty --reference-lock-file "$TEST_ROOT"/flake2-overridden.lock
 
 # After changing an input (flake2 from newFlake2Rev to prevFlake2Rev), we should have the transitive inputs locked by revision $prevFlake2Rev of flake2.
 prevFlake1Rev=$(nix flake metadata --json "$flake1Dir" | jq -r .revision)
@@ -458,7 +482,7 @@ git -C "$flake3Dir" commit flake.nix -m 'bla'
 
 rm "$flake3Dir/flake.lock"
 nix flake lock "$flake3Dir"
-[[ "$(nix flake metadata --json "$flake3Dir" | jq -r .locks.nodes.flake1.locked.rev)" = $newFlake1Rev ]]
+[[ "$(nix flake metadata --json "$flake3Dir" | jq -r .locks.nodes.flake1.locked.rev)" = "$newFlake1Rev" ]]
 
 cat > "$flake3Dir/flake.nix" <<EOF
 {
@@ -469,4 +493,34 @@ cat > "$flake3Dir/flake.nix" <<EOF
 }
 EOF
 
-[[ "$(nix flake metadata --json "$flake3Dir" | jq -r .locks.nodes.flake1.locked.rev)" = $prevFlake1Rev ]]
+[[ "$(nix flake metadata --json "$flake3Dir" | jq -r .locks.nodes.flake1.locked.rev)" = "$prevFlake1Rev" ]]
+
+baseDir=$TEST_ROOT/$RANDOM
+subdirFlakeDir1=$baseDir/foo1
+mkdir -p "$subdirFlakeDir1"
+
+writeSimpleFlake "$baseDir"
+
+cat > "$subdirFlakeDir1"/flake.nix <<EOF
+{
+  outputs = inputs: {
+    shouldBeOne = 1;
+  };
+}
+EOF
+
+nix registry add --registry "$registry" flake2 "path:$baseDir?dir=foo1"
+[[ "$(nix eval --flake-registry "$registry" flake2#shouldBeOne)" = 1 ]]
+
+subdirFlakeDir2=$baseDir/foo2
+mkdir -p "$subdirFlakeDir2"
+cat > "$subdirFlakeDir2"/flake.nix <<EOF
+{
+  inputs.foo1.url = "path:$baseDir?dir=foo1";
+
+  outputs = inputs: { };
+}
+EOF
+
+# Regression test for https://github.com/NixOS/nix/issues/13918
+[[ "$(nix eval --inputs-from "$subdirFlakeDir2" foo1#shouldBeOne)" = 1 ]]

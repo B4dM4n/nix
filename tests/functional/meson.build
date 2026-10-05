@@ -64,6 +64,7 @@ suites = [
       'gc-auto.sh',
       'user-envs.sh',
       'user-envs-migration.sh',
+      'cli-characterisation.sh',
       'binary-cache.sh',
       'multiple-outputs.sh',
       'nix-build.sh',
@@ -114,6 +115,7 @@ suites = [
       'pure-eval.sh',
       'eval.sh',
       'short-path-literals.sh',
+      'absolute-path-literals.sh',
       'no-url-literals.sh',
       'repl.sh',
       'binary-cache-build-remote.sh',
@@ -160,6 +162,7 @@ suites = [
       'nix-profile.sh',
       'suggestions.sh',
       'store-info.sh',
+      'store-print-env.sh',
       'fetchClosure.sh',
       'completions.sh',
       'impure-derivations.sh',
@@ -174,6 +177,7 @@ suites = [
       'extra-sandbox-profile.sh',
       'help.sh',
       'symlinks.sh',
+      'external-builders.sh',
     ],
     'workdir' : meson.current_source_dir(),
   },
@@ -239,6 +243,12 @@ foreach suite : suites
     # Turns, e.g., `tests/functional/flakes/show.sh` into a Meson test target called
     # `functional-flakes-show`.
     name = fs.replace_suffix(script, '')
+    asan_options = 'abort_on_error=1:print_summary=1:detect_leaks=0'
+    # Otherwise ASAN dumps warnings into stderr that make some tests fail on stderr output
+    # comparisons.
+    asan_options += ':log_path=@0@'.format(
+      meson.current_build_dir() / 'asan-log',
+    )
 
     test(
       name,
@@ -253,9 +263,11 @@ foreach suite : suites
       ],
       suite : suite_name,
       env : {
+        'ASAN_OPTIONS' : asan_options,
         '_NIX_TEST_SOURCE_DIR' : meson.current_source_dir(),
         '_NIX_TEST_BUILD_DIR' : meson.current_build_dir(),
-        'TEST_NAME' : suite_name / name,
+        'TEST_SUITE_NAME' : suite_name,
+        'TEST_NAME' : name,
         'NIX_REMOTE' : '',
         'PS4' : '+(${BASH_SOURCE[0]-$0}:$LINENO) ',
       },

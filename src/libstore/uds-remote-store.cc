@@ -19,16 +19,12 @@
 
 namespace nix {
 
-UDSRemoteStoreConfig::UDSRemoteStoreConfig(
-    std::string_view scheme, std::string_view authority, const StoreReference::Params & params)
+UDSRemoteStoreConfig::UDSRemoteStoreConfig(const std::filesystem::path & path, const StoreReference::Params & params)
     : Store::Config{params}
     , LocalFSStore::Config{params}
     , RemoteStore::Config{params}
-    , path{authority.empty() ? settings.nixDaemonSocketFile : authority}
+    , path{path.empty() ? settings.nixDaemonSocketFile : path}
 {
-    if (uriSchemes().count(scheme) == 0) {
-        throw UsageError("Scheme must be 'unix'");
-    }
 }
 
 std::string UDSRemoteStoreConfig::doc()
@@ -43,7 +39,7 @@ std::string UDSRemoteStoreConfig::doc()
 // don't we just wire it all through? I believe there are cases where it
 // will live reload so we want to continue to account for that.
 UDSRemoteStoreConfig::UDSRemoteStoreConfig(const Params & params)
-    : UDSRemoteStoreConfig(*uriSchemes().begin(), "", params)
+    : UDSRemoteStoreConfig("", params)
 {
 }
 
@@ -57,16 +53,21 @@ UDSRemoteStore::UDSRemoteStore(ref<const Config> config)
 
 StoreReference UDSRemoteStoreConfig::getReference() const
 {
+    /* We specifically return "daemon" here instead of "unix://" or "unix://${path}"
+     * to be more compatible with older versions of nix. Some tooling out there
+     * tries hard to parse store references and it might not be able to handle "unix://". */
+    if (path == settings.nixDaemonSocketFile)
+        return {
+            .variant = StoreReference::Daemon{},
+            .params = getQueryParams(),
+        };
     return {
         .variant =
             StoreReference::Specified{
                 .scheme = *uriSchemes().begin(),
-                // We return the empty string when the path looks like the
-                // default path, but we could also just return the path
-                // verbatim always, to be robust to overall config changes
-                // at the cost of some verbosity.
-                .authority = path == settings.nixDaemonSocketFile ? "" : path,
+                .authority = encodeUrlPath(pathToUrlPath(path)),
             },
+        .params = getQueryParams(),
     };
 }
 
@@ -90,10 +91,10 @@ ref<RemoteStore::Connection> UDSRemoteStore::openConnection()
     return conn;
 }
 
-void UDSRemoteStore::addIndirectRoot(const Path & path)
+void UDSRemoteStore::addIndirectRoot(const std::filesystem::path & path)
 {
     auto conn(getConnection());
-    conn->to << WorkerProto::Op::AddIndirectRoot << path;
+    conn->to << WorkerProto::Op::AddIndirectRoot << path.string();
     conn.processStderr();
     readInt(conn->from);
 }

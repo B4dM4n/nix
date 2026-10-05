@@ -3,6 +3,7 @@
 
 #include "nix/util/error.hh"
 #include "nix/util/types.hh"
+#include "nix/util/json-non-null.hh"
 
 #include <nlohmann/json_fwd.hpp>
 
@@ -23,7 +24,6 @@ enum struct ExperimentalFeature {
     NixCommand,
     GitHashing,
     RecursiveNix,
-    NoUrlLiterals,
     FetchClosure,
     AutoAllocateUids,
     Cgroups,
@@ -36,6 +36,7 @@ enum struct ExperimentalFeature {
     MountedSSHStore,
     VerifiedFetches,
     PipeOperators,
+    ExternalBuilders,
     BLAKE3Hashes,
 };
 
@@ -78,7 +79,7 @@ std::set<ExperimentalFeature> parseFeatures(const StringSet &);
  * An experimental feature was required for some (experimental)
  * operation, but was not enabled.
  */
-class MissingExperimentalFeature : public Error
+class MissingExperimentalFeature final : public CloneableError<MissingExperimentalFeature, Error>
 {
 public:
     /**
@@ -86,8 +87,17 @@ public:
      */
     ExperimentalFeature missingFeature;
 
-    MissingExperimentalFeature(ExperimentalFeature missingFeature);
+    std::string reason;
+
+    MissingExperimentalFeature(ExperimentalFeature missingFeature, std::string reason = "");
 };
+
+/**
+ * `ExperimentalFeature` is always rendered as a string.
+ */
+template<>
+struct json_avoids_null<ExperimentalFeature> : std::true_type
+{};
 
 /**
  * Semi-magic conversion to and from json.

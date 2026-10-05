@@ -1,8 +1,15 @@
 #pragma once
 ///@file
 
+#include <bit>
 #include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <memory>
+#include <memory_resource>
+#include <exception>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include <concepts>
 
@@ -12,6 +19,7 @@
 #include "nix/expr/print-options.hh"
 #include "nix/util/checked-arithmetic.hh"
 
+#include <boost/unordered/unordered_flat_map_fwd.hpp>
 #include <nlohmann/json_fwd.hpp>
 
 namespace nix {
@@ -28,27 +36,32 @@ class BindingsBuilder;
  * about how this is mapped into the alignment bits to save significant memory.
  * This also restricts the number of internal types represented with distinct memory layouts.
  */
-typedef enum {
+enum InternalType {
     tUninitialized = 0,
     /* layout: Single/zero field payload */
     tInt = 1,
     tBool,
     tNull,
     tFloat,
+    tFailed,
     tExternal,
     tPrimOp,
     tAttrs,
     /* layout: Pair of pointers payload */
-    tListSmall,
+    tFirstPairOfPointers,
+    tListSmall = tFirstPairOfPointers,
     tPrimOpApp,
     tApp,
     tThunk,
     tLambda,
+    tLastPairOfPointers = tLambda,
     /* layout: Single untaggable field */
-    tListN,
+    tFirstSingleUntaggable,
+    tListN = tFirstSingleUntaggable,
     tString,
     tPath,
-} InternalType;
+    tNumberOfInternalTypes, // Must be last
+};
 
 /**
  * This type abstracts over all actual value types in the language,
@@ -57,6 +70,7 @@ typedef enum {
  */
 typedef enum {
     nThunk,
+    nFailed,
     nInt,
     nFloat,
     nBool,
@@ -81,6 +95,7 @@ class PosIdx;
 struct Pos;
 class StorePath;
 class EvalState;
+class EvalMemory;
 class XMLWriter;
 class Printer;
 
@@ -126,7 +141,7 @@ public:
     virtual bool operator==(const ExternalValueBase & b) const noexcept;
 
     /**
-     * Print the value as JSON. Defaults to unconvertable, i.e. throws an error
+     * Print the value as JSON. Defaults to unconvertible, i.e. throws an error
      */
     virtual nlohmann::json
     printValueAsJSON(EvalState & state, bool strict, NixStringContext & context, bool copyToStore = true) const;
@@ -140,7 +155,7 @@ public:
         bool location,
         XMLWriter & doc,
         NixStringContext & context,
-        PathSet & drvsSeen,
+        StringSet & drvsSeen,
         const PosIdx pos) const;
 
     virtual ~ExternalValueBase() {};
@@ -154,16 +169,19 @@ class ListBuilder
     Value * inlineElems[2] = {nullptr, nullptr};
 public:
     Value ** elems;
-    ListBuilder(EvalState & state, size_t size);
+    ListBuilder(EvalMemory & mem, size_t size);
 
-    // NOTE: Can be noexcept because we are just copying integral values and
-    // raw pointers.
     ListBuilder(ListBuilder && x) noexcept
         : size(x.size)
         , inlineElems{x.inlineElems[0], x.inlineElems[1]}
         , elems(size <= 2 ? inlineElems : x.elems)
     {
     }
+
+    ListBuilder(const ListBuilder &) = delete;
+    ListBuilder & operator=(ListBuilder &&) = delete;
+    ListBuilder & operator=(const ListBuilder &) = delete;
+    ~ListBuilder() = default;
 
     Value *& operator[](size_t n)
     {
@@ -183,6 +201,91 @@ public:
     }
 
     friend struct Value;
+};
+
+class StringData
+{
+public:
+    using size_type = std::size_t;
+
+    size_type size_;
+    char data_[];
+
+    /*
+     * This in particular ensures that we cannot have a `StringData`
+     * that we use by value, which is just what we want!
+     *
+     * Dynamically sized types aren't a thing in C++ and even flexible array
+     * members are a language extension and beyond the realm of standard C++.
+     * Technically, sizeof data_ member is 0 and the intended way to use flexible
+     * array members is to allocate sizeof(StrindData) + count * sizeof(char) bytes
+     * and the compiler will consider alignment restrictions for the FAM.
+     *
+     */
+
+    StringData(StringData &&) = delete;
+    StringData & operator=(StringData &&) = delete;
+    StringData(const StringData &) = delete;
+    StringData & operator=(const StringData &) = delete;
+    ~StringData() = default;
+
+private:
+    StringData() = delete;
+
+    explicit StringData(size_type size)
+        : size_(size)
+    {
+    }
+
+public:
+    /**
+     * Allocate StringData on the (possibly) GC-managed heap and copy
+     * the contents of s to it.
+     */
+    static const StringData & make(EvalMemory & mem, std::string_view s);
+
+    /**
+     * Allocate StringData on the (possibly) GC-managed heap.
+     * @param size Length of the string (without the NUL terminator).
+     */
+    static StringData & alloc(EvalMemory & mem, size_t size);
+
+    size_t size() const
+    {
+        return size_;
+    }
+
+    char * data() noexcept
+    {
+        return data_;
+    }
+
+    const char * data() const noexcept
+    {
+        return data_;
+    }
+
+    const char * c_str() const noexcept
+    {
+        return data_;
+    }
+
+    constexpr std::string_view view() const noexcept
+    {
+        return std::string_view(data_, size_);
+    }
+
+    template<size_t N>
+    struct Static;
+
+    static StringData & make(std::pmr::memory_resource & resource, std::string_view s)
+    {
+        auto & res =
+            *new (resource.allocate(sizeof(StringData) + s.size() + 1, alignof(StringData))) StringData(s.size());
+        std::memcpy(res.data_, s.data(), s.size());
+        res.data_[s.size()] = '\0';
+        return res;
+    }
 };
 
 namespace detail {
@@ -218,14 +321,73 @@ struct ValueBase
      */
     struct StringWithContext
     {
-        const char * c_str;
-        const char ** context; // must be in sorted order
+        const StringData * str;
+
+        /**
+         * The type of the context itself.
+         *
+         * Currently, it is length-prefixed array of pointers to
+         * null-terminated strings. The strings are specially formatted
+         * to represent a flattening of the recursive sum type that is a
+         * context element.
+         *
+         * @See NixStringContext for an more easily understood type,
+         * that of the "builder" for this data structure.
+         */
+        struct Context
+        {
+            using value_type = const StringData *;
+            using size_type = std::size_t;
+            using iterator = const value_type *;
+
+            Context(size_type size)
+                : size_(size)
+            {
+            }
+
+        private:
+            /**
+             * Number of items in the array
+             */
+            size_type size_;
+
+            /**
+             * @pre must be in sorted order
+             */
+            value_type elems[];
+
+        public:
+            iterator begin() const
+            {
+                return elems;
+            }
+
+            iterator end() const
+            {
+                return elems + size();
+            }
+
+            size_type size() const
+            {
+                return size_;
+            }
+
+            /**
+             * @return null pointer when context.empty()
+             */
+            static Context * fromBuilder(const NixStringContext & context, EvalMemory & mem);
+        };
+
+        /**
+         * May be null for a string without context.
+         */
+        const Context * context;
     };
 
     struct Path
     {
         SourceAccessor * accessor;
-        const char * path;
+        const StringData * path;
     };
 
     struct Null
@@ -265,6 +427,36 @@ struct ValueBase
         size_t size;
         Value * const * elems;
     };
+
+    struct Failed : gc_cleanup
+    {
+        std::exception_ptr ex;
+        /**
+         * Optional value for recovering `RecoverableEvalError`
+         * Must be set iff `ex` is an instance of `RecoverableEvalError`.
+         */
+        Value * recoveryValue;
+
+        Failed(std::exception_ptr ex, Value * recoveryValue)
+            : ex(ex)
+            , recoveryValue(recoveryValue)
+        {
+        }
+
+        [[noreturn]] void rethrow() const
+        {
+            try {
+                std::rethrow_exception(ex);
+            } catch (BaseError & e) {
+                /* Rethrow the copy of the exception - not the original one.
+                   Stack tracing mechanisms rely on being able to modify the exceptions
+                   they catch by reference. */
+                e.throwClone();
+            } catch (...) {
+                throw;
+            }
+        }
+    };
 };
 
 template<typename T>
@@ -291,6 +483,7 @@ struct PayloadTypeToInternalType
     MACRO(PrimOp *, primOp, tPrimOp)                                \
     MACRO(ValueBase::PrimOpApplicationThunk, primOpApp, tPrimOpApp) \
     MACRO(ExternalValueBase *, external, tExternal)                 \
+    MACRO(ValueBase::Failed *, failed, tFailed)                     \
     MACRO(NixFloat, fpoint, tFloat)
 
 #define NIX_VALUE_PAYLOAD_TYPE(T, FIELD_NAME, DISCRIMINATOR) \
@@ -369,7 +562,7 @@ namespace detail {
 /* Whether to use a specialization of ValueStorage that does bitpacking into
    alignment niches. */
 template<std::size_t ptrSize>
-inline constexpr bool useBitPackedValueStorage = (ptrSize == 8) && (__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= 8);
+inline constexpr bool useBitPackedValueStorage = (ptrSize == 8) && (__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= 16);
 
 } // namespace detail
 
@@ -378,7 +571,8 @@ inline constexpr bool useBitPackedValueStorage = (ptrSize == 8) && (__STDCPP_DEF
  * Packs discriminator bits into the pointer alignment niches.
  */
 template<std::size_t ptrSize>
-class ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedValueStorage<ptrSize>>> : public detail::ValueBase
+class alignas(16)
+    ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedValueStorage<ptrSize>>> : public detail::ValueBase
 {
     /* Needs a dependent type name in order for member functions (and
      * potentially ill-formed bit casts) to be SFINAE'd out.
@@ -431,7 +625,7 @@ class ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedValueStorage<pt
     enum PrimaryDiscriminator : int {
         pdUninitialized = 0,
         pdSingleDWord, //< layout: Single/zero field payload
-        /* The order of these enumations must be the same as in InternalType. */
+        /* The order of these enumerations must be the same as in InternalType. */
         pdListN, //< layout: Single untaggable field.
         pdString,
         pdPath,
@@ -477,7 +671,7 @@ class ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedValueStorage<pt
     template<InternalType type, typename T, typename U>
     void setPairOfPointersPayload(T * firstPtrField, U * secondPtrField) noexcept
     {
-        static_assert(type >= tListSmall && type <= tLambda);
+        static_assert(type >= tFirstPairOfPointers && type <= tLastPairOfPointers);
         {
             auto firstFieldPayload = std::bit_cast<PackedPointer>(firstPtrField);
             assertAligned(firstFieldPayload);
@@ -486,7 +680,7 @@ class ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedValueStorage<pt
         {
             auto secondFieldPayload = std::bit_cast<PackedPointer>(secondPtrField);
             assertAligned(secondFieldPayload);
-            payload[1] = (type - tListSmall) | secondFieldPayload;
+            payload[1] = (type - tFirstPairOfPointers) | secondFieldPayload;
         }
     }
 
@@ -514,11 +708,11 @@ protected:
         case pdListN:
         case pdString:
         case pdPath:
-            return static_cast<InternalType>(tListN + (pd - pdListN));
+            return static_cast<InternalType>(tFirstSingleUntaggable + (pd - pdListN));
         case pdPairOfPointers:
-            return static_cast<InternalType>(tListSmall + (payload[1] & discriminatorMask));
+            return static_cast<InternalType>(tFirstPairOfPointers + (payload[1] & discriminatorMask));
         [[unlikely]] default:
-            unreachable();
+            nixUnreachableWhenHardened();
         }
     }
 
@@ -585,13 +779,18 @@ protected:
     void getStorage(StringWithContext & string) const noexcept
     {
         string.context = untagPointer<decltype(string.context)>(payload[0]);
-        string.c_str = std::bit_cast<const char *>(payload[1]);
+        string.str = std::bit_cast<const StringData *>(payload[1]);
     }
 
     void getStorage(Path & path) const noexcept
     {
         path.accessor = untagPointer<decltype(path.accessor)>(payload[0]);
-        path.path = std::bit_cast<const char *>(payload[1]);
+        path.path = std::bit_cast<const StringData *>(payload[1]);
+    }
+
+    void getStorage(Failed *& failed) const noexcept
+    {
+        failed = std::bit_cast<Failed *>(payload[1]);
     }
 
     void setStorage(NixInt integer) noexcept
@@ -636,12 +835,17 @@ protected:
 
     void setStorage(StringWithContext string) noexcept
     {
-        setUntaggablePayload<pdString>(string.context, string.c_str);
+        setUntaggablePayload<pdString>(string.context, string.str);
     }
 
     void setStorage(Path path) noexcept
     {
         setUntaggablePayload<pdPath>(path.accessor, path.path);
+    }
+
+    void setStorage(Failed * failed) noexcept
+    {
+        setSingleDWordPayload<tFailed>(std::bit_cast<PackedPointer>(failed));
     }
 };
 
@@ -832,6 +1036,35 @@ struct Value : public ValueStorage<sizeof(void *)>
 {
     friend std::string showType(const Value & v);
 
+    /**
+     * Empty list constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    static Value vEmptyList;
+
+    /**
+     * `null` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    static Value vNull;
+
+    /**
+     * `true` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    static Value vTrue;
+
+    /**
+     * `true` constant.
+     *
+     * This is _not_ a singleton. Pointer equality is _not_ sufficient.
+     */
+    static Value vFalse;
+
+private:
     template<InternalType... discriminator>
     bool isa() const noexcept
     {
@@ -842,7 +1075,7 @@ struct Value : public ValueStorage<sizeof(void *)>
     T getStorage() const noexcept
     {
         if (getInternalType() != detail::payloadTypeToInternalType<T>) [[unlikely]]
-            unreachable();
+            nixUnreachableWhenHardened();
         T out;
         ValueStorage::getStorage(out);
         return out;
@@ -865,12 +1098,12 @@ public:
     inline bool isThunk() const
     {
         return isa<tThunk>();
-    };
+    }
 
     inline bool isApp() const
     {
         return isa<tApp>();
-    };
+    }
 
     inline bool isBlackhole() const;
 
@@ -878,61 +1111,66 @@ public:
     inline bool isLambda() const
     {
         return isa<tLambda>();
-    };
+    }
 
     inline bool isPrimOp() const
     {
         return isa<tPrimOp>();
-    };
+    }
 
     inline bool isPrimOpApp() const
     {
         return isa<tPrimOpApp>();
-    };
+    }
+
+    inline bool isFailed() const
+    {
+        return isa<tFailed>();
+    }
 
     /**
      * Returns the normal type of a Value. This only returns nThunk if
      * the Value hasn't been forceValue'd
      *
-     * @param invalidIsThunk Instead of aborting an an invalid (probably
+     * @param invalidIsThunk Instead of UB an an invalid (probably
      * 0, so uninitialized) internal type, return `nThunk`.
      */
-    inline ValueType type(bool invalidIsThunk = false) const
+    template<bool invalidIsThunk = false>
+    inline ValueType type() const
     {
-        switch (getInternalType()) {
-        case tUninitialized:
-            break;
-        case tInt:
-            return nInt;
-        case tBool:
-            return nBool;
-        case tString:
-            return nString;
-        case tPath:
-            return nPath;
-        case tNull:
-            return nNull;
-        case tAttrs:
-            return nAttrs;
-        case tListSmall:
-        case tListN:
-            return nList;
-        case tLambda:
-        case tPrimOp:
-        case tPrimOpApp:
-            return nFunction;
-        case tExternal:
-            return nExternal;
-        case tFloat:
-            return nFloat;
-        case tThunk:
-        case tApp:
-            return nThunk;
+        /* Explicit lookup table. switch() might compile down (and it does at least with GCC 14)
+           to a jump table. Let's help the compiler a bit here. */
+        static constexpr auto table = [] {
+            std::array<ValueType, tNumberOfInternalTypes> t{};
+            t[tUninitialized] = nThunk;
+            t[tInt] = nInt;
+            t[tBool] = nBool;
+            t[tNull] = nNull;
+            t[tFloat] = nFloat;
+            t[tFailed] = nFailed;
+            t[tExternal] = nExternal;
+            t[tAttrs] = nAttrs;
+            t[tPrimOp] = nFunction;
+            t[tLambda] = nFunction;
+            t[tPrimOpApp] = nFunction;
+            t[tApp] = nThunk;
+            t[tThunk] = nThunk;
+            t[tListSmall] = nList;
+            t[tListN] = nList;
+            t[tString] = nString;
+            t[tPath] = nPath;
+            return t;
+        }();
+
+        auto it = getInternalType();
+        if (it == tUninitialized || it >= tNumberOfInternalTypes) [[unlikely]] {
+            if constexpr (invalidIsThunk)
+                return nThunk;
+            else
+                nixUnreachableWhenHardened();
         }
-        if (invalidIsThunk)
-            return nThunk;
-        else
-            unreachable();
+
+        return table[it];
     }
 
     /**
@@ -960,23 +1198,22 @@ public:
         setStorage(b);
     }
 
-    inline void mkString(const char * s, const char ** context = 0) noexcept
+    void mkStringNoCopy(const StringData & s, const Value::StringWithContext::Context * context = nullptr) noexcept
     {
-        setStorage(StringWithContext{.c_str = s, .context = context});
+        setStorage(StringWithContext{.str = &s, .context = context});
     }
 
-    void mkString(std::string_view s);
+    void mkString(std::string_view s, EvalMemory & mem);
 
-    void mkString(std::string_view s, const NixStringContext & context);
+    void mkString(std::string_view s, const NixStringContext & context, EvalMemory & mem);
 
-    void mkStringMove(const char * s, const NixStringContext & context);
+    void mkStringMove(const StringData & s, const NixStringContext & context, EvalMemory & mem);
 
-    void mkPath(const SourcePath & path);
-    void mkPath(std::string_view path);
+    void mkPath(const SourcePath & path, EvalMemory & mem);
 
-    inline void mkPath(SourceAccessor * accessor, const char * path) noexcept
+    inline void mkPath(SourceAccessor * accessor, const StringData & path) noexcept
     {
-        setStorage(Path{.accessor = accessor, .path = path});
+        setStorage(Path{.accessor = accessor, .path = &path});
     }
 
     inline void mkNull() noexcept
@@ -993,12 +1230,20 @@ public:
 
     void mkList(const ListBuilder & builder) noexcept
     {
-        if (builder.size == 1)
+        switch (builder.size) {
+        case 0:
+            setStorage(List{.size = 0, .elems = nullptr});
+            break;
+        case 1:
             setStorage(std::array<Value *, 2>{builder.inlineElems[0], nullptr});
-        else if (builder.size == 2)
+            break;
+        case 2:
             setStorage(std::array<Value *, 2>{builder.inlineElems[0], builder.inlineElems[1]});
-        else
+            break;
+        default:
             setStorage(List{.size = builder.size, .elems = builder.elems});
+            break;
+        }
     }
 
     inline void mkThunk(Env * e, Expr * ex) noexcept
@@ -1040,6 +1285,11 @@ public:
         setStorage(n);
     }
 
+    inline void mkFailed(std::exception_ptr e, Value * recovery) noexcept
+    {
+        setStorage(new Value::Failed(e, recovery));
+    }
+
     bool isList() const noexcept
     {
         return isa<tListSmall, tListN>();
@@ -1066,20 +1316,26 @@ public:
 
     SourcePath path() const
     {
-        return SourcePath(ref(pathAccessor()->shared_from_this()), CanonPath(CanonPath::unchecked_t(), pathStr()));
+        return SourcePath(
+            ref(pathAccessor()->shared_from_this()), CanonPath(CanonPath::unchecked_t(), std::string(pathStrView())));
     }
 
-    std::string_view string_view() const noexcept
+    const StringData & string_data() const noexcept
     {
-        return std::string_view(getStorage<StringWithContext>().c_str);
+        return *getStorage<StringWithContext>().str;
     }
 
     const char * c_str() const noexcept
     {
-        return getStorage<StringWithContext>().c_str;
+        return getStorage<StringWithContext>().str->data();
     }
 
-    const char ** context() const noexcept
+    std::string_view string_view() const noexcept
+    {
+        return string_data().view();
+    }
+
+    const Value::StringWithContext::Context * context() const noexcept
     {
         return getStorage<StringWithContext>().context;
     }
@@ -1136,12 +1392,24 @@ public:
 
     const char * pathStr() const noexcept
     {
-        return getStorage<Path>().path;
+        return getStorage<Path>().path->c_str();
+    }
+
+    std::string_view pathStrView() const noexcept
+    {
+        return getStorage<Path>().path->view();
     }
 
     SourceAccessor * pathAccessor() const noexcept
     {
         return getStorage<Path>().accessor;
+    }
+
+    Failed & failed() const noexcept
+    {
+        auto p = getStorage<Failed *>();
+        assert(p);
+        return *p;
     }
 };
 
@@ -1158,7 +1426,7 @@ void Value::mkBlackhole()
 }
 
 typedef std::vector<Value *, traceable_allocator<Value *>> ValueVector;
-typedef std::unordered_map<
+typedef boost::unordered_flat_map<
     Symbol,
     Value *,
     std::hash<Symbol>,

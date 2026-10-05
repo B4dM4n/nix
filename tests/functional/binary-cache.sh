@@ -18,7 +18,7 @@ outPath=$(nix-build dependencies.nix --no-out-link)
 
 nix copy --to "file://$cacheDir" "$outPath"
 
-readarray -t paths < <(nix path-info --all --json --store "file://$cacheDir" | jq 'keys|sort|.[]' -r)
+readarray -t paths < <(nix path-info --all --json --json-format 2 --store "file://$cacheDir" | jq '.info|keys|sort|.[]' -r)
 [[ "${#paths[@]}" -eq 3 ]]
 for path in "${paths[@]}"; do
     [[ "$path" =~ -dependencies-input-0$ ]] \
@@ -37,6 +37,10 @@ nix log --substituters "file://$cacheDir" "$outPath" | grep FOO
 # Test copying build logs from the binary cache.
 nix store copy-log --from "file://$cacheDir" "$(nix-store -qd "$outPath")"^'*'
 nix log "$outPath" | grep FOO
+
+# Test that plus sign in the URL path is handled correctly.
+cacheDir2="$TEST_ROOT/binary+cache"
+nix copy --to "file://$cacheDir2" "$outPath" && [[ -d "$cacheDir2" ]]
 
 basicDownloadTests() {
     # No uploading tests bcause upload with force HTTP doesn't work.
@@ -111,7 +115,13 @@ clearStore
 
 mv "$cacheDir/nar" "$cacheDir/nar2"
 
-nix-build --substituters "file://$cacheDir" --no-require-sigs dependencies.nix -o "$TEST_ROOT/result"
+nix-build --substituters "file://$cacheDir" --no-require-sigs dependencies.nix -o "$TEST_ROOT/result" 2>&1 | tee "$TEST_ROOT/log"
+
+# Verify that missing NARs produce warnings, not errors
+# The build should succeed despite the warnings
+grepQuiet "does not exist in binary cache" "$TEST_ROOT/log"
+# Ensure the message is not at error level by checking that the command succeeded
+[ -e "$TEST_ROOT/result" ]
 
 mv "$cacheDir/nar2" "$cacheDir/nar"
 
@@ -306,3 +316,24 @@ nix-store --delete "$outPath" "$docPath"
 # -vvv is the level that logs during the loop
 timeout 60 nix-build --no-out-link -E "$expr" --option substituters "file://$cacheDir" \
   --option trusted-binary-caches "file://$cacheDir"  --no-require-sigs
+
+
+# Test that the narinfo-cache-meta-ttl causes nix-cache-info to be cached,
+# and that --refresh overrides it.
+
+# Populate the metadata cache by querying store info over HTTP.
+_NIX_FORCE_HTTP=1 nix store info --store "file://$cacheDir"
+
+# Remove nix-cache-info from the binary cache.
+rm "$cacheDir/nix-cache-info"
+
+# nix store info should still work because the metadata is cached
+# (narinfo-cache-meta-ttl defaults to 7 days).
+_NIX_FORCE_HTTP=1 nix store info --store "file://$cacheDir"
+
+# But with --refresh, it should fail because nix-cache-info is gone
+# and the cached metadata TTL is overridden to 0.
+_NIX_FORCE_HTTP=1 expectStderr 1 nix store info --store "file://$cacheDir" --refresh | grepQuiet "uploading.*is not supported"
+
+# Remove --refresh and it should work again.
+_NIX_FORCE_HTTP=1 nix store info --store "file://$cacheDir"

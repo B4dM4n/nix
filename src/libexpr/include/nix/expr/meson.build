@@ -10,6 +10,8 @@ config_pub_h = configure_file(
 headers = [ config_pub_h ] + files(
   'attr-path.hh',
   'attr-set.hh',
+  'counter.hh',
+  'diagnose.hh',
   'eval-cache.hh',
   'eval-error.hh',
   'eval-gc.hh',
@@ -30,6 +32,7 @@ headers = [ config_pub_h ] + files(
   'print.hh',
   'repl-exit-status.hh',
   'search-path.hh',
+  'static-string-data.hh',
   'symbol-table.hh',
   'value-to-json.hh',
   'value-to-xml.hh',

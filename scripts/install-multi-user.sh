@@ -52,21 +52,26 @@ readonly PROFILE_FISH_PREFIXES=(
 readonly PROFILE_NIX_FILE_FISH="$NIX_ROOT/var/nix/profiles/default/etc/profile.d/nix-daemon.fish"
 
 readonly NIX_INSTALLED_NIX="@nix@"
+readonly NIX_INSTALLED_NIX_MAN="@nix-manual@"
 readonly NIX_INSTALLED_CACERT="@cacert@"
-#readonly NIX_INSTALLED_NIX="/nix/store/j8dbv5w6jl34caywh2ygdy88knx1mdf7-nix-2.3.6"
-#readonly NIX_INSTALLED_CACERT="/nix/store/7dxhzymvy330i28ii676fl1pqwcahv2f-nss-cacert-3.49.2"
-readonly EXTRACTED_NIX_PATH="$(dirname "$0")"
+#readonly NIX_INSTALLED_NIX="/nix/store/byi37zv50wnfrpp4d81z3spswd5zva37-nix-2.3.6"
+#readonly NIX_INSTALLED_CACERT="/nix/store/7pi45g541xa8ahwgpbpy7ggsl0xj1jj6-nss-cacert-3.49.2"
+EXTRACTED_NIX_PATH="$(dirname "$0")"
+readonly EXTRACTED_NIX_PATH
 
 # allow to override identity change command
-readonly NIX_BECOME=${NIX_BECOME:-sudo}
+NIX_BECOME=${NIX_BECOME:-sudo}
+readonly NIX_BECOME
 
-readonly ROOT_HOME=~root
+ROOT_HOME=~root
+readonly ROOT_HOME
 
 if [ -t 0 ] && [ -z "${NIX_INSTALLER_YES:-}" ]; then
-    readonly IS_HEADLESS='no'
+    IS_HEADLESS='no'
 else
-    readonly IS_HEADLESS='yes'
+    IS_HEADLESS='yes'
 fi
+readonly IS_HEADLESS
 
 headless() {
     if [ "$IS_HEADLESS" = "yes" ]; then
@@ -156,6 +161,7 @@ EOF
 }
 
 nix_user_for_core() {
+    # shellcheck disable=SC2059
     printf "$NIX_BUILD_USER_NAME_TEMPLATE" "$1"
 }
 
@@ -381,10 +387,12 @@ _sudo() {
 
 # Ensure that $TMPDIR exists if defined.
 if [[ -n "${TMPDIR:-}" ]] && [[ ! -d "${TMPDIR:-}" ]]; then
+    # shellcheck disable=SC2174
     mkdir -m 0700 -p "${TMPDIR:-}"
 fi
 
-readonly SCRATCH=$(mktemp -d)
+SCRATCH=$(mktemp -d)
+readonly SCRATCH
 finish_cleanup() {
     rm -rf "$SCRATCH"
 }
@@ -677,7 +685,8 @@ create_directories() {
         # hiding behind || true, and the general state
         # should be one the user can repair once they
         # figure out where chown is...
-        local get_chr_own="$(PATH="$(getconf PATH 2>/dev/null)" command -vp chown)"
+        local get_chr_own
+        get_chr_own="$(PATH="$(getconf PATH 2>/dev/null)" command -vp chown)"
         if [[ -z "$get_chr_own" ]]; then
             get_chr_own="$(command -v chown)"
         fi
@@ -706,7 +715,7 @@ EOF
 
 place_channel_configuration() {
     if [ -z "${NIX_INSTALLER_NO_CHANNEL_ADD:-}" ]; then
-        echo "https://nixos.org/channels/nixpkgs-unstable nixpkgs" > "$SCRATCH/.nix-channels"
+        echo "https://channels.nixos.org/nixpkgs-unstable nixpkgs" > "$SCRATCH/.nix-channels"
         _sudo "to set up the default system channel (part 1)" \
             install -m 0644 "$SCRATCH/.nix-channels" "$ROOT_HOME/.nix-channels"
     fi
@@ -915,9 +924,11 @@ configure_shell_profile() {
         fi
 
         if [ -e "$profile_target" ]; then
-            shell_source_lines \
-                | _sudo "extend your $profile_target with nix-daemon settings" \
-                        tee -a "$profile_target"
+            {
+                shell_source_lines
+                cat "$profile_target"
+            } | _sudo "extend your $profile_target with nix-daemon settings" \
+                      tee "$profile_target"
         fi
     done
 
@@ -959,6 +970,8 @@ setup_default_profile() {
     task "Setting up the default profile"
     _sudo "to install a bootstrapping Nix in to the default profile" \
           HOME="$ROOT_HOME" "$NIX_INSTALLED_NIX/bin/nix-env" -i "$NIX_INSTALLED_NIX"
+    _sudo "to install Nix man pages in to the default profile" \
+          HOME="$ROOT_HOME" "$NIX_INSTALLED_NIX/bin/nix-env" -i "$NIX_INSTALLED_NIX_MAN"
 
     if [ -z "${NIX_SSL_CERT_FILE:-}" ] || ! [ -f "${NIX_SSL_CERT_FILE:-}" ] || cert_in_store; then
         _sudo "to install a bootstrapping SSL certificate just for Nix in to the default profile" \
@@ -1013,6 +1026,7 @@ main() {
 
     # Set profile targets after OS-specific scripts are loaded
     if command -v poly_configure_default_profile_targets > /dev/null 2>&1; then
+        # shellcheck disable=SC2207
         PROFILE_TARGETS=($(poly_configure_default_profile_targets))
     else
         PROFILE_TARGETS=("/etc/bashrc" "/etc/profile.d/nix.sh" "/etc/zshrc" "/etc/bash.bashrc" "/etc/zsh/zshrc")

@@ -1,7 +1,9 @@
 #pragma once
 ///@file
 
+#include <filesystem>
 #include <optional>
+#include <chrono>
 
 #ifndef _WIN32
 #  include <sys/resource.h>
@@ -10,6 +12,11 @@
 #include "nix/util/types.hh"
 
 namespace nix {
+
+/**
+ * Get the current process's user space CPU time.
+ */
+std::chrono::microseconds getCpuUserTime();
 
 /**
  * If cgroups are active, attempt to calculate the number of CPUs available.
@@ -36,6 +43,6 @@ void restoreProcessContext(bool restoreMounts = true);
 /**
  * @return the path of the current executable.
  */
-std::optional<Path> getSelfExe();
+std::optional<std::filesystem::path> getSelfExe();
 
 } // namespace nix

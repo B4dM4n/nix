@@ -1,12 +1,12 @@
 {
   description = "The purely functional package manager";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05-small";
+  inputs.nixpkgs.url = "https://channels.nixos.org/nixos-25.11/nixexprs.tar.xz";
 
   inputs.nixpkgs-regression.url = "github:NixOS/nixpkgs/215d4d0fd80ca5163643b03a33fde804a29cc1e2";
   inputs.nixpkgs-23-11.url = "github:NixOS/nixpkgs/a62e6edd6d5e1fa0329b8653c801147986f8d446";
   inputs.flake-compat = {
-    url = "github:edolstra/flake-compat";
+    url = "github:NixOS/flake-compat";
     flake = false;
   };
 
@@ -115,6 +115,9 @@
                     }
                     // lib.optionalAttrs (crossSystem == "x86_64-unknown-freebsd13") {
                       useLLVM = true;
+                    }
+                    // lib.optionalAttrs (crossSystem == "x86_64-w64-mingw32") {
+                      emulator = pkgs: "${pkgs.buildPackages.wineWow64Packages.stable_11}/bin/wine";
                     };
                 overlays = [
                   (overlayFor (pkgs: pkgs.${stdenv}))
@@ -369,6 +372,7 @@
           # TODO probably should be `nix-cli`
           nix = self.packages.${system}.nix-everything;
           nix-manual = nixpkgsFor.${system}.native.nixComponents2.nix-manual;
+          nix-manual-manpages-only = nixpkgsFor.${system}.native.nixComponents2.nix-manual-manpages-only;
           nix-internal-api-docs = nixpkgsFor.${system}.native.nixComponents2.nix-internal-api-docs;
           nix-external-api-docs = nixpkgsFor.${system}.native.nixComponents2.nix-external-api-docs;
         }
@@ -405,11 +409,19 @@
 
               "nix-cmd" = { };
 
+              "nix-nswrapper" = {
+                linuxOnly = true;
+              };
+
               "nix-cli" = { };
 
               "nix-everything" = { };
 
               "nix-functional-tests" = {
+                supportsCross = false;
+              };
+
+              "nix-json-schema-checks" = {
                 supportsCross = false;
               };
 
@@ -421,31 +433,36 @@
               pkgName:
               {
                 supportsCross ? true,
+                linuxOnly ? false,
               }:
-              {
-                # These attributes go right into `packages.<system>`.
-                "${pkgName}" = nixpkgsFor.${system}.native.nixComponents2.${pkgName};
-                "${pkgName}-static" = nixpkgsFor.${system}.native.pkgsStatic.nixComponents2.${pkgName};
-                "${pkgName}-llvm" = nixpkgsFor.${system}.native.pkgsLLVM.nixComponents2.${pkgName};
-              }
+              lib.optionalAttrs (linuxOnly -> nixpkgsFor.${system}.native.stdenv.hostPlatform.isLinux) (
+                {
+                  # These attributes go right into `packages.<system>`.
+                  "${pkgName}" = nixpkgsFor.${system}.native.nixComponents2.${pkgName};
+                  "${pkgName}-static" = nixpkgsFor.${system}.native.pkgsStatic.nixComponents2.${pkgName};
+                  "${pkgName}-llvm" = nixpkgsFor.${system}.native.pkgsLLVM.nixComponents2.${pkgName};
+                }
+                // flatMapAttrs (lib.genAttrs stdenvs (_: { })) (
+                  stdenvName:
+                  { }:
+                  {
+                    # These attributes go right into `packages.<system>`.
+                    "${pkgName}-${stdenvName}" =
+                      nixpkgsFor.${system}.nativeForStdenv.${stdenvName}.nixComponents2.${pkgName};
+                  }
+                )
+              )
               // lib.optionalAttrs supportsCross (
                 flatMapAttrs (lib.genAttrs crossSystems (_: { })) (
                   crossSystem:
                   { }:
-                  {
-                    # These attributes go right into `packages.<system>`.
-                    "${pkgName}-${crossSystem}" = nixpkgsFor.${system}.cross.${crossSystem}.nixComponents2.${pkgName};
-                  }
+                  lib.optionalAttrs
+                    (linuxOnly -> nixpkgsFor.${system}.cross.${crossSystem}.stdenv.hostPlatform.isLinux)
+                    {
+                      # These attributes go right into `packages.<system>`.
+                      "${pkgName}-${crossSystem}" = nixpkgsFor.${system}.cross.${crossSystem}.nixComponents2.${pkgName};
+                    }
                 )
-              )
-              // flatMapAttrs (lib.genAttrs stdenvs (_: { })) (
-                stdenvName:
-                { }:
-                {
-                  # These attributes go right into `packages.<system>`.
-                  "${pkgName}-${stdenvName}" =
-                    nixpkgsFor.${system}.nativeForStdenv.${stdenvName}.nixComponents2.${pkgName};
-                }
               )
             )
         // lib.optionalAttrs (builtins.elem system linux64BitSystems) {
@@ -464,6 +481,27 @@
                 ln -s ${image} $image
                 echo "file binary-dist $image" >> $out/nix-support/hydra-build-products
               '';
+        }
+      );
+
+      apps = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgsFor.${system}.native;
+          opener = if pkgs.stdenv.isDarwin then "open" else "xdg-open";
+        in
+        {
+          open-manual = {
+            type = "app";
+            program = "${pkgs.writeShellScript "open-nix-manual" ''
+              path="${self.packages.${system}.nix-manual.site}/index.html"
+              if ! ${opener} "$path"; then
+                echo "Failed to open manual with ${opener}. Manual is located at:"
+                echo "$path"
+              fi
+            ''}";
+            meta.description = "Open the Nix manual in your browser";
+          };
         }
       );
 
