@@ -33,7 +33,6 @@ let
   forAllPackages = forAllPackages' { };
   forAllPackages' =
     {
-      enableBindings ? false,
       enableDocs ? false, # already have separate attrs for these
     }:
     lib.genAttrs (
@@ -64,9 +63,7 @@ let
         "nix-cli"
         "nix-functional-tests"
         "nix-json-schema-checks"
-      ]
-      ++ lib.optionals enableBindings [
-        "nix-perl-bindings"
+        "nix-clang-tidy-plugin"
       ]
       ++ lib.optionals enableDocs [
         "nix-manual"
@@ -84,7 +81,6 @@ rec {
     let
       arbitrarySystem = "x86_64-linux";
       listedPkgs = forAllPackages' {
-        enableBindings = true;
         enableDocs = true;
       } (_: null);
       actualPkgs = lib.concatMapAttrs (
@@ -172,9 +168,9 @@ rec {
             # Boost coroutines fail with ASAN on darwin.
             withASan = !pkgs.stdenv.buildPlatform.isDarwin;
             withUBSan = true;
+            # Build without unity to catch include issues.
+            withUnityBuild = false;
             nix-expr = super.nix-expr.override { enableGC = false; };
-            # Unclear how to make Perl bindings work with a dynamically linked ASAN.
-            nix-perl-bindings = null;
           }
         )
       );
@@ -186,6 +182,44 @@ rec {
         pkgName == "nix-nswrapper" -> nixpkgsFor.${system}.native.stdenv.hostPlatform.isLinux
       ) (forAllSystems (system: components.${system}.${pkgName}))
     );
+
+  # Separate build because one cannot mix ASan + UBSan with TSan.
+  buildWithTSan =
+    let
+      components =
+        system:
+        let
+          pkgs = nixpkgsFor.${system}.native;
+        in
+        pkgs.nixComponents2.overrideScope (
+          self: super: {
+            withTSan = true;
+            # TSan has issues with fork and threads.
+            nix-functional-tests = super.nix-functional-tests.overrideAttrs { doCheck = false; };
+          }
+        );
+    in
+    forAllPackages (pkgName: lib.genAttrs linux64BitSystems (system: (components system).${pkgName}));
+
+  # Static analysis with clang-tidy
+  clangTidy = lib.genAttrs linux64BitSystems (
+    system:
+    let
+      pkgs = nixpkgsFor.${system}.nativeForStdenv.clangStdenv;
+      tidyScope = pkgs.nixComponents2.overrideScope (
+        self: super: {
+          withClangTidy = true;
+          # clang-tidy doesn't seem to like unity builds.
+          withUnityBuild = false;
+          # nix-everything is built via callPackage (not the layer system), so
+          # enableClangTidyLayer's doCheck=false doesn't reach it. Set it here
+          # so checkInputs (the *-tests.tests.run derivations) aren't pulled in.
+          nix-everything = super.nix-everything.overrideAttrs { doCheck = false; };
+        }
+      );
+    in
+    tidyScope.nix-everything
+  );
 
   buildNoTests = forAllSystems (system: nixpkgsFor.${system}.native.nixComponents2.nix-cli);
 
@@ -212,9 +246,6 @@ rec {
         pkgName == "nix-nswrapper" -> nixpkgsFor.${system}.native.stdenv.hostPlatform.isLinux
       ) (forAllSystems (system: components.${system}.${pkgName}))
     );
-
-  # Perl bindings for various platforms.
-  perlBindings = forAllSystems (system: nixpkgsFor.${system}.native.nixComponents2.nix-perl-bindings);
 
   # Binary tarball for various platforms, containing a Nix store
   # with the closure of 'nix' package, and the second half of
@@ -245,6 +276,7 @@ rec {
     self.hydraJobs.binaryTarballCross."x86_64-linux"."armv6l-unknown-linux-gnueabihf"
     self.hydraJobs.binaryTarballCross."x86_64-linux"."armv7l-unknown-linux-gnueabihf"
     self.hydraJobs.binaryTarballCross."x86_64-linux"."riscv64-unknown-linux-gnu"
+    self.hydraJobs.binaryTarballCross."x86_64-linux"."x86_64-unknown-freebsd"
   ];
 
   installerScriptForGHA = forAllSystems (
@@ -253,6 +285,32 @@ rec {
       tarballs = [ self.hydraJobs.binaryTarball.${system} ];
     }
   );
+
+  # `NixOS/nix-installer` with this revision's Nix closure embedded.
+  rustInstaller =
+    lib.genAttrs
+      (
+        linux64BitSystems
+        ++ [
+          "x86_64-darwin"
+          "aarch64-darwin"
+        ]
+      )
+      (
+        system:
+        let
+          pkgs = nixpkgsFor.${system}.native;
+          # Embed the native (glibc) Nix even though the Linux installer
+          # binary is static/musl.
+          tarball = pkgs.callPackage ./rust-installer/tarball.nix {
+            nix = pkgs.nixComponents2.nix-everything;
+          };
+          builder = if pkgs.stdenv.hostPlatform.isLinux then pkgs.pkgsStatic else pkgs;
+        in
+        builder.callPackage ./rust-installer {
+          inherit tarball;
+        }
+      );
 
   # docker image with Nix inside
   dockerImage = lib.genAttrs linux64BitSystems (system: self.packages.${system}.dockerImage);
@@ -312,6 +370,13 @@ rec {
           lib = nixpkgsFor.${system}.native.lib;
           nix = self.packages.${system}.nix-cli;
           pkgs = nixpkgsFor.${system}.native;
+        }
+      );
+
+      filetransfer-retry-backoff = forAllSystems (
+        system:
+        nixpkgsFor.${system}.native.callPackage ../tests/filetransfer-retry-backoff {
+          nix = nixpkgsFor.${system}.native.nixComponents2.nix-cli;
         }
       );
     };

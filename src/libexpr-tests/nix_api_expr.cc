@@ -20,8 +20,8 @@ TEST_F(nix_api_expr_test, nix_eval_state_lookup_path)
     auto delTmpDir = std::make_unique<nix::AutoDelete>(tmpDir, true);
     auto nixpkgs = tmpDir / "pkgs";
     auto nixos = tmpDir / "cfg";
-    std::filesystem::create_directories(nixpkgs);
-    std::filesystem::create_directories(nixos);
+    nix::createDirs(nixpkgs);
+    nix::createDirs(nixos);
 
     std::string nixpkgsEntry = "nixpkgs=" + nixpkgs.string();
     std::string nixosEntry = "nixos-config=" + nixos.string();
@@ -474,6 +474,52 @@ TEST_F(nix_api_expr_test, nix_expr_primop_nix_err_key_conversion)
     nix_gc_decref(ctx, primopValue);
     nix_gc_decref(ctx, arg);
     nix_gc_decref(ctx, result);
+}
+
+static void
+primop_alloc_value(void * user_data, nix_c_context * context, EvalState * state, nix_value ** args, nix_value * ret)
+{
+    assert(context);
+    assert(state);
+
+    // Regression test: nix_c_primop_wrapper previously cast the inner
+    // nix::EvalState* directly to EvalState* (C wrapper). C API functions
+    // like nix_alloc_value() then accessed state->state at the wrong offset,
+    // causing a segfault.
+    nix_value * v = nix_alloc_value(context, state);
+    assert(v != nullptr);
+    nix_init_int(context, v, 42);
+    nix_copy_value(context, ret, v);
+    nix_gc_decref(nullptr, v);
+}
+
+TEST_F(nix_api_expr_test, nix_primop_can_use_state_in_callback)
+{
+    PrimOp * primop =
+        nix_alloc_primop(ctx, primop_alloc_value, 1, "allocValue", nullptr, "test alloc_value in callback", nullptr);
+    assert_ctx_ok();
+    nix_value * primopValue = nix_alloc_value(ctx, state);
+    assert_ctx_ok();
+    nix_init_primop(ctx, primopValue, primop);
+    assert_ctx_ok();
+
+    nix_value * dummy = nix_alloc_value(ctx, state);
+    assert_ctx_ok();
+    nix_init_int(ctx, dummy, 0);
+    assert_ctx_ok();
+
+    nix_value * result = nix_alloc_value(ctx, state);
+    assert_ctx_ok();
+    nix_value_call(ctx, state, primopValue, dummy, result);
+    assert_ctx_ok();
+
+    auto r = nix_get_int(ctx, result);
+    ASSERT_EQ(42, r);
+
+    nix_gc_decref(ctx, dummy);
+    nix_gc_decref(ctx, result);
+    nix_gc_decref(ctx, primopValue);
+    nix_gc_decref(ctx, primop);
 }
 
 TEST_F(nix_api_expr_test, nix_value_call_multi_no_args)

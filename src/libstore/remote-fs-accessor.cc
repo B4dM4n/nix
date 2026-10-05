@@ -2,6 +2,8 @@
 
 namespace nix {
 
+void RemoteFSAccessor::anchor() {}
+
 RemoteFSAccessor::RemoteFSAccessor(ref<Store> store, bool requireValidPath, std::optional<AbsolutePath> cacheDir)
     : store(store)
     , narCache(cacheDir)
@@ -35,6 +37,10 @@ std::shared_ptr<SourceAccessor> RemoteFSAccessor::accessObject(const StorePath &
 
 std::optional<SourceAccessor::Stat> RemoteFSAccessor::maybeLstat(const CanonPath & path)
 {
+    if (path.isRoot())
+        return Stat{.type = tDirectory};
+    /* FIXME: Correctly handle invalid names (return nullopt) and don't fail on
+       non-existent paths. */
     auto res = fetch(path);
     return res.first->maybeLstat(res.second);
 }

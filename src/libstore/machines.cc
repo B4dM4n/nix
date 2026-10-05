@@ -1,39 +1,10 @@
 #include "nix/util/base-n.hh"
 #include "nix/store/machines.hh"
-#include "nix/store/globals.hh"
 #include "nix/store/store-open.hh"
 
 #include <algorithm>
 
 namespace nix {
-
-template<>
-Builders BaseSetting<Builders>::parse(const std::string & str) const
-{
-    return {str};
-}
-
-template<>
-std::string BaseSetting<Builders>::to_string() const
-{
-    return value;
-}
-
-template<>
-void BaseSetting<Builders>::appendOrSet(Builders newValue, bool append)
-{
-    if (!append)
-        value.clear();
-    if (!value.empty())
-        value.append("\n");
-    value.append(newValue);
-}
-
-template<>
-struct json_avoids_null<Builders> : std::true_type
-{};
-
-template class BaseSetting<Builders>;
 
 Machine::Machine(
     const std::string & storeUri,
@@ -97,8 +68,8 @@ StoreReference Machine::completeStoreReference() const
     }
 
     if (generic && (generic->scheme == "ssh" || generic->scheme == "ssh-ng")) {
-        if (!sshKey.empty())
-            storeUri.params["ssh-key"] = sshKey.string();
+        if (sshKey)
+            storeUri.params["ssh-key"] = sshKey->string();
         if (sshPublicHostKey != "")
             storeUri.params["base64-ssh-public-host-key"] = sshPublicHostKey;
     }
@@ -207,7 +178,7 @@ static Machine parseBuilderLine(const StringSet & defaultSystems, const std::str
         // `systemTypes`
         isSet(1) ? tokenizeString<StringSet>(tokens[1], ",") : defaultSystems,
         // `sshKey`
-        isSet(2) ? tokens[2] : "",
+        isSet(2) && !tokens[2].empty() ? std::make_optional<std::filesystem::path>(tokens[2]) : std::nullopt,
         // `maxJobs`
         isSet(3) ? parseUnsignedIntField(3) : 1U,
         // `speedFactor`
