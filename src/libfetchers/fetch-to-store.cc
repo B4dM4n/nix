@@ -2,6 +2,7 @@
 #include "nix/fetchers/fetchers.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/environment-variables.hh"
+#include "nix/util/logging.hh"
 
 #include <boost/unordered/concurrent_flat_map.hpp>
 
@@ -82,6 +83,7 @@ std::pair<StorePath, Hash> fetchToStore2(
                     path,
                     store.printStorePath(storePath),
                     hash.to_string(HashFormat::SRI, true));
+                settings.srcToStore->cache.insert_or_assign(srcToStoreKey, std::make_tuple(storePath, hash, mode));
                 return {storePath, hash};
             }
             debug("source path '%s' not in store", path);
@@ -96,8 +98,9 @@ std::pair<StorePath, Hash> fetchToStore2(
     Activity act(
         *logger,
         lvlChatty,
-        actUnknown,
-        fmt(mode == FetchMode::DryRun ? "hashing '%s'" : "copying '%s' to the store", path));
+        actFetchToStore,
+        fmt(mode == FetchMode::DryRun ? "hashing '%s'" : "copying '%s' to the store", path),
+        std::to_array<Logger::Field>({path.to_string(), (uint64_t) (mode == FetchMode::DryRun)}));
 
     auto filter2 = filter ? *filter : defaultPathFilter;
 
@@ -133,6 +136,8 @@ std::pair<StorePath, Hash> fetchToStore2(
                       hash.to_string(HashFormat::SRI, true));
                   return std::make_pair(storePath, hash);
               }();
+
+    act.result(resFetchToStore, store.printStorePath(storePath));
 
     if (cacheKey)
         settings.getCache()->upsert(*cacheKey, {{"hash", hash.to_string(HashFormat::SRI, true)}});

@@ -9,26 +9,26 @@
 
 #include <map>
 #include <thread>
-#include <sstream>
-#include <iostream>
+#include <optional>
+#include <span>
 #include <chrono>
 
 namespace nix {
 
 namespace {
 
-static std::string_view getS(const std::vector<Logger::Field> & fields, size_t n)
+static std::optional<std::string_view> getS(std::span<const Logger::Field> fields, size_t n)
 {
-    if (n >= fields.size() || fields[n].type != Logger::Field::tString)
-        throw Error("could not get expected log field of type 'string' at index %d", n);
-    return fields[n].s;
+    if (n >= fields.size() || !std::holds_alternative<std::string>(fields[n]))
+        return std::nullopt;
+    return std::get<std::string>(fields[n]);
 }
 
-static uint64_t getI(const std::vector<Logger::Field> & fields, size_t n)
+static std::optional<uint64_t> getI(std::span<const Logger::Field> fields, size_t n)
 {
-    if (n >= fields.size() || fields[n].type != Logger::Field::tInt)
-        throw Error("could not get expected log field of type 'int' at index %d", n);
-    return fields[n].i;
+    if (n >= fields.size() || !std::holds_alternative<uint64_t>(fields[n]))
+        return std::nullopt;
+    return std::get<uint64_t>(fields[n]);
 }
 
 static std::string_view storePathToName(std::string_view path)
@@ -105,7 +105,7 @@ private:
     bool printBuildLogs = false;
     bool isTTY;
 
-    std::unique_ptr<InterruptCallback> interruptCallback;
+    std::unique_ptr<InterruptCallback> interruptCallback, stopCallback, contCallback, winchCallback;
 
     void hideCursorIfNeeded() const
     {
@@ -130,6 +130,30 @@ public:
     {
         hideCursorIfNeeded();
         state_.lock()->active = isTTY;
+
+        /* On Ctrl-Z, unhide the cursor before the process is
+           stopped. */
+        stopCallback = createSignalCallback(SignalType::Stop, [&]() {
+            auto state(state_.lock());
+            if (state->active && !state->isPaused())
+                unhideCursorIfNeeded();
+        });
+
+        /* Redraw the progress bar when the process is resumed or the
+           terminal size changes. */
+        auto redrawCallback = [&]() {
+            auto state(state_.lock());
+            if (state->active && !state->isPaused()) {
+                /* Force a redraw, since the new output may be
+                   identical to the one cached by redraw(). */
+                invalidateRedrawCache();
+                hideCursorIfNeeded();
+                update(*state);
+            }
+        };
+        contCallback = createSignalCallback(SignalType::Cont, redrawCallback);
+        winchCallback = createSignalCallback(SignalType::Winch, redrawCallback);
+
         updateThread = std::thread([&]() {
             auto state(state_.lock());
             auto nextWakeup = std::chrono::milliseconds::max();
@@ -203,7 +227,7 @@ public:
         return printBuildLogs;
     }
 
-    void log(Verbosity lvl, std::string_view s) override
+    void log(Verbosity lvl, std::string_view s) noexcept override
     {
         if (lvl > verbosity)
             return;
@@ -211,7 +235,7 @@ public:
         log(*state, lvl, s);
     }
 
-    void logEI(const ErrorInfo & ei) override
+    void logEI(const ErrorInfo & ei) noexcept override
     {
         auto state(state_.lock());
 
@@ -221,7 +245,7 @@ public:
         log(*state, ei.level, oss.view());
     }
 
-    void log(State & state, Verbosity lvl, std::string_view s)
+    void log(State & state, Verbosity lvl, std::string_view s) noexcept
     {
         if (state.active) {
             invalidateRedrawCache();
@@ -237,8 +261,8 @@ public:
         Verbosity lvl,
         ActivityType type,
         const std::string & s,
-        const Fields & fields,
-        ActivityId parent) override
+        std::span<const Field> fields,
+        ActivityId parent) noexcept override
     {
         auto state(state_.lock());
 
@@ -252,39 +276,42 @@ public:
         state->activitiesByType[type].its.emplace(act, i);
 
         if (type == actBuild) {
-            auto name = storePathToNameWithoutDrvSuffix(getS(fields, 0));
-            i->s = fmt("building " ANSI_BOLD "%s" ANSI_NORMAL, name);
-            auto machineName = getS(fields, 1);
-            if (machineName != "")
-                i->s += fmt(" on " ANSI_BOLD "%s" ANSI_NORMAL, machineName);
-
-            // Used to be curRound and nrRounds, but the
-            // implementation was broken for a long time.
-            if (getI(fields, 2) != 1 || getI(fields, 3) != 1) {
-                throw Error("log message indicated repeating builds, but this is not currently implemented");
+            if (auto path = getS(fields, 0)) {
+                auto name = storePathToNameWithoutDrvSuffix(*path);
+                i->s = fmt("building " ANSI_BOLD "%s" ANSI_NORMAL, name);
+                auto machineName = getS(fields, 1);
+                if (machineName && *machineName != "")
+                    i->s += fmt(" on " ANSI_BOLD "%s" ANSI_NORMAL, *machineName);
+                i->name = DrvName(name).name;
             }
-            i->name = DrvName(name).name;
         }
 
         if (type == actSubstitute) {
-            auto name = storePathToName(getS(fields, 0));
+            auto path = getS(fields, 0);
             auto sub = getS(fields, 1);
-            i->s =
-                fmt(hasPrefix(sub, "local") ? "copying " ANSI_BOLD "%s" ANSI_NORMAL " from %s"
-                                            : "fetching " ANSI_BOLD "%s" ANSI_NORMAL " from %s",
-                    name,
-                    sub);
+            if (path && sub) {
+                auto name = storePathToName(*path);
+                i->s =
+                    fmt(hasPrefix(*sub, "local") ? "copying " ANSI_BOLD "%s" ANSI_NORMAL " from %s"
+                                                 : "fetching " ANSI_BOLD "%s" ANSI_NORMAL " from %s",
+                        name,
+                        *sub);
+            }
         }
 
         if (type == actPostBuildHook) {
-            auto name = storePathToNameWithoutDrvSuffix(getS(fields, 0));
-            i->s = fmt("post-build " ANSI_BOLD "%s" ANSI_NORMAL, name);
-            i->name = DrvName(name).name;
+            if (auto path = getS(fields, 0)) {
+                auto name = storePathToNameWithoutDrvSuffix(*path);
+                i->s = fmt("post-build " ANSI_BOLD "%s" ANSI_NORMAL, name);
+                i->name = DrvName(name).name;
+            }
         }
 
         if (type == actQueryPathInfo) {
-            auto name = storePathToName(getS(fields, 0));
-            i->s = fmt("querying " ANSI_BOLD "%s" ANSI_NORMAL " on %s", name, getS(fields, 1));
+            auto path = getS(fields, 0);
+            auto sub = getS(fields, 1);
+            if (path && sub)
+                i->s = fmt("querying " ANSI_BOLD "%s" ANSI_NORMAL " on %s", storePathToName(*path), *sub);
         }
 
         if ((type == actFileTransfer && hasAncestor(*state, actCopyPath, parent))
@@ -310,7 +337,7 @@ public:
         return false;
     }
 
-    void stopActivity(ActivityId act) override
+    void stopActivity(ActivityId act) noexcept override
     {
         auto state(state_.lock());
 
@@ -332,86 +359,110 @@ public:
         update(*state);
     }
 
-    void result(ActivityId act, ResultType type, const std::vector<Field> & fields) override
+    void result(ActivityId act, ResultType type, std::span<const Field> fields) noexcept override
     {
         auto state(state_.lock());
 
-        if (type == resFileLinked) {
+        switch (type) {
+        case resFileLinked: {
             state->filesLinked++;
-            state->bytesLinked += getI(fields, 0);
-            update(*state);
+            state->bytesLinked += getI(fields, 0).value_or(0);
+            break;
         }
-
-        else if (type == resBuildLogLine || type == resPostBuildLogLine) {
-            auto lastLine = chomp(getS(fields, 0));
+        case resBuildLogLine:
+        case resPostBuildLogLine: {
+            auto line = getS(fields, 0);
+            if (!line)
+                return;
+            auto lastLine = chomp(*line);
             auto i = state->its.find(act);
-            assert(i != state->its.end());
-            ActInfo info = *i->second;
+            if (i == state->its.end())
+                return;
+            ActInfo & info = *i->second;
             if (printBuildLogs) {
-                auto suffix = "> ";
-                if (type == resPostBuildLogLine) {
-                    suffix = " (post)> ";
-                }
+                const char * suffix = (type == resPostBuildLogLine) ? " (post)> " : "> ";
                 log(*state, lvlInfo, ANSI_FAINT + info.name.value_or("unnamed") + suffix + ANSI_NORMAL + lastLine);
+                return; /* No need to update(). */
             } else {
-                state->activities.erase(i->second);
+                /* Bump activity for round-robin. Modify the lastLine in-place without invalidating iterators. */
+                state->activities.splice(state->activities.end(), state->activities, i->second);
                 info.lastLine = lastLine;
-                state->activities.emplace_back(info);
-                i->second = std::prev(state->activities.end());
-                update(*state);
             }
+            break;
         }
-
-        else if (type == resUntrustedPath) {
+        case resUntrustedPath:
             state->untrustedPaths++;
-            update(*state);
-        }
-
-        else if (type == resCorruptedPath) {
+            break;
+        case resCorruptedPath:
             state->corruptedPaths++;
-            update(*state);
-        }
-
-        else if (type == resSetPhase) {
+            break;
+        case resSetPhase: {
+            auto phase = getS(fields, 0);
+            if (!phase)
+                return;
             auto i = state->its.find(act);
-            assert(i != state->its.end());
-            i->second->phase = getS(fields, 0);
-            update(*state);
+            if (i == state->its.end())
+                return;
+            i->second->phase = *phase;
+            break;
         }
-
-        else if (type == resProgress) {
+        case resProgress: {
+            auto done = getI(fields, 0);
+            auto expected = getI(fields, 1);
+            auto running = getI(fields, 2);
+            auto failed = getI(fields, 3);
+            if (!done || !expected || !running || !failed)
+                return;
             auto i = state->its.find(act);
-            assert(i != state->its.end());
+            if (i == state->its.end())
+                return;
             ActInfo & actInfo = *i->second;
-            actInfo.done = getI(fields, 0);
-            actInfo.expected = getI(fields, 1);
-            actInfo.running = getI(fields, 2);
-            actInfo.failed = getI(fields, 3);
-            update(*state);
+            actInfo.done = *done;
+            actInfo.expected = *expected;
+            actInfo.running = *running;
+            actInfo.failed = *failed;
+            break;
         }
-
-        else if (type == resSetExpected) {
+        case resSetExpected: {
+            auto expectedType = getI(fields, 0);
+            auto expected = getI(fields, 1);
+            if (!expectedType || !expected)
+                return;
             auto i = state->its.find(act);
-            assert(i != state->its.end());
+            if (i == state->its.end())
+                return;
             ActInfo & actInfo = *i->second;
-            auto type = (ActivityType) getI(fields, 0);
+            auto type = (ActivityType) *expectedType;
             auto & j = actInfo.expectedByType[type];
             state->activitiesByType[type].expected -= j;
-            j = getI(fields, 1);
+            j = *expected;
             state->activitiesByType[type].expected += j;
-            update(*state);
+            break;
+        }
+        case resFetchStatus: {
+            auto lastLine = getS(fields, 0);
+            if (!lastLine)
+                return;
+            auto i = state->its.find(act);
+            if (i == state->its.end())
+                return;
+            ActInfo & actInfo = *i->second;
+            actInfo.lastLine = *lastLine;
+            break;
+        }
+        case resFetchToStore:
+            /* TODO: Do something to render this maybe? */
+            return;
+        default:
+            /* Everything else can't happen (almost) because ResultType is a plain
+               enum and it would be UB. */
+            return;
         }
 
-        else if (type == resFetchStatus) {
-            auto i = state->its.find(act);
-            assert(i != state->its.end());
-            ActInfo & actInfo = *i->second;
-            actInfo.lastLine = getS(fields, 0);
-            update(*state);
-        }
+        update(*state);
     }
 
-    void update(State & state)
+    void update(State & state) noexcept
     {
         state.haveUpdate = true;
         updateCV.notify_one();
@@ -424,7 +475,7 @@ public:
      * with text selection in some terminals, including libvte-based terminal
      * emulators.
      */
-    void redraw(std::string newOutput)
+    void redraw(std::string newOutput) noexcept
     {
         auto lastOutput(lastOutput_.lock());
         if (newOutput != *lastOutput) {
@@ -444,7 +495,7 @@ public:
         writeToStderr("\r\e[K");
     }
 
-    std::chrono::milliseconds draw(State & state)
+    std::chrono::milliseconds draw(State & state) noexcept
     {
         auto nextWakeup = std::chrono::milliseconds::max();
 
@@ -508,7 +559,7 @@ public:
         return nextWakeup;
     }
 
-    std::string getStatus(State & state)
+    std::string getStatus(State & state) noexcept
     {
         std::string res;
 
@@ -683,8 +734,7 @@ public:
     {
         auto state(state_.lock());
         if (state->active) {
-            invalidateRedrawCache();
-            std::cerr << "\r\e[K";
+            clearProgressDisplay();
             Logger::writeToStdout(s);
             draw(*state);
         } else {
@@ -698,7 +748,7 @@ public:
         if (!state->active)
             return {};
         invalidateRedrawCache();
-        std::cerr << fmt("\r\e[K%s ", msg);
+        writeToStderr(fmt("\r\e[K%s ", msg));
         unhideCursorIfNeeded();
         auto s = trim(readLine(getStandardInput(), true));
         hideCursorIfNeeded();
@@ -718,7 +768,7 @@ public:
 
 std::unique_ptr<Logger> makeProgressBar()
 {
-    return std::make_unique<ProgressBar>(isTTY());
+    return std::make_unique<ProgressBar>(shouldANSI());
 }
 
 } // namespace nix

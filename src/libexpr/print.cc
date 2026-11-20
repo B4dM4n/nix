@@ -1,6 +1,3 @@
-#include <limits>
-#include <sstream>
-
 #include "nix/expr/print.hh"
 #include "nix/util/ansicolor.hh"
 #include "nix/util/signals.hh"
@@ -10,6 +7,10 @@
 #include "nix/expr/eval.hh"
 
 #include <boost/unordered/unordered_flat_set.hpp>
+
+#include <limits>
+#include <sstream>
+#include <ostream>
 
 namespace nix {
 
@@ -257,7 +258,11 @@ private:
     {
         if (options.ansiColors)
             output << ANSI_GREEN;
-        output << v.path().to_string(); // !!! escaping?
+        const auto sourcePath = v.path();
+        output <<
+            /* See the comment in libexpr/value-to-xml.cc about separate roots.
+               TODO: Handle escaping. */
+            (sourcePath.accessor == state.rootFS ? sourcePath.path.abs() : sourcePath.to_string());
         if (options.ansiColors)
             output << ANSI_NORMAL;
     }

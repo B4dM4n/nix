@@ -3,6 +3,7 @@
 #include "nix/util/util.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/finally.hh"
+#include "nix/util/system-error.hh"
 
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <chrono>
@@ -168,10 +169,19 @@ CanonPath getCurrentCgroup()
     return CanonPath{ourCgroup};
 }
 
+static std::optional<CanonPath> rootCgroupOverride;
+
 CanonPath getRootCgroup()
 {
+    if (rootCgroupOverride)
+        return *rootCgroupOverride;
     static auto rootCgroup = getCurrentCgroup();
     return rootCgroup;
+}
+
+void setRootCgroup(CanonPath cgroup)
+{
+    rootCgroupOverride = std::move(cgroup);
 }
 
 } // namespace nix::linux

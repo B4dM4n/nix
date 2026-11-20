@@ -18,6 +18,7 @@
 #include "nix/util/source-path.hh"
 #include "nix/expr/print-options.hh"
 #include "nix/util/checked-arithmetic.hh"
+#include "nix/util/pos-idx.hh"
 
 #include <boost/unordered/unordered_flat_map_fwd.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -54,6 +55,8 @@ enum InternalType {
     /* layout: Pair of pointers payload */
     tFirstPairOfPointers,
     tListSmall = tFirstPairOfPointers,
+    tString,
+    tPath,
     tPrimOpApp,
     tApp,
     tThunk,
@@ -62,8 +65,7 @@ enum InternalType {
     /* layout: Single untaggable field */
     tFirstSingleUntaggable,
     tListN = tFirstSingleUntaggable,
-    tString,
-    tPath,
+    tSymbol,
     tNumberOfInternalTypes, // Must be last
 };
 
@@ -95,8 +97,8 @@ struct ExprBlackHole;
 struct PrimOp;
 class Symbol;
 class SymbolStr;
-class PosIdx;
 struct Pos;
+class PosTable;
 class StorePath;
 class EvalState;
 class EvalMemory;
@@ -301,6 +303,12 @@ namespace detail {
  */
 struct ValueBase
 {
+    struct Symbol
+    {
+        size_t symbol;
+        const StringData * str;
+    };
+
     /**
      * Strings in the evaluator carry a so-called `context` which
      * is a list of strings representing store paths.  This is to
@@ -335,7 +343,7 @@ struct ValueBase
          * to represent a flattening of the recursive sum type that is a
          * context element.
          *
-         * @See NixStringContext for an more easily understood type,
+         * @see NixStringContext for an more easily understood type,
          * that of the "builder" for this data structure.
          */
         struct Context
@@ -475,17 +483,10 @@ struct ValueBase
 
         [[noreturn]] void rethrow() const
         {
-            try {
-                std::rethrow_exception(exRef->ex);
-            } catch (BaseError & e) {
-                /* Rethrow the copy of the exception - not the original one.
-                   Stack tracing mechanisms rely on being able to modify the exceptions
-                   they catch by reference. */
-                e.throwClone();
-            } catch (...) {
-                throw;
-            }
-            unreachable();
+            /* Rethrow the copy of the exception - not the original one.
+               Stack tracing mechanisms rely on being able to modify the exceptions
+               they catch by reference. */
+            rethrowExceptionCopy(exRef->ex);
         }
     };
 };
@@ -505,8 +506,9 @@ struct PayloadTypeToInternalType
     MACRO(ValueBase::StringWithContext, string, tString)            \
     MACRO(ValueBase::Path, path, tPath)                             \
     MACRO(ValueBase::Null, null_, tNull)                            \
-    MACRO(Bindings *, attrs, tAttrs)                                \
+    MACRO(const Bindings *, attrs, tAttrs)                          \
     MACRO(ValueBase::List, bigList, tListN)                         \
+    MACRO(ValueBase::Symbol, symbol, tSymbol)                       \
     MACRO(ValueBase::SmallList, smallList, tListSmall)              \
     MACRO(ValueBase::ClosureThunk, thunk, tThunk)                   \
     MACRO(ValueBase::FunctionApplicationThunk, app, tApp)           \
@@ -647,11 +649,10 @@ class alignas(16)
      * That leaves the first 8 bytes free for storing the InternalType in the upper
      * bits.
      *
-     * PrimaryDiscriminator::pdListN - pdPath - Only has 3 available padding bits
+     * PrimaryDiscriminator::pdListN - pdSymbol - Only has 3 available padding bits
      * because:
      * - tListN needs a size, whose lower bits we can't borrow.
-     * - tString and tPath have C-string fields, which don't necessarily need to
-     * be aligned.
+     * - tSymbol encodes the symbol value as 32 bit integer.
      *
      * In this case we reserve their discriminators directly in the PrimaryDiscriminator
      * bits stored in payload[0].
@@ -667,8 +668,7 @@ class alignas(16)
         pdSingleDWord, //< layout: Single/zero field payload
         /* The order of these enumerations must be the same as in InternalType. */
         pdListN, //< layout: Single untaggable field.
-        pdString,
-        pdPath,
+        pdSymbol,
         pdPairOfPointers, //< layout: Pair of pointers payload
     };
 
@@ -752,7 +752,7 @@ class alignas(16)
     void setUntaggablePayload(T * firstPtrField, U untaggableField) noexcept
     {
         Payload payload;
-        static_assert(discriminator >= pdListN && discriminator <= pdPath);
+        static_assert(discriminator >= pdListN && discriminator <= pdSymbol);
         auto firstFieldPayload = std::bit_cast<PackedPointer>(firstPtrField);
         assertAligned(firstFieldPayload);
         payload[0] = static_cast<int>(discriminator) | firstFieldPayload;
@@ -770,6 +770,7 @@ class alignas(16)
             assertAligned(firstFieldPayload);
             payload[0] = static_cast<int>(pdPairOfPointers) | firstFieldPayload;
         }
+        static_assert(tLastPairOfPointers - tFirstPairOfPointers < (1 << discriminatorBits));
         {
             auto secondFieldPayload = std::bit_cast<PackedPointer>(secondPtrField);
             assertAligned(secondFieldPayload);
@@ -836,8 +837,7 @@ protected:
             return InternalType(payload[0] >> discriminatorBits);
         /* The order must match that of the enumerations defined in InternalType. */
         case pdListN:
-        case pdString:
-        case pdPath:
+        case pdSymbol:
             return static_cast<InternalType>(tFirstSingleUntaggable + (pd - pdListN));
         case pdPairOfPointers:
             return static_cast<InternalType>(tFirstPairOfPointers + (payload[1] & discriminatorMask));
@@ -859,6 +859,8 @@ protected:
     }
 
     NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(SmallList, [0], [1])
+    NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(StringWithContext, .str, .context)
+    NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(Path, .accessor, .path)
     NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(PrimOpApplicationThunk, .left, .right)
     NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(FunctionApplicationThunk, .left, .right)
     NIX_VALUE_STORAGE_DEF_PAIR_OF_PTRS(ClosureThunk, .env, .expr)
@@ -900,7 +902,7 @@ protected:
         primOp = std::bit_cast<PrimOp *>(payload[1]);
     }
 
-    void getStorage(Bindings *& attrs) const noexcept
+    void getStorage(const Bindings *& attrs) const noexcept
     {
         Payload payload = loadPayload();
         attrs = std::bit_cast<Bindings *>(payload[1]);
@@ -913,18 +915,11 @@ protected:
         list.size = payload[1];
     }
 
-    void getStorage(StringWithContext & string) const noexcept
+    void getStorage(Symbol & symbol) const noexcept
     {
         Payload payload = loadPayload();
-        string.context = untagPointer<decltype(string.context)>(payload[0]);
-        string.str = std::bit_cast<const StringData *>(payload[1]);
-    }
-
-    void getStorage(Path & path) const noexcept
-    {
-        Payload payload = loadPayload();
-        path.accessor = untagPointer<decltype(path.accessor)>(payload[0]);
-        path.path = std::bit_cast<const StringData *>(payload[1]);
+        symbol.str = untagPointer<decltype(symbol.str)>(payload[0]);
+        symbol.symbol = payload[1];
     }
 
     void getStorage(Failed *& failed) const noexcept
@@ -963,7 +958,7 @@ protected:
         setSingleDWordPayload<tPrimOp>(std::bit_cast<PackedPointer>(primOp));
     }
 
-    void setStorage(Bindings * bindings) noexcept
+    void setStorage(const Bindings * bindings) noexcept
     {
         setSingleDWordPayload<tAttrs>(std::bit_cast<PackedPointer>(bindings));
     }
@@ -973,14 +968,9 @@ protected:
         setUntaggablePayload<pdListN>(list.elems, list.size);
     }
 
-    void setStorage(StringWithContext string) noexcept
+    void setStorage(Symbol symbol) noexcept
     {
-        setUntaggablePayload<pdString>(string.context, string.str);
-    }
-
-    void setStorage(Path path) noexcept
-    {
-        setUntaggablePayload<pdPath>(path.accessor, path.path);
+        setUntaggablePayload<pdSymbol>(symbol.str, symbol.symbol);
     }
 
     void setStorage(Failed * failed) noexcept
@@ -1175,6 +1165,8 @@ static_assert(std::random_access_iterator<ListView::iterator>);
 struct Value : public ValueStorage<sizeof(void *)>
 {
     friend std::string showType(const Value & v);
+    /* Only the symbol table creates `tSymbol` values. */
+    friend class SymbolStr;
 
     /**
      * Empty list constant.
@@ -1219,6 +1211,20 @@ private:
         T out;
         ValueStorage::getStorage(out);
         return out;
+    }
+
+    /**
+     * A string is stored either as `tString`, or as `tSymbol` if it comes
+     * from the symbol table. A symbol never has a context.
+     */
+    StringWithContext getStringStorage() const noexcept
+    {
+        if (isa<tSymbol>()) {
+            ValueBase::Symbol symbol;
+            ValueStorage::getStorage(symbol);
+            return {.str = symbol.str, .context = nullptr};
+        }
+        return getStorage<StringWithContext>();
     }
 
 public:
@@ -1272,7 +1278,7 @@ public:
      * Returns the normal type of a Value. This only returns nThunk if
      * the Value hasn't been forceValue'd
      *
-     * @param invalidIsThunk Instead of UB an an invalid (probably
+     * @tparam invalidIsThunk Instead of UB an an invalid (probably
      * 0, so uninitialized) internal type, return `nThunk`.
      */
     template<bool invalidIsThunk = false>
@@ -1296,9 +1302,10 @@ public:
             t[tApp] = nThunk;
             t[tThunk] = nThunk;
             t[tListSmall] = nList;
-            t[tListN] = nList;
             t[tString] = nString;
             t[tPath] = nPath;
+            t[tListN] = nList;
+            t[tSymbol] = nString;
             return t;
         }();
 
@@ -1321,6 +1328,41 @@ public:
     inline bool isValid() const noexcept
     {
         return !isa<tUninitialized>();
+    }
+
+    /**
+     * Whether the value has been evaluated to WHNF, i.e. non-deep successful
+     * evaluation result, or successful "root of a value".
+     * See https://nix.dev/manual/nix/latest/language/evaluation.html?highlight=whnf#values
+     */
+    inline bool isWHNF() const noexcept
+    {
+        switch (getInternalType()) {
+        case tUninitialized:
+            panic("attempt to use uninitialized Value");
+        case tFailed:
+        case tApp:
+        case tThunk:
+            return false;
+        case tInt:
+        case tBool:
+        case tNull:
+        case tFloat:
+        case tExternal:
+        case tPrimOp:
+        case tAttrs:
+        case tListSmall:
+        case tString:
+        case tPath:
+        case tPrimOpApp: // primop-app is known to be a function, which is WHNF
+        case tLambda:
+        case tListN:
+        case tSymbol:
+            return true;
+        case tNumberOfInternalTypes:
+            unreachable();
+        }
+        unreachable();
     }
 
     inline void mkInt(NixInt::Inner n) noexcept
@@ -1361,7 +1403,7 @@ public:
         setStorage(Null{});
     }
 
-    inline void mkAttrs(Bindings * a) noexcept
+    inline void mkAttrs(const Bindings * a) noexcept
     {
         setStorage(a);
     }
@@ -1462,12 +1504,12 @@ public:
 
     const StringData & string_data() const noexcept
     {
-        return *getStorage<StringWithContext>().str;
+        return *getStringStorage().str;
     }
 
     const char * c_str() const noexcept
     {
-        return getStorage<StringWithContext>().str->data();
+        return getStringStorage().str->data();
     }
 
     std::string_view string_view() const noexcept
@@ -1475,9 +1517,17 @@ public:
         return string_data().view();
     }
 
+    /**
+     * If this string comes from the symbol table, returns its symbol,
+     * otherwise the null symbol.
+     * @pre type() == nString
+     * @note Defined in symbol-table.hh, which defines `nix::Symbol`.
+     */
+    nix::Symbol symbol() const noexcept;
+
     const Value::StringWithContext::Context * context() const noexcept
     {
-        return getStorage<StringWithContext>().context;
+        return getStringStorage().context;
     }
 
     ExternalValueBase * external() const noexcept
@@ -1487,7 +1537,7 @@ public:
 
     const Bindings * attrs() const noexcept
     {
-        return getStorage<Bindings *>();
+        return getStorage<const Bindings *>();
     }
 
     const PrimOp * primOp() const noexcept
@@ -1583,5 +1633,21 @@ typedef std::shared_ptr<Value *> RootValue;
 
 RootValue allocRootValue(Value * v);
 
-void forceNoNullByte(std::string_view s, std::function<Pos()> = nullptr);
+/**
+ * Throws the error for a string that contains null bytes. If @p positions is
+ * given, the error points at @p pos.
+ */
+[[noreturn, gnu::cold, gnu::noinline]] void
+throwNullByteError(std::string_view s, const PosTable * positions = nullptr, PosIdx pos = noPos);
+
+/**
+ * Throws if @p s contains a null byte, which is not supported by the whole codebase yet.
+ * If @p positions is given, the error points at @p pos. The position is only
+ * resolved if the check fails.
+ */
+inline void forceNoNullByte(std::string_view s, const PosTable * positions = nullptr, PosIdx pos = noPos)
+{
+    if (s.find('\0') != s.npos) [[unlikely]]
+        throwNullByteError(s, positions, pos);
+}
 } // namespace nix

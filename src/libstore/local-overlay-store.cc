@@ -79,14 +79,14 @@ LocalOverlayStore::LocalOverlayStore(ref<const Config> config)
     }
 }
 
-void LocalOverlayStore::registerDrvOutput(const Realisation & info)
+void LocalOverlayStore::registerDrvOutputUnchecked(const Realisation & info)
 {
     // First do queryRealisation on lower layer to populate DB
     auto res = lowerStore->queryRealisation(info.id);
     if (res)
-        LocalStore::registerDrvOutput({*res, info.id});
+        LocalStore::registerDrvOutputUnchecked({*res, info.id});
 
-    LocalStore::registerDrvOutput(info);
+    LocalStore::registerDrvOutputUnchecked(info);
 }
 
 void LocalOverlayStore::queryPathInfoUncached(
@@ -213,6 +213,8 @@ void LocalOverlayStore::collectGarbage(const GCOptions & options, GCResults & re
 
 void LocalOverlayStore::deleteStorePath(const std::filesystem::path & path, uint64_t & bytesFreed, bool isKnownPath)
 {
+    bytesFreed = 0;
+
     if (path.parent_path() != config->realStoreDir.get()) {
         warn("local-overlay: unexpected gc path %s", PathFmt(path));
         return;

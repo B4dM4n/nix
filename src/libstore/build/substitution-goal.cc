@@ -7,6 +7,8 @@
 #include "nix/util/signals.hh"
 #include "nix/util/callback.hh"
 
+#include <array>
+
 namespace nix {
 
 PathSubstitutionGoal::PathSubstitutionGoal(
@@ -26,7 +28,14 @@ PathSubstitutionGoal::~PathSubstitutionGoal()
     cleanup();
 }
 
-Goal::Co PathSubstitutionGoal::init()
+Goal::Co<Goal::ExitCode> PathSubstitutionGoal::init()
+{
+    auto result = co_await substitute();
+    buildResult = std::move(result.second);
+    co_return result.first;
+}
+
+Goal::Co<PathSubstitutionGoal::Result> PathSubstitutionGoal::substitute()
 {
     trace("init");
 
@@ -34,7 +43,10 @@ Goal::Co PathSubstitutionGoal::init()
 
     /* If the path already exists we're done. */
     if (!repair && worker.store.isValidPath(storePath)) {
-        co_return doneSuccess(BuildResult::Success{.status = BuildResult::Success::AlreadyValid});
+        co_return Result{
+            ecSuccess,
+            BuildResult{.inner = BuildResult::Success{.status = BuildResult::Success::AlreadyValid}},
+        };
     }
 
     if (worker.store.config.getReadOnly())
@@ -75,8 +87,6 @@ Goal::Co PathSubstitutionGoal::init()
             info = co_await AsyncCallback<ref<const ValidPathInfo>>(
                 [sub, path = subPath.value_or(storePath)](auto cb) { sub->queryPathInfo(path, std::move(cb)); });
         } catch (InvalidPath &) {
-            continue;
-        } catch (SubstituterDisabled & e) {
             continue;
         } catch (Error & e) {
             lastStoresException = std::make_optional(std::move(e));
@@ -131,10 +141,27 @@ Goal::Co PathSubstitutionGoal::init()
 
         co_await await(std::move(waitees));
 
-        // FIXME: consider returning boolean instead of passing in reference
-        bool out = false; // is mutated by tryToRun
-        co_await tryToRun(subPath ? *subPath : storePath, sub, info, out);
-        substituterFailed = substituterFailed || out;
+        if (nrFailed > 0) {
+            co_return Result{
+                nrNoSubstituters > 0 ? ecNoSubstituters : ecFailed,
+                BuildResult{
+                    .inner = BuildResult::Failure{{
+                        .status = BuildResult::Failure::DependencyFailed,
+                        .msg = HintFmt(
+                            "some references of path '%s' could not be realised",
+                            worker.store.printStorePath(storePath)),
+                    }}},
+            };
+        }
+
+        SubstitutionResult res = co_await tryToRun(subPath ? *subPath : storePath, sub, info);
+        if (res == SubstitutionResult::Ok)
+            co_return Result{
+                ecSuccess,
+                BuildResult{.inner = BuildResult::Success{.status = BuildResult::Success::Substituted}},
+            };
+
+        substituterFailed = substituterFailed || (res == SubstitutionResult::SubstituterFailed);
     }
 
     /* None left.  Terminate this goal and let someone else deal
@@ -154,30 +181,22 @@ Goal::Co PathSubstitutionGoal::init()
     /* Hack: don't indicate failure if there were no substituters.
        In that case the calling derivation should just do a
        build. */
-    co_return doneFailure(
+    co_return Result{
         substituterFailed ? ecFailed : ecNoSubstituters,
-        BuildResult::Failure{{
-            .status = BuildResult::Failure::NoSubstituters,
-            .msg = HintFmt(
-                "path '%s' is required, but there is no substituter that can build it",
-                worker.store.printStorePath(storePath)),
-        }});
+        BuildResult{
+            .inner = BuildResult::Failure{{
+                .status = BuildResult::Failure::NoSubstituters,
+                .msg = HintFmt(
+                    "path '%s' is required, but there is no substituter that can build it",
+                    worker.store.printStorePath(storePath)),
+            }}},
+    };
 }
 
-Goal::Co PathSubstitutionGoal::tryToRun(
-    StorePath subPath, nix::ref<Store> sub, std::shared_ptr<const ValidPathInfo> info, bool & substituterFailed)
+Goal::Co<PathSubstitutionGoal::SubstitutionResult>
+PathSubstitutionGoal::tryToRun(StorePath subPath, nix::ref<Store> sub, std::shared_ptr<const ValidPathInfo> info)
 {
     trace("all references realised");
-
-    if (nrFailed > 0) {
-        co_return doneFailure(
-            nrNoSubstituters > 0 ? ecNoSubstituters : ecFailed,
-            BuildResult::Failure{{
-                .status = BuildResult::Failure::DependencyFailed,
-                .msg = HintFmt(
-                    "some references of path '%s' could not be realised", worker.store.printStorePath(storePath)),
-            }});
-    }
 
     for (auto & i : info->references)
         /* ignore self-references */
@@ -230,7 +249,8 @@ Goal::Co PathSubstitutionGoal::tryToRun(
             Activity act(
                 *logger,
                 actSubstitute,
-                Logger::Fields{workerStore->printStorePath(storePath), sub->config.getHumanReadableURI()});
+                std::to_array<Logger::Field>(
+                    {workerStore->printStorePath(storePath), sub->config.getHumanReadableURI()}));
             PushActivity pact(act.id);
 
             copyStorePath(*sub, *workerStore, subPath, repair, sub->config.isTrusted ? NoCheckSigs : CheckSigs);
@@ -271,12 +291,13 @@ Goal::Co PathSubstitutionGoal::tryToRun(
             /* Missing NARs are expected when they've been garbage collected.
                This is not a failure, so log as a warning instead of an error. */
             logWarning({.msg = sg.info().msg});
+            co_return SubstitutionResult::SubstituteGone;
         } catch (...) {
             printError(e.what());
-            substituterFailed = true;
+            co_return SubstitutionResult::SubstituterFailed;
         }
 
-        co_return Return{};
+        unreachable();
     }
 
     worker.markContentsGood(storePath);
@@ -300,7 +321,7 @@ Goal::Co PathSubstitutionGoal::tryToRun(
 
     worker.updateProgress();
 
-    co_return doneSuccess(BuildResult::Success{.status = BuildResult::Success::Substituted});
+    co_return SubstitutionResult::Ok;
 }
 
 void PathSubstitutionGoal::cleanup()

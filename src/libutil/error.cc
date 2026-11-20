@@ -22,10 +22,6 @@ void UsageError::anchor() {}
 
 void UnimplementedError::anchor() {}
 
-void SystemError::anchor() {}
-
-void SysError::anchor() {}
-
 void BaseError::addTrace(std::shared_ptr<const Pos> && e, HintFmt hint, TracePrint print)
 {
     err.traces.push_front(Trace{.pos = std::move(e), .hint = hint, .print = print});
@@ -58,8 +54,6 @@ bool BaseError::hasPos() const
 {
     return err.pos.get() && *err.pos.get();
 }
-
-std::optional<std::string> ErrorInfo::programName = std::nullopt;
 
 std::ostream & operator<<(std::ostream & os, const HintFmt & hf)
 {
@@ -174,7 +168,7 @@ static void printTrace(std::ostream & output, const std::string_view & indent, s
         count++;
 }
 
-void printSkippedTracesMaybe(
+static void printSkippedTracesMaybe(
     std::ostream & output,
     const std::string_view & indent,
     size_t & count,
@@ -269,11 +263,7 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
         assert(false);
     }
 
-    // FIXME: show the program name as part of the trace?
-    if (einfo.programName && einfo.programName != ErrorInfo::programName)
-        prefix += fmt(" [%s]:" ANSI_NORMAL " ", einfo.programName.value_or(""));
-    else
-        prefix += ":" ANSI_NORMAL " ";
+    prefix += ":" ANSI_NORMAL " ";
 
     std::ostringstream oss;
 
@@ -430,7 +420,11 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
         oss << "Did you mean " << suggestions.trim() << "?" << std::endl;
     }
 
-    out << indent(prefix, std::string(filterANSIEscapes(prefix, true).size(), ' '), chomp(oss.str()));
+    if (einfo.noIndent) {
+        out << (prefix.ends_with(" ") ? prefix.substr(0, prefix.size() - 1) : prefix) << chomp(oss.str());
+    } else {
+        out << indent(prefix, std::string(filterANSIEscapes(prefix, true).size(), ' '), chomp(oss.str()));
+    }
 
     return out;
 }
@@ -456,6 +450,20 @@ static void writeErr(std::string_view buf)
 #endif
         buf = buf.substr(n);
     }
+}
+
+void rethrowExceptionCopy(std::exception_ptr ex)
+{
+    try {
+        std::rethrow_exception(ex);
+    } catch (BaseError & e) {
+        /* `throwClone` is the only way to copy a `BaseError` without
+           slicing it. Anything else propagates from here as it is. */
+        e.throwClone();
+    }
+    /* Not reached, since both of the above throw, but GCC cannot tell, and
+       warns that this `[[noreturn]]` function returns. */
+    unreachable();
 }
 
 void panic(std::string_view msg)
@@ -484,8 +492,6 @@ void unreachable(std::source_location loc)
 int handleExceptions(const std::string & programName, fun<void()> body)
 {
     ReceiveInterrupts receiveInterrupts; // FIXME: need better place for this
-
-    ErrorInfo::programName = baseNameOf(programName);
 
     auto doLog = [&](BaseError & e) {
         try {

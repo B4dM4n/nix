@@ -5,6 +5,8 @@
 #include <set>
 #include <unordered_set>
 
+#include <boost/unordered/concurrent_flat_map_fwd.hpp>
+
 namespace nix {
 
 /**
@@ -21,6 +23,10 @@ typedef fun<RestrictedPathError(const CanonPath & path)> MakeNotAllowedError;
  */
 struct FilteringSourceAccessor : SourceAccessor
 {
+private:
+    void anchor() override;
+
+public:
     ref<SourceAccessor> next;
     CanonPath prefix;
     MakeNotAllowedError makeNotAllowedError;
@@ -76,6 +82,10 @@ struct FilteringSourceAccessor : SourceAccessor
  */
 struct AllowListSourceAccessor : public FilteringSourceAccessor
 {
+private:
+    void anchor() override;
+
+public:
     /**
      * Grant access to the specified prefix.
      */
@@ -95,9 +105,13 @@ struct AllowListSourceAccessor : public FilteringSourceAccessor
  */
 struct CachingFilteringSourceAccessor : FilteringSourceAccessor
 {
-    std::map<CanonPath, bool> cache;
+private:
+    void anchor() override;
 
-    using FilteringSourceAccessor::FilteringSourceAccessor;
+public:
+    const ref<boost::concurrent_flat_map<CanonPath, bool>> cache;
+
+    CachingFilteringSourceAccessor(const SourcePath & src, MakeNotAllowedError && makeNotAllowedError);
 
     bool isAllowed(const CanonPath & path) override;
 

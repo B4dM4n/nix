@@ -1,8 +1,11 @@
 #pragma once
 
 #include <filesystem>
+#include <variant>
 
 #include "nix/util/canon-path.hh"
+#include "nix/util/fmt.hh"
+#include "nix/util/os-canon-path.hh"
 #include "nix/util/fun.hh"
 #include "nix/util/hash.hh"
 #include "nix/util/ref.hh"
@@ -152,7 +155,7 @@ public:
     virtual DirEntries readDirectory(const CanonPath & path) = 0;
 
     /**
-     * Variation of readDirectory that receives a SourceAccessor possibly scoped to \ref dirPath.
+     * Variation of readDirectory that receives a SourceAccessor possibly scoped to @p dirPath.
      * Primary meant for recursive traversal functions that would benefit from *at-style syscalls
      * relative to a particular directory.
      *
@@ -196,6 +199,14 @@ public:
 
     void setPathDisplay(std::string displayPrefix, std::string displaySuffix = "");
 
+    /**
+     * @brief Render a human-readable representation of the accessor + path beneath it.
+     *
+     * @warning The output from this function is not considered stable and
+     * is primarily useful for error messages. In libexpr, we still have a single
+     * filesystem root (modulo builtin <nix/...> filesystem root). Prefer to render
+     * paths there directly from CanonPath when paths reside in the global root filesystem.
+     */
     virtual std::string showPath(const CanonPath & path);
 
     /**
@@ -266,7 +277,11 @@ class SymlinkNotAllowed final : public CloneableError<SymlinkNotAllowed, Error>
     void anchor() override;
 
 public:
-    CanonPath path;
+    /**
+     * Either a portable path, or an OS-native canonical *relative* path
+     * (relative to whichever directory handle the operation started from).
+     */
+    std::variant<CanonPath, OsCanonPath> path;
 
     SymlinkNotAllowed(CanonPath path)
         : CloneableError("relative path '%s' points to a symlink, which is not allowed", path.rel())
@@ -280,6 +295,19 @@ public:
         , path(std::move(path))
     {
     }
+
+    SymlinkNotAllowed(OsCanonPath path)
+        : CloneableError("relative path %s points to a symlink, which is not allowed", PathFmt(path.path()))
+        , path(std::move(path))
+    {
+    }
+
+    template<typename... Args>
+    SymlinkNotAllowed(OsCanonPath path, const std::string & fs, Args &&... args)
+        : CloneableError(fs, std::forward<Args>(args)...)
+        , path(std::move(path))
+    {
+    }
 };
 
 /**
@@ -288,12 +316,18 @@ public:
 ref<SourceAccessor> getFSSourceAccessor();
 
 /**
- * Construct an accessor for the filesystem rooted at `root`. Note
- * that it is not possible to escape `root` by appending `..` path
- * elements, and that absolute symlinks are resolved relative to
- * `root`.
+ * @brief Construct an accessor for the filesystem rooted at @p root.
  *
- * Symlinks in parents of `root` are resolved. Final symlink is not.
+ * Note that it is not possible to escape @p root by appending `..` path
+ * elements, and that absolute symlinks are resolved relative to
+ * @p root.
+ *
+ * Symlinks in parents of `root` are always resolved.
+ *
+ * @param root Path to file/tree to open.
+ * @param finalSymlink Whether the final symlink path component is resolved
+ *        or opened itself. Note that regular POSIX semantics of trailing `/`
+ *        applies regardless of this parameter.
  */
 ref<SourceAccessor> makeFSSourceAccessor(
     std::filesystem::path root, bool trackLastModified = false, FinalSymlink finalSymlink = FinalSymlink::DontFollow);

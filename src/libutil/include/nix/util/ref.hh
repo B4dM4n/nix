@@ -148,20 +148,7 @@ public:
         return ref<T2>(p);
     }
 
-    bool operator==(const ref<T> & other) const
-    {
-        return p == other.p;
-    }
-
-    bool operator!=(const ref<T> & other) const
-    {
-        return p != other.p;
-    }
-
-    auto operator<=>(const ref<T> & other) const
-    {
-        return p <=> other.p;
-    }
+    auto operator<=>(const ref<T> & other) const = default;
 
 private:
 
@@ -173,7 +160,16 @@ template<typename T, typename... Args>
 inline ref<T> make_ref(Args &&... args)
 {
     auto p = std::make_shared<T>(std::forward<Args>(args)...);
-    return ref<T>(p);
+    return ref<T>(std::move(p));
 }
+
+struct RefDeepComparator
+{
+    template<typename T>
+    bool operator()(const ref<T> & lhs, const ref<T> & rhs) const
+    {
+        return *lhs < *rhs;
+    }
+};
 
 } // namespace nix

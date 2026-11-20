@@ -52,13 +52,27 @@ nix-env -f ./user-envs.nix -i foo-1.0
 nix profile list | grep -A2 'Name:.*foo' | grep 'Store paths:.*foo-1.0'
 nix profile add "$flake1Dir" -L
 nix profile list | grep -A4 'Name:.*flake1' | grep 'Locked flake URL:.*narHash'
+(( $(nix profile list | grep -c $'\x1b') == 0 ))
+(( $(CLICOLOR_FORCE=1 nix profile list | grep -c $'\x1b') > 0 ))
 [[ $("$TEST_HOME"/.nix-profile/bin/hello) = "Hello World" ]]
 [ -e "$TEST_HOME"/.nix-profile/share/man ]
 # shellcheck disable=SC2235
 (! [ -e "$TEST_HOME"/.nix-profile/include ])
 nix profile history
 nix profile history | grep "packages.$system.default: ∅ -> 1.0"
+(( $(nix profile history | grep -c $'\x1b') == 0 ))
+(( $(CLICOLOR_FORCE=1 nix profile history | grep -c $'\x1b') > 0 ))
 nix profile diff-closures | grep 'env-manifest.nix: ε → ∅'
+
+# A size change of 8 KiB or more is shown in color, only on a terminal or when forced
+sized() {
+    nix-build --no-out-link -E "with import ${config_nix}; mkDerivation { name = \"sized-$1\"; buildCommand = \"mkdir \$out; printf %$2s > \$out/f\"; }"
+}
+small=$(sized 1.0 1)
+large=$(sized 2.0 20000)
+nix store diff-closures "$small" "$large" | grep 'sized: 1.0 → 2.0, .* KiB'
+(( $(nix store diff-closures "$small" "$large" | grep -c $'\x1b') == 0 ))
+(( $(CLICOLOR_FORCE=1 nix store diff-closures "$small" "$large" | grep -c $'\x1b') > 0 ))
 
 # Test XDG Base Directories support
 export NIX_CONFIG="use-xdg-base-directories = true"
@@ -272,3 +286,13 @@ printf '{ "version": 2, "elements": [ { "active": true, "attrPath": "legacyPacka
 nix build --profile "$TEST_HOME"/.nix-profile "$(nix store add-path "$TEST_ROOT"/import-profile)" --no-link
 nix profile list | grep -A4 'Name:.*hello' | grep "Store paths:.*$outPath"
 nix profile remove hello 2>&1 | grep 'removed 1 packages, kept 0 packages'
+
+# Upgrading a package from an unchanged Git flake does nothing.
+clearProfiles
+gitFlakeDir=$TEST_ROOT/git-flake
+createGitRepo "$gitFlakeDir"
+cp "$flake1Dir"/{flake.nix,who,version,ca.nix,config.nix} "$gitFlakeDir"/
+git -C "$gitFlakeDir" add .
+git -C "$gitFlakeDir" commit -m 'Add flake'
+nix profile add "git+file://$gitFlakeDir"
+nix profile upgrade --all 2>&1 | grepQuietInverse upgrading

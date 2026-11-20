@@ -8,6 +8,11 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#  include <linux/capability.h>
+#  include <sys/syscall.h>
+#endif
+
 #ifdef __FreeBSD__
 #  include <sys/param.h>
 #  include <sys/mount.h>
@@ -18,24 +23,39 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/signals.hh"
 #include "nix/util/util.hh"
+#include "nix/util/system-error.hh"
 
 #include "util-unix-config-private.hh"
+#include "unix/unix-modes.hh"
+#include "../file-descriptor-private.hh"
 
 namespace nix {
 
-AutoCloseFD openDirectory(const std::filesystem::path & path, FinalSymlink finalSymlink)
+Result<AutoCloseFD, NativeError> openDirectory(const std::filesystem::path & path, FinalSymlink finalSymlink)
 {
-    return AutoCloseFD{open(
-        path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | (finalSymlink == FinalSymlink::Follow ? 0 : O_NOFOLLOW))};
+    return openResult(
+        ::open(
+            path.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | (finalSymlink == FinalSymlink::Follow ? 0 : O_NOFOLLOW)));
 }
 
-AutoCloseFD openFileReadonly(const std::filesystem::path & path, FinalSymlink finalSymlink)
+Result<AutoCloseFD, NativeError> openDirectoryTraversable(const std::filesystem::path & path, FinalSymlink finalSymlink)
 {
-    return AutoCloseFD{
-        open(path.c_str(), O_RDONLY | O_CLOEXEC | (finalSymlink == FinalSymlink::Follow ? 0 : O_NOFOLLOW))};
+    return openResult(
+        ::open(
+            path.c_str(),
+            unix::traversableDirAccessMode | O_DIRECTORY | O_CLOEXEC
+                | (finalSymlink == FinalSymlink::Follow ? 0 : O_NOFOLLOW)));
 }
 
-AutoCloseFD openNewFileForWrite(const std::filesystem::path & path, mode_t mode, OpenNewFileForWriteParams params)
+Result<AutoCloseFD, NativeError> openFileReadonly(const std::filesystem::path & path, FinalSymlink finalSymlink)
+{
+    return openResult(
+        ::open(path.c_str(), O_RDONLY | O_CLOEXEC | (finalSymlink == FinalSymlink::Follow ? 0 : O_NOFOLLOW)));
+}
+
+Result<AutoCloseFD, NativeError>
+openNewFileForWrite(const std::filesystem::path & path, mode_t mode, OpenNewFileForWriteParams params)
 {
     auto flags = (params.writeOnly ? O_WRONLY : O_RDWR) | O_CREAT | O_CLOEXEC;
     if (params.truncateExisting) {
@@ -45,7 +65,7 @@ AutoCloseFD openNewFileForWrite(const std::filesystem::path & path, mode_t mode,
     } else {
         flags |= O_EXCL; /* O_CREAT | O_EXCL already ensures that symlinks are not followed. */
     }
-    return AutoCloseFD{open(path.c_str(), flags, mode)};
+    return openResult(::open(path.c_str(), flags, mode));
 }
 
 std::filesystem::path descriptorToPath(Descriptor fd)
@@ -156,7 +176,8 @@ static void _deletePath(
     Descriptor parentfd,
     const std::filesystem::path & path,
     uint64_t & bytesFreed,
-    std::exception_ptr & ex MOUNTEDPATHS_PARAM)
+    std::exception_ptr & ex,
+    bool forceDontChmod MOUNTEDPATHS_PARAM)
 {
     checkInterrupt();
 #ifdef __FreeBSD__
@@ -167,9 +188,9 @@ static void _deletePath(
     }
 #endif
 
-    auto name = CanonPath::fromFilename(path.filename().native());
+    auto name = OsFilename::fromPathThrowing(path.filename());
 
-    auto st_ = maybeFstatat(parentfd, name.rel());
+    auto st_ = maybeFstatat(parentfd, OsCanonPath{name});
     if (!st_)
         return;
     auto & st = *st_;
@@ -199,11 +220,12 @@ static void _deletePath(
     }
 
     if (S_ISDIR(st.st_mode)) {
-        /* Make the directory accessible. */
         const auto PERM_MASK = S_IRUSR | S_IWUSR | S_IXUSR;
-        if ((st.st_mode & PERM_MASK) != PERM_MASK)
+        const bool needsPermissionChange = !forceDontChmod && ((st.st_mode & PERM_MASK) != PERM_MASK);
+        /* Make the directory accessible, but only if we really need to. */
+        if (needsPermissionChange)
             try {
-                unix::fchmodatTryNoFollow(parentfd, name, st.st_mode | PERM_MASK);
+                unix::fchmodatTryNoFollow(parentfd, OsCanonPath{name}, st.st_mode | PERM_MASK);
             } catch (SysError & e) {
                 e.addTrace({}, "while making directory %1% accessible for deletion", PathFmt(path));
                 if (e.errNo == EOPNOTSUPP)
@@ -211,7 +233,7 @@ static void _deletePath(
                 throw;
             }
 
-        int fd = openat(parentfd, name.rel_c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int fd = openat(parentfd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd == -1)
             throw SysError("opening directory %1%", PathFmt(path));
         AutoCloseDir dir(fdopendir(fd));
@@ -224,14 +246,14 @@ static void _deletePath(
             std::string childName = dirent->d_name;
             if (childName == "." || childName == "..")
                 continue;
-            _deletePath(dirfd(dir.get()), path / childName, bytesFreed, ex MOUNTEDPATHS_ARG);
+            _deletePath(dirfd(dir.get()), path / childName, bytesFreed, ex, forceDontChmod MOUNTEDPATHS_ARG);
         }
         if (errno)
             throw SysError("reading directory %1%", PathFmt(path));
     }
 
     int flags = S_ISDIR(st.st_mode) ? AT_REMOVEDIR : 0;
-    if (unlinkat(parentfd, name.rel_c_str(), flags) == -1) {
+    if (unlinkat(parentfd, name.c_str(), flags) == -1) {
         if (errno == ENOENT)
             return;
         try {
@@ -251,16 +273,38 @@ static void _deletePath(const std::filesystem::path & path, uint64_t & bytesFree
     auto parentDirPath = path.parent_path();
     assert(parentDirPath != path);
 
-    AutoCloseFD dirfd = openDirectory(parentDirPath);
-    if (!dirfd) {
-        if (errno == ENOENT)
+    /* It's ok to follow symlinks in the parent since we only need to
+       ensure that there's no TOCTOU when traversing inside the path. */
+    auto dirfdOrError = openDirectory(parentDirPath, FinalSymlink::Follow);
+    if (!dirfdOrError) {
+        if (dirfdOrError.error() == ENOENT)
             return;
-        throw SysError("opening directory %s", PathFmt(parentDirPath));
+        throw SysError(dirfdOrError.error(), "opening directory %s", PathFmt(parentDirPath));
     }
+    auto dirfd = std::move(dirfdOrError).value();
 
     std::exception_ptr ex;
 
-    _deletePath(dirfd.get(), path, bytesFreed, ex MOUNTEDPATHS_ARG);
+    /* Whether directories don't need to be made writable/readable/traversable
+       for them to be emptied. */
+    bool forceDontChmod = false;
+
+#ifdef __APPLE__
+    /* Root can traverse and recursively remove unreadable, non-executable and
+       non-writable directories on Darwin. App Management can deny changing a
+       launched app bundle's mode even when deleting the bundle is allowed. */
+    if (::geteuid() == 0)
+        forceDontChmod = true;
+#elif defined(__linux__)
+    /* UID 0 alone does not guarantee permission to bypass directory modes.
+       Query the calling thread, and keep chmod if the query fails. */
+    __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3]{};
+    if (::syscall(SYS_capget, &header, caps) == 0)
+        forceDontChmod = caps[CAP_TO_INDEX(CAP_DAC_OVERRIDE)].effective & CAP_TO_MASK(CAP_DAC_OVERRIDE);
+#endif
+
+    _deletePath(dirfd.get(), path, bytesFreed, ex, forceDontChmod MOUNTEDPATHS_ARG);
 
     if (ex)
         std::rethrow_exception(ex);
@@ -274,7 +318,7 @@ void deletePath(const std::filesystem::path & path)
 
 void deletePath(const std::filesystem::path & path, uint64_t & bytesFreed)
 {
-    // Activity act(*logger, lvlDebug, "recursively deleting path '%1%'", path);
+    bytesFreed = 0;
 #ifdef __FreeBSD__
     std::set<std::filesystem::path> mountedPaths;
     struct statfs * mntbuf;
@@ -287,7 +331,6 @@ void deletePath(const std::filesystem::path & path, uint64_t & bytesFreed)
         mountedPaths.emplace(mntbuf[i].f_mntonname);
     }
 #endif
-    bytesFreed = 0;
     _deletePath(path, bytesFreed MOUNTEDPATHS_ARG);
 }
 
@@ -295,6 +338,84 @@ void chown(const std::filesystem::path & path, uid_t owner, gid_t group)
 {
     if (::chown(path.c_str(), owner, group) == -1)
         throw SysError("changing ownership of %s", PathFmt(path));
+}
+
+void movePath(const std::filesystem::path & src, const std::filesystem::path & dst)
+{
+    /* If we have O_PATH (Linux, FreeBSD), then we can open the to-be-renamed
+       file without requiring any permissions and "pin" the inode that we'll
+       fchmod. This avoids operating on paths, which is prone to TOCTOU. */
+#ifdef O_PATH
+    AutoCloseFD fd = ::open(src.c_str(), O_NOFOLLOW | O_CLOEXEC | O_PATH);
+    if (!fd)
+        throw SysError("failed to open file %1%", PathFmt(src));
+
+    auto changePermsOnFile = [&](mode_t newMode) -> int {
+        /* AT_EMPTY_PATH here is supported since 6.6, but reports EINVAL without fchmodat2. */
+        if (::fchmodat(fd.get(), "", newMode, AT_EMPTY_PATH) == 0)
+            return 0;
+
+#  ifdef __linux__
+        if (errno == EINVAL) {
+            auto path = fmt("/proc/self/fd/%d", fd.get());
+            if (::chmod(path.c_str(), newMode) == 0)
+                return 0;
+        }
+#  endif
+
+        return -1;
+    };
+
+    const PosixStat st = nix::fstat(fd.get());
+#else
+    const PosixStat st = nix::lstat(src);
+#endif
+
+    bool changePerm = (::geteuid() && S_ISDIR(st.st_mode) && !(st.st_mode & S_IWUSR));
+    if (changePerm) {
+        const mode_t newMode = st.st_mode | S_IWUSR;
+#ifdef O_PATH
+        if (changePermsOnFile(newMode) == -1)
+            throw SysError("making %s writable for renaming", PathFmt(src));
+#else
+        nix::chmod(src, newMode);
+#endif
+    }
+
+    if (::rename(src.c_str(), dst.c_str()) == -1) {
+        const int savedErrno = errno;
+        if (changePerm) {
+            /* Ignore all errors on restoring permissions. We want to throw the
+               original error originating from ::rename. */
+#ifdef O_PATH
+            changePermsOnFile(st.st_mode);
+#else
+            ::chmod(src.c_str(), st.st_mode);
+#endif
+        }
+        throw SysError(savedErrno, "renaming %1% to %2%", PathFmt(src), PathFmt(dst));
+    }
+
+    if (changePerm) {
+#ifdef O_PATH
+        if (changePermsOnFile(st.st_mode) == -1)
+            throw SysError("restoring permissions on %s", PathFmt(dst));
+#else
+        nix::chmod(dst, st.st_mode);
+#endif
+    }
+}
+
+void renameFile(const std::filesystem::path & src, const std::filesystem::path & dst)
+{
+    if (::rename(src.c_str(), dst.c_str()) == -1)
+        throw SysError("renaming %1% to %2%", PathFmt(src), PathFmt(dst));
+}
+
+void createDir(const std::filesystem::path & path, mode_t mode)
+{
+    if (::mkdir(path.c_str(), mode) == -1)
+        throw SysError("creating directory %s", PathFmt(path));
 }
 
 } // namespace nix

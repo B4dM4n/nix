@@ -8,6 +8,7 @@
 
 #include "nix/store/path.hh"
 #include "nix/store/store-api.hh"
+#include "nix/store/build.hh"
 #include "nix/store/store-open.hh"
 #include "nix/store/store-reference.hh"
 #include "nix/store/build-result.hh"
@@ -178,7 +179,7 @@ nix_err nix_store_realise(
             .drvPath = nix::makeConstantStorePathRef(path->path), .outputs = nix::OutputsSpec::All{}}};
 
         const auto nixStore = store->ptr;
-        auto results = nixStore->buildPathsWithResults(paths, nix::bmNormal, nixStore);
+        auto results = nixStore->getBuilder(nixStore)->buildPathsWithResults(paths, nix::bmNormal);
 
         assert(results.size() == 1);
 
@@ -227,12 +228,6 @@ StorePath * nix_store_path_clone(const StorePath * p)
 
 } // extern "C"
 
-template<size_t S>
-static auto to_cpp_array(const uint8_t (&r)[S])
-{
-    return reinterpret_cast<const std::array<std::byte, S> &>(r);
-}
-
 extern "C" {
 
 nix_err
@@ -257,7 +252,7 @@ StorePath * nix_store_create_from_parts(
         context->last_err_code = NIX_OK;
     try {
         // Encode the 20 raw bytes to Nix32 (base32) format
-        auto hashStr = nix::BaseNix32::encode(std::span<const std::byte>{to_cpp_array(hash->bytes)});
+        auto hashStr = nix::BaseNix32::encode(std::as_bytes(std::span(hash->bytes)));
 
         // Construct the store path basename: <hash>-<name>
         std::string baseName;
@@ -284,7 +279,7 @@ nix_derivation * nix_derivation_from_json(nix_c_context * context, Store * store
     if (context)
         context->last_err_code = NIX_OK;
     try {
-        return new nix_derivation{nix::Derivation::parseJsonAndValidate(*store->ptr, nlohmann::json::parse(json))};
+        return new nix_derivation{nix::derivation::parseJsonAndValidate(*store->ptr, nlohmann::json::parse(json))};
     }
     NIXC_CATCH_ERRS_NULL
 }
@@ -308,7 +303,7 @@ StorePath * nix_add_derivation(nix_c_context * context, Store * store, nix_deriv
     if (context)
         context->last_err_code = NIX_OK;
     try {
-        /* Quite dubious that users would want this to silently suceed
+        /* Quite dubious that users would want this to silently succeed
            without actually writing the derivation if this setting is
            set, but it was that way already, so we are doing this for
            back-compat for now. */

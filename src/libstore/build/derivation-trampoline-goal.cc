@@ -9,7 +9,7 @@ namespace nix {
 
 DerivationTrampolineGoal::DerivationTrampolineGoal(
     ref<const SingleDerivedPath> drvReq, const OutputsSpec & wantedOutputs, Worker & worker, BuildMode buildMode)
-    : Goal(worker, init())
+    : Goal(worker, init(haveToLoadFromStore()))
     , drvReq(drvReq)
     , wantedOutputs(wantedOutputs)
     , buildMode(buildMode)
@@ -23,7 +23,7 @@ DerivationTrampolineGoal::DerivationTrampolineGoal(
     const Derivation & drv,
     Worker & worker,
     BuildMode buildMode)
-    : Goal(worker, haveDerivation(drvPath, drv))
+    : Goal(worker, init(haveDerivation(drvPath, drv)))
     , drvReq(makeConstantStorePathRef(drvPath))
     , wantedOutputs(wantedOutputs)
     , buildMode(buildMode)
@@ -66,7 +66,24 @@ std::string DerivationTrampolineGoal::key()
     }.to_string(worker.store);
 }
 
-Goal::Co DerivationTrampolineGoal::init()
+Goal::Co<Goal::ExitCode> DerivationTrampolineGoal::init(Co<Result> work)
+{
+    auto result = co_await std::move(work);
+    buildResult = std::move(result.second);
+    co_return result.first;
+}
+
+Goal::Co<DerivationTrampolineGoal::Result> DerivationTrampolineGoal::haveToLoadFromStore()
+{
+    auto loadResult = co_await loadDerivation();
+    if (auto * failure = std::get_if<BuildResult::Failure>(&loadResult))
+        co_return Result{ecFailed, BuildResult{.inner = std::move(*failure)}};
+
+    auto [drvPath, drv] = std::get<LoadedDerivation>(std::move(loadResult));
+    co_return co_await haveDerivation(std::move(drvPath), std::move(drv));
+}
+
+Goal::Co<DerivationTrampolineGoal::LoadResult> DerivationTrampolineGoal::loadDerivation()
 {
     trace("need to load derivation from file");
 
@@ -84,6 +101,14 @@ Goal::Co DerivationTrampolineGoal::init()
             } catch (MissingRealisation &) {
                 return std::nullopt;
             }
+            /* Make `drvPath` a temporary root *before* checking
+               whether it's valid. Otherwise the garbage collector
+               could delete it right after the check, and we would
+               skip obtaining it but then fail to read it below. If
+               the garbage collector is deleting it right now,
+               `addTempRoot()` waits for that to finish, so the
+               check will see that it's gone. */
+            worker.evalStore.addTempRoot(drvPath);
             auto cond = worker.evalStore.isValidPath(drvPath) || worker.store.isValidPath(drvPath);
             return cond ? std::optional{drvPath} : std::nullopt;
         }()) {
@@ -100,12 +125,10 @@ Goal::Co DerivationTrampolineGoal::init()
     trace("outer load and build derivation");
 
     if (nrFailed != 0) {
-        co_return doneFailure(
-            ecFailed,
-            BuildResult::Failure{{
-                .status = BuildResult::Failure::DependencyFailed,
-                .msg = HintFmt("failed to obtain derivation of '%s'", drvReq->to_string(worker.store)),
-            }});
+        co_return BuildResult::Failure{{
+            .status = BuildResult::Failure::DependencyFailed,
+            .msg = HintFmt("failed to obtain derivation of '%s'", drvReq->to_string(worker.store)),
+        }};
     }
 
     StorePath drvPath = resolveDerivedPath(worker.store, *drvReq);
@@ -125,13 +148,15 @@ Goal::Co DerivationTrampolineGoal::init()
         for (auto * drvStore : {&worker.evalStore, &worker.store})
             if (drvStore->isValidPath(drvPath))
                 return drvStore->readDerivation(drvPath);
-        assert(false);
+        /* This can only happen if something deleted the derivation
+           despite the temporary root. */
+        throw Error("derivation '%s' disappeared while trying to build it", worker.store.printStorePath(drvPath));
     }();
 
-    co_return haveDerivation(std::move(drvPath), std::move(drv));
+    co_return std::pair{std::move(drvPath), std::move(drv)};
 }
 
-Goal::Co DerivationTrampolineGoal::haveDerivation(StorePath drvPath, Derivation drv)
+Goal::Co<DerivationTrampolineGoal::Result> DerivationTrampolineGoal::haveDerivation(StorePath drvPath, Derivation drv)
 {
     trace("have derivation, will kick off derivations goals per wanted output");
 
@@ -172,19 +197,19 @@ Goal::Co DerivationTrampolineGoal::haveDerivation(StorePath drvPath, Derivation 
             auto exitCode = goal->exitCode;
             /* Note that without --keep-going waitees might be cancelled before
                we are woken up. */
-            return exitCode != ecBusy && exitCode != ecSuccess;
+            return exitCode && exitCode != ecSuccess;
         });
 
         const Goal * g = gi->get();
         assert(gi != concreteDrvGoals.end() && "expected a failing goal");
-        auto exitCode = g->exitCode;
+        auto exitCode = *g->exitCode;
         const auto * failure = g->buildResult.tryGetFailure();
         assert(failure && "failing goal does not report a failed build result");
 
         /* Report the exit status of *some* failing goal. This might not be strictly
            correct, since multiple subgoals can fail independently, but this should be
            a good enough heuristic without --keep-going. */
-        co_return doneFailure(exitCode, *failure);
+        co_return Result{exitCode, BuildResult{.inner = *failure}};
     }
 
     SingleDrvOutputs outputs;
@@ -224,10 +249,16 @@ Goal::Co DerivationTrampolineGoal::haveDerivation(StorePath drvPath, Derivation 
         return toPriority(a) < toPriority(b);
     };
 
-    co_return doneSuccess({
-        .status = std::ranges::min(statuses, compareSuccesses),
-        .builtOutputs = std::move(outputs),
-    });
+    co_return Result{
+        ecSuccess,
+        BuildResult{
+            .inner =
+                BuildResult::Success{
+                    .status = std::ranges::min(statuses, compareSuccesses),
+                    .builtOutputs = std::move(outputs),
+                },
+        },
+    };
 }
 
 } // namespace nix

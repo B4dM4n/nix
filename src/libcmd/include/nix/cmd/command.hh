@@ -12,10 +12,6 @@
 
 namespace nix {
 
-extern std::string programPath;
-
-extern char ** savedArgv;
-
 class EvalState;
 struct Pos;
 class Store;

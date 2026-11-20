@@ -50,16 +50,16 @@ public:
      *
      * The URL indicate which sort of fetcher, and provides information to that fetcher.
      */
-    static Input fromURL(const Settings & settings, const std::string & url, bool requireTree = true);
+    static Input fromURL(const std::string & url, bool requireTree = true);
 
-    static Input fromURL(const Settings & settings, const ParsedURL & url, bool requireTree = true);
+    static Input fromURL(const ParsedURL & url, bool requireTree = true);
 
     /**
      * Create an `Input` from a an `Attrs`.
      *
      * The URL indicate which sort of fetcher, and provides information to that fetcher.
      */
-    static Input fromAttrs(const Settings & settings, Attrs && attrs);
+    static Input fromAttrs(Attrs && attrs);
 
     ParsedURL toURL() const;
 
@@ -100,7 +100,7 @@ public:
      */
     bool isFinal() const;
 
-    bool operator==(const Input & other) const noexcept;
+    bool operator==(const Input & other) const;
 
     bool operator<(const Input & other) const
     {
@@ -189,10 +189,9 @@ struct InputScheme
 {
     virtual ~InputScheme() {}
 
-    virtual std::optional<Input>
-    inputFromURL(const Settings & settings, const ParsedURL & url, bool requireTree) const = 0;
+    virtual std::optional<Input> inputFromURL(const ParsedURL & url, bool requireTree) const = 0;
 
-    virtual std::optional<Input> inputFromAttrs(const Settings & settings, const Attrs & attrs) const = 0;
+    virtual std::optional<Input> inputFromAttrs(const Attrs & attrs) const = 0;
 
     /**
      * What is the name of the scheme?
@@ -268,6 +267,15 @@ struct InputScheme
         return std::nullopt;
     }
 
+    /**
+     * A URL for `path` if it is the root of a repository of this
+     * scheme, e.g. a directory containing `.git`.
+     */
+    virtual std::optional<ParsedURL> localRepoURL(const std::filesystem::path & path) const
+    {
+        return std::nullopt;
+    }
+
     virtual std::optional<std::string>
     getAccessToken(const fetchers::Settings & settings, const std::string & host, const std::string & url) const
     {
@@ -284,6 +292,13 @@ using InputSchemeMap = std::map<std::string_view, std::shared_ptr<InputScheme>>;
  */
 const InputSchemeMap & getAllInputSchemes();
 
+/**
+ * Schemes are tried in name order, so a directory that holds more
+ * than one repository (e.g. `.git` and `.hg`) always resolves the
+ * same way.
+ */
+std::optional<ParsedURL> getLocalRepoURL(const std::filesystem::path & path);
+
 struct PublicKey
 {
     std::string type = "ssh-ed25519";
@@ -296,4 +311,4 @@ std::string publicKeys_to_string(const std::vector<PublicKey> &);
 
 } // namespace nix::fetchers
 
-JSON_IMPL(fetchers::PublicKey)
+JSON_IMPL(nix::fetchers::PublicKey)

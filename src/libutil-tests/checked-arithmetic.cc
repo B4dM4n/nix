@@ -1,3 +1,4 @@
+#include <exception> // IWYU pragma: keep (Needed by rapidcheck on Darwin and FreeBSD)
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
@@ -10,8 +11,6 @@
 #include "nix/util/tests/gtest-with-params.hh"
 
 namespace rc {
-
-using namespace nix;
 
 template<std::integral T>
 struct Arbitrary<nix::checked::Checked<T>>
@@ -28,7 +27,7 @@ namespace nix::checked {
 
 // Pointer to member function! Mildly gross.
 template<std::integral T>
-using Oper = Checked<T>::Result (Checked<T>::*)(T const other) const;
+using Oper = Checked<T>::Result (Checked<T>::*)(const T other) const;
 
 template<std::integral T>
 using ReferenceOper = T (*)(T a, T b);
@@ -99,7 +98,7 @@ void checkDivision(TSmall a_, TSmall b)
  * extremely cheap tests such as arithmetic tests */
 static rc::detail::TestParams makeParams()
 {
-    auto const & conf = rc::detail::configuration();
+    const auto & conf = rc::detail::configuration();
     auto newParams = conf.testParams;
     newParams.maxSuccess = 10000;
     return newParams;

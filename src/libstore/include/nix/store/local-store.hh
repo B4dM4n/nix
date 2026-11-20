@@ -7,9 +7,11 @@
 #include "nix/store/store-api.hh"
 #include "nix/store/indirect-root-store.hh"
 #include "nix/util/sync.hh"
+#include "nix/util/os-filename.hh"
 
 #include <chrono>
 #include <future>
+#include <list>
 #include <string>
 #include <boost/unordered/unordered_flat_set.hpp>
 
@@ -304,7 +306,20 @@ public:
         const StorePathSet & references,
         RepairFlag repair) override;
 
-    void addTempRoot(const StorePath & path) override;
+    // Designed to be used from RestrictedStore,
+    // allows filtering the references while scanning.
+    // Not an entirely separate function in order to reduce duplication
+    StorePath addToStoreFromDump(
+        Source & dump,
+        std::string_view name,
+        FileSerialisationMethod dumpMethod,
+        ContentAddressMethod hashMethod,
+        HashAlgorithm hashAlgo,
+        const StorePathSet & references,
+        RepairFlag repair,
+        bool filterReferences);
+
+    void addTempRoots(const StorePathSet & paths) override;
 
 private:
 
@@ -347,6 +362,8 @@ public:
 
     void collectGarbage(const GCOptions & options, GCResults & results) override;
 
+    void deleteBuildTraces(const std::set<DrvOutput> & keys) override;
+
     /**
      * Called by `collectGarbage` to trace in reverse.
      *
@@ -366,6 +383,11 @@ public:
      *
      * @param isKnownPath true if this is a known store path, false if it's
      *        garbage/unknown content found in the store directory
+     *
+     * @param[out] bytesFreed An estimation of how many bytes of disk space have been reclaimed.
+     *             It should be considered to be only a rough estimate.
+     *             Initialised to zero by this function so that the caller may not need to initialise
+     *             it.
      */
     virtual void deleteStorePath(const std::filesystem::path & path, uint64_t & bytesFreed, bool isKnownPath);
 
@@ -441,7 +463,7 @@ public:
      * Register the store path 'output' as the output named 'outputName' of
      * derivation 'deriver'.
      */
-    void registerDrvOutput(const Realisation & info) override;
+    void registerDrvOutputUnchecked(const Realisation & info) override;
     void registerDrvOutput(const Realisation & info, CheckSigsFlag checkSigs) override;
     void cacheDrvOutputMapping(
         State & state, const uint64_t deriver, const std::string & outputName, const StorePath & output);
@@ -508,7 +530,7 @@ private:
     typedef boost::unordered_flat_set<ino_t> InodeHash;
 
     InodeHash loadInodeHash();
-    Strings readDirectoryIgnoringInodes(const std::filesystem::path & path, const InodeHash & inodeHash);
+    std::list<OsFilename> readDirectoryIgnoringInodes(const std::filesystem::path & path, const InodeHash & inodeHash);
     void optimisePath_(
         Activity * act,
         OptimiseStats & stats,
@@ -522,7 +544,7 @@ private:
 
     void addBuildLog(const StorePath & drvPath, std::string_view log) override;
 
-    friend struct PathSubstitutionGoal;
+    friend class PathSubstitutionGoal;
     friend struct DerivationGoal;
     /* Only used for createTempDirInStore. */
     friend class DerivationBuilderImpl;

@@ -13,8 +13,8 @@ void checkName(std::string_view name)
 {
     if (name.empty())
         throw BadStorePathName("name must not be empty");
-    if (name.size() > StorePath::MaxPathLen)
-        throw BadStorePathName("name '%s' must be no longer than %d characters", name, StorePath::MaxPathLen);
+    if (name.size() > StorePath::MaxNameLen)
+        throw BadStorePathName("name '%s' must be no longer than %d characters", name, StorePath::MaxNameLen);
     // See nameRegexStr for the definition
     if (name[0] == '.') {
         // check against "." and "..", followed by end or dash
@@ -50,10 +50,12 @@ StorePath::StorePath(std::string_view _baseName)
     : baseName(_baseName)
 {
     if (baseName.size() < HashLen + 1)
-        throw BadStorePath("'%s' is too short to be a valid store path", baseName);
+        throw BadStorePath("'%s' is too short to be a valid store path basename", baseName);
     for (auto c : hashPart())
         if (c == 'e' || c == 'o' || c == 'u' || c == 't' || !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')))
-            throw BadStorePath("store path '%s' contains illegal base-32 character '%s'", baseName, c);
+            throw BadStorePath("store path basename '%s' contains illegal base-32 character '%s'", baseName, c);
+    if (baseName[HashLen] != '-')
+        throw BadStorePath("'%s' can't name a store path because the hash part is not followed by a '-'", baseName);
     checkPathName(baseName, name());
 }
 
@@ -74,7 +76,7 @@ void StorePath::requireDerivation() const
         throw FormatError("store path '%s' is not a valid derivation path", to_string());
 }
 
-StorePath StorePath::dummy("ffffffffffffffffffffffffffffffff-x");
+const StorePath StorePath::dummy("ffffffffffffffffffffffffffffffff-x");
 
 StorePath StorePath::random(std::string_view name)
 {
@@ -85,14 +87,12 @@ StorePath StorePath::random(std::string_view name)
 
 namespace nlohmann {
 
-using namespace nix;
-
-StorePath adl_serializer<StorePath>::from_json(const json & json)
+nix::StorePath adl_serializer<nix::StorePath>::from_json(const json & json)
 {
-    return StorePath{getString(json)};
+    return nix::StorePath{nix::getString(json)};
 }
 
-void adl_serializer<StorePath>::to_json(json & json, const StorePath & storePath)
+void adl_serializer<nix::StorePath>::to_json(json & json, const nix::StorePath & storePath)
 {
     json = storePath.to_string();
 }

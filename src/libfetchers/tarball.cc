@@ -8,6 +8,7 @@
 #include "nix/util/types.hh"
 #include "nix/store/store-api.hh"
 #include "nix/fetchers/git-utils.hh"
+#include "nix/fetchers/merkle-tar-adapter.hh"
 #include "nix/fetchers/fetch-settings.hh"
 
 namespace nix::fetchers {
@@ -124,10 +125,11 @@ static DownloadTarballResult downloadTarball_(
             throw Error("tarball %s does not exist.", PathFmt(localPath));
         }
         if (is_directory(localPath)) {
-            if (exists(localPath / ".git")) {
+            if (auto repoURL = getLocalRepoURL(localPath)) {
                 throw Error(
-                    "tarball %s is a git repository, not a tarball. Please use `git+file` as the scheme.",
-                    PathFmt(localPath));
+                    "tarball %s is a repository, not a tarball. Please use `%s` as the scheme.",
+                    PathFmt(localPath),
+                    repoURL->scheme);
             }
             throw Error("tarball %s is a directory, not a file.", PathFmt(localPath));
         }
@@ -188,7 +190,8 @@ static DownloadTarballResult downloadTarball_(
     })
                                                                                     : TarArchive{*source};
     auto tarballCache = settings.getTarballCache();
-    auto parseSink = tarballCache->getFileSystemObjectSink();
+    auto writerPool = settings.getTarballWriterPool();
+    auto parseSink = merkle::makeTarSink(*writerPool);
     auto lastModified = unpackTarfileToSink(archive, *parseSink);
     auto tree = parseSink->flush();
 
@@ -204,7 +207,7 @@ static DownloadTarballResult downloadTarball_(
         infoAttrs = cached->value;
     } else {
         infoAttrs.insert_or_assign("etag", res->etag);
-        infoAttrs.insert_or_assign("treeHash", tarballCache->dereferenceSingletonDirectory(tree).gitRev());
+        infoAttrs.insert_or_assign("treeHash", tarballCache->dereferenceSingletonDirectory(tree.hash).gitRev());
         infoAttrs.insert_or_assign("lastModified", uint64_t(lastModified));
         if (res->immutableUrl)
             infoAttrs.insert_or_assign("immutableUrl", *res->immutableUrl);
@@ -230,7 +233,7 @@ ref<SourceAccessor> downloadTarball(Store & store, const Settings & settings, co
     attrs.insert_or_assign("type", "tarball");
     attrs.insert_or_assign("url", url);
 
-    auto input = Input::fromAttrs(settings, std::move(attrs));
+    auto input = Input::fromAttrs(std::move(attrs));
 
     return input.getAccessor(settings, store).first;
 }
@@ -254,8 +257,7 @@ struct CurlInputScheme : InputScheme
 
     static const StringSet specialParams;
 
-    std::optional<Input>
-    inputFromURL(const Settings & settings, const ParsedURL & _url, bool requireTree) const override
+    std::optional<Input> inputFromURL(const ParsedURL & _url, bool requireTree) const override
     {
         if (!isValidURL(_url, requireTree))
             return std::nullopt;
@@ -373,7 +375,7 @@ struct CurlInputScheme : InputScheme
         return allowedAttrsImpl();
     }
 
-    std::optional<Input> inputFromAttrs(const Settings & settings, const Attrs & attrs) const override
+    std::optional<Input> inputFromAttrs(const Attrs & attrs) const override
     {
         Input input{};
         input.attrs = attrs;
@@ -495,7 +497,7 @@ struct TarballInputScheme : CurlInputScheme
         auto result = downloadTarball_(settings, getStrAttr(input.attrs, "url"), {}, "«" + input.to_string() + "»");
 
         if (result.immutableUrl) {
-            auto immutableInput = Input::fromURL(settings, *result.immutableUrl);
+            auto immutableInput = Input::fromURL(*result.immutableUrl);
             // FIXME: would be nice to support arbitrary flakerefs
             // here, e.g. git flakes.
             if (immutableInput.getType() != "tarball")

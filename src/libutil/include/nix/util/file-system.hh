@@ -196,15 +196,37 @@ enum struct FinalSymlink : bool { DontFollow = false, Follow = true };
  * Open a `Descriptor` with read-only access to the given directory.
  *
  * @param finalSymlink If `DontFollow`, fail if the path is a symlink.
+ *
+ * @return The descriptor, or on failure the native error code.
  */
-AutoCloseFD openDirectory(const std::filesystem::path & path, FinalSymlink finalSymlink = FinalSymlink::Follow);
+Result<AutoCloseFD, NativeError>
+openDirectory(const std::filesystem::path & path, FinalSymlink finalSymlink = FinalSymlink::Follow);
+
+/**
+ * Open a `Descriptor` to the given directory only for traversing it:
+ * using it as the base of `*at` calls, or `fstat`ing it.
+ *
+ * Unlike @ref nix::openDirectory(), this needs only search (traverse)
+ * permission on the directory, not read (list) permission, where the OS
+ * allows asking for that. In exchange, the descriptor may not support
+ * listing the directory or `fsync`ing it.
+ *
+ * @param finalSymlink If `DontFollow`, fail if the path is a symlink.
+ *
+ * @return The descriptor, or on failure the native error code.
+ */
+Result<AutoCloseFD, NativeError>
+openDirectoryTraversable(const std::filesystem::path & path, FinalSymlink finalSymlink = FinalSymlink::Follow);
 
 /**
  * Open a `Descriptor` with read-only access to the given file.
  *
- * @note For directories use @ref openDirectory.
+ * @note For directories use @ref nix::openDirectory().
+ *
+ * @return The descriptor, or on failure the native error code.
  */
-AutoCloseFD openFileReadonly(const std::filesystem::path & path, FinalSymlink finalSymlink = FinalSymlink::Follow);
+Result<AutoCloseFD, NativeError>
+openFileReadonly(const std::filesystem::path & path, FinalSymlink finalSymlink = FinalSymlink::Follow);
 
 struct OpenNewFileForWriteParams
 {
@@ -223,15 +245,16 @@ struct OpenNewFileForWriteParams
 };
 
 /**
- * Open a `Descriptor` for write access or create it if it doesn't exist or truncate existing depending on @ref
- * truncateExisting.
+ * Open a `Descriptor` for write access or create it if it doesn't exist or truncate existing depending on
+ * @ref nix::OpenNewFileForWriteParams::truncateExisting.
  *
  * @param mode POSIX permission bits. Ignored on Windows.
- * @throws Nothing.
+ * @return The descriptor, or on failure the native error code.
  *
  * @todo Reparse points on Windows.
  */
-AutoCloseFD openNewFileForWrite(const std::filesystem::path & path, mode_t mode, OpenNewFileForWriteParams params);
+Result<AutoCloseFD, NativeError>
+openNewFileForWrite(const std::filesystem::path & path, mode_t mode, OpenNewFileForWriteParams params);
 
 /**
  * Read the contents of a file into a string.
@@ -258,6 +281,8 @@ void writeFile(
     FsSync sync = FsSync::No,
     FinalSymlink finalSymlink = FinalSymlink::Follow);
 
+void writeFile(Descriptor fd, Source & source, FsSync sync, const std::filesystem::path * origPath = nullptr);
+
 void writeFile(
     Descriptor fd, std::string_view s, FsSync sync = FsSync::No, const std::filesystem::path * origPath = nullptr);
 
@@ -278,6 +303,11 @@ void recursiveSync(const std::filesystem::path & path);
  */
 void deletePath(const std::filesystem::path & path);
 
+/**
+ * @param[out] bytesFreed Estimation of how many bytes of disk space have
+ *                        been reclaimed. Initialised to zero internally, so
+ *                        the caller doesn't need to initialise it.
+ */
 void deletePath(const std::filesystem::path & path, uint64_t & bytesFreed);
 
 /**
@@ -328,25 +358,15 @@ void createSymlink(const std::filesystem::path & target, const std::filesystem::
 void replaceSymlink(const std::filesystem::path & target, const std::filesystem::path & link);
 
 /**
- * Similar to 'renameFile', but fallback to a copy+remove if `src` and `dst`
- * are on a different filesystem.
+ * Recursively copy the content of `oldPath` to `newPath`.
  *
- * Beware that this might not be atomic because of the copy that happens behind
- * the scenes
- */
-void moveFile(const std::filesystem::path & src, const std::filesystem::path & dst);
-
-/**
- * Recursively copy the content of `oldPath` to `newPath`. If `andDelete` is
- * `true`, then also remove `oldPath` (making this equivalent to `moveFile`, but
- * with the guaranty that the destination will be “fresh”, with no stale inode
- * or file descriptor pointing to it).
+ * @todo Delete this. This function is prone to TOCTOU races and follows
+ * symlinks in the destination.
  *
  * If contents is set, always create a regular file, even if the source is a
  * link.
  */
-void copyFile(
-    const std::filesystem::path & from, const std::filesystem::path & to, bool andDelete, bool contents = false);
+void copyFile(const std::filesystem::path & from, const std::filesystem::path & to, bool contents);
 
 /**
  * Automatic cleanup of resources.
@@ -533,6 +553,25 @@ void unlinkIfExists(const std::filesystem::path & path);
  * @param path Path to the file to try to remove.
  */
 void tryUnlink(const std::filesystem::path & path);
+
+/**
+ * @brief Move/rename path 'src' to 'dst'.
+ *
+ * Temporarily makes 'src' writable if it's a directory and we're not root (to
+ * be able to update the directory's parent link "..").
+ *
+ * Atomically replaces the destination if it exists. Does not follow symlinks if
+ * dst is a symlink.
+ */
+void movePath(const std::filesystem::path & src, const std::filesystem::path & dst);
+
+/**
+ * @brief Thin wrapper around ::rename that throws SystemError on errors.
+ *
+ * Unlike @ref nix::movePath(), doesn't attempt to make the source writable if
+ * it's a directory.
+ */
+void renameFile(const std::filesystem::path & src, const std::filesystem::path & dst);
 
 /**
  * @brief A directory iterator that can be used to iterate over the

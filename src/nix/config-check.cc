@@ -10,6 +10,7 @@
 #include "nix/store/worker-protocol.hh"
 #include "nix/util/executable-path.hh"
 #include "nix/store/globals.hh"
+#include "nix/util/system-error.hh"
 
 namespace nix {
 
@@ -58,11 +59,6 @@ struct CmdConfigCheck : StoreCommand
     std::string description() override
     {
         return "check your system for potential problems and print a PASS or FAIL for each check";
-    }
-
-    Category category() override
-    {
-        return catNixInstallation;
     }
 
     void run(ref<Store> store) override

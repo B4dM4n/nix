@@ -8,6 +8,7 @@
 #include "nix/store/build/derivation-resolution-goal.hh"
 #include "nix/store/build/derivation-building-goal.hh"
 #include "nix/store/build/derivation-trampoline-goal.hh"
+#include "nix/util/system-error.hh"
 #ifndef _WIN32 // TODO Enable building on Windows
 #  include "nix/store/build/hook-instance.hh"
 #endif
@@ -109,11 +110,10 @@ Worker::makeDerivationResolutionGoal(const StorePath & drvPath, ref<const Deriva
     return initGoalIfNeeded(derivationResolutionGoals[drvPath], drvPath, drv, *this, buildMode);
 }
 
-std::shared_ptr<DerivationBuildingGoal> Worker::makeDerivationBuildingGoal(
-    const StorePath & drvPath, ref<const Derivation> drv, BuildMode buildMode, bool storeDerivation)
+std::shared_ptr<DerivationBuildingGoal>
+Worker::makeDerivationBuildingGoal(const StorePath & drvPath, ref<const BasicDerivation> drv, BuildMode buildMode)
 {
-    return initGoalIfNeeded(
-        derivationBuildingGoals[drvPath], drvPath, std::move(drv), *this, buildMode, storeDerivation);
+    return initGoalIfNeeded(derivationBuildingGoals[drvPath], drvPath, std::move(drv), *this, buildMode);
 }
 
 std::shared_ptr<PathSubstitutionGoal>
@@ -160,7 +160,7 @@ void Worker::removeGoal(GoalPtr goal)
     } else if (auto drvBuildingGoal = std::dynamic_pointer_cast<DerivationBuildingGoal>(goal)) {
         derivationBuildingGoals.erase(drvBuildingGoal->drvPath);
     } else if (auto subGoal = std::dynamic_pointer_cast<PathSubstitutionGoal>(goal)) {
-        substitutionGoals.erase(subGoal->storePath);
+        substitutionGoals.erase(subGoal->getStorePath());
     } else if (auto subGoal = std::dynamic_pointer_cast<DrvOutputSubstitutionGoal>(goal)) {
         drvOutputSubstitutionGoals.erase(subGoal->id);
     } else {
@@ -249,19 +249,6 @@ void Worker::childTerminated(Goal * goal, JobCategory jobCategory)
     }
 
     children.erase(i);
-    auto & waiting = jobCategory == JobCategory::Substitution ? wantingToSubstitute : wantingToBuild;
-
-    /* Wake up goals waiting for a build slot. Wake at most one waiter to avoid
-       starting unnecessary work (that is accompanied by coroutine frame allocation). */
-    auto it = waiting.begin();
-    while (it != waiting.end()) {
-        if (auto goal = it->lock()) {
-            waiting.erase(it);
-            wakeUp(goal);
-            break;
-        }
-        it = waiting.erase(it);
-    }
 
     if (!waitingForAWhile.empty()) {
         lastWokenUp = steady_time_point::clock::now();
@@ -347,6 +334,22 @@ void Worker::run(const Goals & _topGoals)
                 if (topGoals.empty())
                     break; // stuff may have been cancelled
             }
+
+            auto wakeSlotWaiters = [this](WeakGoals & waiting, size_t running, size_t limit) {
+                auto it = waiting.begin();
+                while (it != waiting.end() && running < limit) {
+                    auto goal = it->lock();
+                    it = waiting.erase(it);
+                    if (!goal)
+                        continue;
+                    wakeUp(goal);
+                    ++running;
+                }
+            };
+
+            wakeSlotWaiters(
+                wantingToSubstitute, getNrSubstitutions(), std::max<std::size_t>(1, settings.maxSubstitutionJobs));
+            wakeSlotWaiters(wantingToBuild, getNrLocalBuilds(), settings.maxBuildJobs);
         }
 
         if (topGoals.empty())
@@ -375,6 +378,7 @@ void Worker::run(const Goals & _topGoals)
        --keep-going *is* set, then they must all be finished now. */
     assert(!settings.keepGoing || awake.empty());
     assert(!settings.keepGoing || wantingToBuild.empty());
+    assert(!settings.keepGoing || wantingToSubstitute.empty());
     assert(!settings.keepGoing || children.empty());
 }
 
@@ -489,13 +493,13 @@ void Worker::waitForInput()
                 goal->handleEOF(k);
             });
 
-        if (goal->exitCode == Goal::ecBusy && 0 != settings.maxSilentTime && j->respectTimeouts
+        if (!goal->exitCode && 0 != settings.maxSilentTime && j->respectTimeouts
             && after - j->lastOutput >= std::chrono::seconds(settings.maxSilentTime)) {
             goal->timedOut(TimedOut(settings.maxSilentTime));
         }
 
         else if (
-            goal->exitCode == Goal::ecBusy && 0 != settings.buildTimeout && j->respectTimeouts
+            !goal->exitCode && 0 != settings.buildTimeout && j->respectTimeouts
             && after - j->timeStarted >= std::chrono::seconds(settings.buildTimeout)) {
             goal->timedOut(TimedOut(settings.buildTimeout));
         }

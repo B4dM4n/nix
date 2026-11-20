@@ -20,8 +20,10 @@ jobs:
     runs-on: ubuntu-24.04
     environment: releases
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      - uses: ./.github/actions/install-nix-action
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-nix-action # zizmor: ignore[self-repository]
         with:
           dogfood: false # Use stable version
           use_cache: false # Don't want any cache injection shenanigans
@@ -34,7 +36,7 @@ jobs:
           # get the same uberhack that nix-shell has to support it.
           echo "NIX_PATH=nixpkgs=$NIXPKGS_PATH" >> "$GITHUB_ENV"
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: "arn:aws:iam::080433136561:role/nix-release"
           role-session-name: nix-release-oidc-${{ github.run_id }}
@@ -51,12 +53,12 @@ jobs:
           echo '{"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json > /dev/null
           sudo systemctl restart docker
       - name: Login to Docker Hub
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

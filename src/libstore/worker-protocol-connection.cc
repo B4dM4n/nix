@@ -2,6 +2,8 @@
 #include "nix/store/worker-protocol-impl.hh"
 #include "nix/store/build-result.hh"
 #include "nix/store/derivations.hh"
+#include "nix/store/derivation/aterm.hh"
+#include "nix/util/logging.hh"
 
 namespace nix {
 
@@ -14,18 +16,22 @@ WorkerProto::BasicClientConnection::~BasicClientConnection()
     }
 }
 
-static Logger::Fields readFields(Source & from)
+static auto readFields(Source & from)
 {
-    Logger::Fields fields;
+    std::vector<Logger::Field> fields;
     size_t size = readInt(from);
     for (size_t n = 0; n < size; n++) {
-        auto type = (decltype(Logger::Field::type)) readInt(from);
-        if (type == Logger::Field::tInt)
+        auto type = readInt(from);
+        switch (type) {
+        case 0:
             fields.push_back(readNum<uint64_t>(from));
-        else if (type == Logger::Field::tString)
+            break;
+        case 1:
             fields.push_back(readString(from));
-        else
+            break;
+        default:
             throw Error("got unsupported field type %x from Nix daemon", (int) type);
+        }
     }
     return fields;
 }
@@ -77,7 +83,7 @@ WorkerProto::BasicClientConnection::processStderrReturn(Sink * sink, Source * so
 
         else if (msg == STDERR_START_ACTIVITY) {
             auto act = readNum<ActivityId>(from);
-            auto lvl = (Verbosity) readInt(from);
+            auto lvl = verbosityFromIntClamped(readInt(from));
             auto type = (ActivityType) readInt(from);
             auto s = readString(from);
             auto fields = readFields(from);
@@ -106,32 +112,7 @@ WorkerProto::BasicClientConnection::processStderrReturn(Sink * sink, Source * so
             throw Error("got unknown message type %x from Nix daemon", msg);
     }
 
-    if (!ex) {
-        return ex;
-    } else {
-        try {
-            std::rethrow_exception(ex);
-        } catch (const Error & e) {
-            // Nix versions before #4628 did not have an adequate
-            // behavior for reporting that the derivation format was
-            // upgraded. To avoid having to add compatibility logic in
-            // many places, we expect to catch almost all occurrences of
-            // the old incomprehensible error here, so that we can
-            // explain to users what's going on when their daemon is
-            // older than #4628 (2023).
-            if (experimentalFeatureSettings.isEnabled(Xp::DynamicDerivations)
-                && protoVersion.number < WorkerProto::Version::Number{1, 36}) {
-                auto m = e.msg();
-                if (m.find("parsing derivation") != std::string::npos && m.find("expected string") != std::string::npos
-                    && m.find("Derive([") != std::string::npos)
-                    return std::make_exception_ptr(Error(
-                        "%s, this might be because the daemon is too old to understand dependencies on dynamic derivations. Check to see if the raw derivation is in the form '%s'",
-                        std::move(m),
-                        "Drv WithVersion(..)"));
-            }
-            return std::current_exception();
-        }
-    }
+    return ex;
 }
 
 void WorkerProto::BasicClientConnection::processStderr(
@@ -293,7 +274,7 @@ void WorkerProto::BasicClientConnection::putBuildDerivationRequest(
     BuildMode buildMode)
 {
     to << WorkerProto::Op::BuildDerivation << store.printStorePath(drvPath);
-    writeDerivation(to, store, drv);
+    derivation::write(to, store, drv);
     to << buildMode;
 }
 

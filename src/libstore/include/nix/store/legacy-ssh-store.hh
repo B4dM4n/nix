@@ -2,7 +2,6 @@
 ///@file
 
 #include "nix/store/common-ssh-store-config.hh"
-#include "nix/store/store-api.hh"
 #include "nix/store/ssh.hh"
 #include "nix/util/callback.hh"
 #include "nix/util/pool.hh"
@@ -133,31 +132,14 @@ public:
         unsupported("addToStore");
     }
 
-    void registerDrvOutput(const Realisation & output) override
+    void registerDrvOutputUnchecked(const Realisation & output) override
     {
         unsupported("registerDrvOutput");
     }
 
 public:
 
-    BuildResult buildDerivation(const StorePath & drvPath, const BasicDerivation & drv, BuildMode buildMode) override;
-
-    /**
-     * Note, the returned function must only be called once, or we'll
-     * try to read from the connection twice.
-     *
-     * @todo Use C++23 `std::move_only_function`.
-     */
-    fun<BuildResult()> buildDerivationAsync(
-        const StorePath & drvPath, const BasicDerivation & drv, const ServeProto::BuildOptions & options);
-
-    void buildPaths(
-        const std::vector<DerivedPath> & drvPaths, BuildMode buildMode, std::shared_ptr<Store> evalStore) override;
-
-    void ensurePath(const StorePath & path) override
-    {
-        unsupported("ensurePath");
-    }
+    ref<Builder> getBuilder(std::shared_ptr<Store> evalStore) override;
 
     ref<SourceAccessor> getFSAccessor(bool requireValidPath) override
     {
@@ -167,19 +149,6 @@ public:
     std::shared_ptr<SourceAccessor> getFSAccessor(const StorePath & path, bool requireValidPath) override
     {
         unsupported("getFSAccessor");
-    }
-
-    /**
-     * The default instance would schedule the work on the client side, but
-     * for consistency with `buildPaths` and `buildDerivation` it should happen
-     * on the remote side.
-     *
-     * We make this fail for now so we can add implement this properly later
-     * without it being a breaking change.
-     */
-    void repairPath(const StorePath & path) override
-    {
-        unsupported("repairPath");
     }
 
     void computeFSClosure(
@@ -222,9 +191,10 @@ public:
 
     void queryRealisationUncached(
         const DrvOutput &, Callback<std::shared_ptr<const UnkeyedRealisation>> callback) noexcept override
-    // TODO: Implement
     {
-        unsupported("queryRealisation");
+        /* The serve protocol doesn't support querying realisations,
+           so act as if this store doesn't have any. */
+        callback(nullptr);
     }
 
     StorePathSet querySubstitutablePaths(const StorePathSet & paths) override
@@ -232,6 +202,8 @@ public:
         // not supported
         return {};
     }
+
+    friend struct LegacySSHBuilder;
 };
 
 } // namespace nix

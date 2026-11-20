@@ -89,9 +89,7 @@ static std::pair<std::map<FlakeId, FlakeInput>, fetchers::Attrs> parseFlakeInput
 
 static void parseFlakeInputAttr(EvalState & state, const Attr & attr, fetchers::Attrs & attrs)
 {
-// Allow selecting a subset of enum values
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wswitch-enum"
+    NIX_INCOMPLETE_SWITCH_BEGIN
     switch (attr.value->type()) {
     case nString:
         attrs.emplace(state.symbols[attr.name], std::string(attr.value->string_view()));
@@ -123,7 +121,7 @@ static void parseFlakeInputAttr(EvalState & state, const Attr & attr, fetchers::
                     showType(*attr.value))
                 .debugThrow();
     }
-#pragma GCC diagnostic pop
+    NIX_INCOMPLETE_SWITCH_END
 }
 
 static FlakeInput parseFlakeInput(
@@ -188,7 +186,7 @@ static FlakeInput parseFlakeInput(
 
     if (attrs.count("type"))
         try {
-            input.ref = FlakeRef::fromAttrs(state.fetchSettings, attrs);
+            input.ref = FlakeRef::fromAttrs(attrs);
         } catch (Error & e) {
             e.addTrace(state.positions[pos], HintFmt("while evaluating flake input"));
             throw;
@@ -198,7 +196,7 @@ static FlakeInput parseFlakeInput(
         if (!attrs.empty())
             throw Error("unexpected flake input attribute '%s', at %s", attrs.begin()->first, state.positions[pos]);
         if (url)
-            input.ref = parseFlakeRef(state.fetchSettings, *url, {}, true, input.isFlake, true);
+            input.ref = parseFlakeRef(*url, {}, true, input.isFlake, true);
     }
 
     if (input.ref && input.follows)
@@ -284,8 +282,7 @@ static Flake readFlake(
                     if (formal.name != state.s.self)
                         flake.inputs.emplace(
                             state.symbols[formal.name],
-                            FlakeInput{
-                                .ref = parseFlakeRef(state.fetchSettings, std::string(state.symbols[formal.name]))});
+                            FlakeInput{.ref = parseFlakeRef(std::string(state.symbols[formal.name]))});
                 }
             }
         }
@@ -347,18 +344,28 @@ static Flake readFlake(
     return flake;
 }
 
-static FlakeRef applySelfAttrs(const FlakeRef & ref, const Flake & flake)
+/**
+ * Return `ref` with the `self` attributes of `flake` applied, or
+ * `std::nullopt` if `ref` already has them.
+ */
+static std::optional<FlakeRef> applySelfAttrs(const FlakeRef & ref, const Flake & flake)
 {
     auto newRef(ref);
+    bool changed = false;
 
     StringSet allowedAttrs{"submodules", "lfs"};
 
     for (auto & attr : flake.selfAttrs) {
         if (!allowedAttrs.contains(attr.first))
             throw Error("flake 'self' attribute '%s' is not supported", attr.first);
+        if (auto old = get(newRef.input.attrs, attr.first); old && *old == attr.second)
+            continue;
         newRef.input.attrs.insert_or_assign(attr.first, attr.second);
+        changed = true;
     }
 
+    if (!changed)
+        return std::nullopt;
     return newRef;
 }
 
@@ -382,14 +389,14 @@ static Flake getFlake(
     // Re-fetch the tree if necessary.
     auto newLockedRef = applySelfAttrs(lockedRef, flake);
 
-    if (lockedRef != newLockedRef) {
-        debug("refetching input '%s' due to self attribute", newLockedRef);
+    if (newLockedRef) {
+        debug("refetching input '%s' due to self attribute", *newLockedRef);
         // FIXME: need to remove attrs that are invalidated by the changed input attrs, such as 'narHash'.
-        newLockedRef.input.attrs.erase("narHash");
+        newLockedRef->input.attrs.erase("narHash");
         auto cachedInput2 = state.inputCache->getAccessor(
-            state.fetchSettings, *state.store, newLockedRef.input, fetchers::UseRegistries::No);
+            state.fetchSettings, *state.store, newLockedRef->input, fetchers::UseRegistries::No);
         cachedInput.accessor = cachedInput2.accessor;
-        lockedRef = FlakeRef(std::move(cachedInput2.lockedInput), newLockedRef.subdir);
+        lockedRef = FlakeRef(std::move(cachedInput2.lockedInput), newLockedRef->subdir);
     }
 
     auto rootDir = state.storePath(state.mountInput(lockedRef.input, originalRef.input, cachedInput.accessor));
@@ -571,8 +578,10 @@ LockedFlake lockFlake(
                     }
 
                     if (!input.ref)
-                        input.ref =
-                            FlakeRef::fromAttrs(state.fetchSettings, {{"type", "indirect"}, {"id", std::string(id)}});
+                        input.ref = FlakeRef::fromAttrs({
+                            {"type", "indirect"},
+                            {"id", std::string(id)},
+                        });
 
                     auto overriddenParentPath =
                         input.ref->input.isRelative()
@@ -906,7 +915,7 @@ LockedFlake
 lockFlake(const Settings & settings, EvalState & state, const SourcePath & flakeDir, const LockFlags & lockFlags)
 {
     /* We need a fake flakeref to put in the `Flake` struct, but it's not used for anything. */
-    auto fakeRef = parseFlakeRef(state.fetchSettings, "flake:get-flake");
+    auto fakeRef = parseFlakeRef("flake:get-flake");
     return lockFlake(settings, state, fakeRef, lockFlags, readFlake(state, fakeRef, fakeRef, fakeRef, flakeDir, {}));
 }
 
@@ -916,8 +925,9 @@ static ref<SourceAccessor> makeInternalFS()
     internalFS->setPathDisplay("«flakes-internal»", "");
     internalFS->addFile(
         CanonPath("call-flake.nix"),
-#include "call-flake.nix.gen.hh" // IWYU pragma: keep
-    );
+        {
+#embed "call-flake.nix"
+        });
     return internalFS;
 }
 
@@ -950,6 +960,7 @@ void callFlake(EvalState & state, const LockedFlake & lockedFlake, Value & vRes)
 
         emitTreeAttrs(
             state,
+            noPos,
             storePath,
             lockedNode ? lockedNode->lockedRef.input : lockedFlake.flake.lockedRef.input,
             vSourceInfo,
@@ -974,8 +985,7 @@ void callFlake(EvalState & state, const LockedFlake & lockedFlake, Value & vRes)
     auto vFetchFinalTree = get(state.internalPrimOps, "fetchFinalTree");
     assert(vFetchFinalTree);
 
-    Value * args[] = {vLocks, &vOverrides, *vFetchFinalTree};
-    state.callFunction(*vCallFlake, args, vRes, noPos);
+    state.callFunction(*vCallFlake, std::to_array({vLocks, &vOverrides, *vFetchFinalTree}), vRes, noPos);
 }
 
 std::optional<Fingerprint> LockedFlake::getFingerprint(Store & store, const fetchers::Settings & fetchSettings) const

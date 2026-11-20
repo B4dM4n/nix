@@ -217,6 +217,7 @@ nix_nested_manpages = [
       'query',
       'read-log',
       'realise',
+      'register-validity',
       'repair-path',
       'restore',
       'serve',
@@ -355,6 +356,7 @@ nix3_manpages = [
   'nix3-store-sign',
   'nix3-store-verify',
   'nix3-upgrade-nix',
+  'nix3-version',
   'nix3-why-depends',
 ]
 

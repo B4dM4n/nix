@@ -26,6 +26,52 @@ inline void * EvalMemory::allocBytes(size_t n)
     return p;
 }
 
+namespace detail {
+
+/**
+ * @return count * sizeof(T) + N
+ * @throws bad_alloc if the computation would overflow.
+ */
+template<typename T, std::size_t N>
+[[gnu::always_inline]]
+inline size_t checkedAllocSize(size_t count)
+{
+    size_t res = 0;
+
+    if (__builtin_mul_overflow(count, sizeof(T), &res)) [[unlikely]]
+        throw std::bad_alloc();
+
+    if (__builtin_add_overflow(res, N, &res)) [[unlikely]]
+        throw std::bad_alloc();
+
+    return res;
+}
+
+} // namespace detail
+
+template<typename T, std::size_t N>
+[[gnu::always_inline]]
+inline void * EvalMemory::allocBytes(size_t count)
+{
+    return allocBytes(detail::checkedAllocSize<T, N>(count));
+}
+
+[[gnu::always_inline]]
+inline void * EvalMemory::allocBytesAtomic(size_t n)
+{
+    void * p = GC_MALLOC_ATOMIC(n);
+    if (!p)
+        throw std::bad_alloc();
+    return p;
+}
+
+template<typename T, std::size_t N>
+[[gnu::always_inline]]
+inline void * EvalMemory::allocBytesAtomic(size_t count)
+{
+    return allocBytesAtomic(detail::checkedAllocSize<T, N>(count));
+}
+
 [[gnu::always_inline]]
 Value * EvalMemory::allocValue()
 {
@@ -85,7 +131,7 @@ Env & EvalMemory::allocEnv(size_t size)
         env = (Env *) p;
     } else
 #endif
-        env = (Env *) allocBytes(sizeof(Env) + size * sizeof(Value *));
+        env = (Env *) allocBytes<Value *, sizeof(Env)>(size);
 
     /* We assume that env->values has been cleared by the allocator; maybeThunk() and lookupVar fromWith expect this. */
 
@@ -160,5 +206,78 @@ inline CallDepth EvalState::addCallDepth(const PosIdx pos)
 
     return CallDepth(callDepth);
 };
+
+template<typename Cb>
+std::invoke_result_t<Cb, Value *, bool>
+EvalState::peelToStringOutPath(const PosIdx pos, Value & v, bool checkToStringReturn, Cb && cb)
+{
+    using R = std::invoke_result_t<Cb, Value *, bool>;
+    bool cameThroughToString = false;
+
+    auto peel = [&, &state = *this](this const auto & peel, const PosIdx pos, Value & v) -> R {
+        state.forceValue(v, pos);
+        auto vType = v.type();
+        if (vType != nAttrs) {
+            /* Trivially string-coercible types (i.e. coerceMore = false compatible)
+               get to return happily.
+               String and path terminate happily. External needs to be handled
+               by caller. E.g. `printValueAsJSON` routes to `ExternalValueBase::printValueAsJSON`,
+               `coerceToString` to `ExternalValueBase::coerceToString`).
+               Everything else violates the "`__toString` returns a
+               string" contract.
+               */
+            if (checkToStringReturn && cameThroughToString && vType != nString && vType != nPath && vType != nExternal)
+                state
+                    .error<TypeError>(
+                        "`__toString` should return a string, but got %1%: %2%",
+                        showType(v),
+                        ValuePrinter(state, v, errorPrintOptions))
+                    .atPos(pos)
+                    .debugThrow();
+            return std::forward<Cb>(cb)(&v, cameThroughToString);
+        }
+        if (auto i = v.attrs()->get(state.s.toString)) {
+            Value & v1 = *state.allocValue();
+            try {
+                state.callFunction(*i->value, v, v1, i->pos);
+            } catch (Error & e) {
+                e.addTrace(state.positions[i->pos], "while calling the `__toString` attribute");
+                throw;
+            }
+            cameThroughToString = true;
+            try {
+                auto _level = state.addCallDepth(pos);
+                return peel(i->pos, v1);
+            } catch (Error & e) {
+                e.addTrace(
+                    state.positions[i->pos], "while %s the result of the `__toString` attribute", WhileTryingToUse{v1});
+                throw;
+            }
+        }
+        if (auto i = v.attrs()->get(state.s.outPath)) {
+            try {
+                state.forceValue(*i->value, i->pos);
+                auto _level = state.addCallDepth(pos);
+                return peel(i->pos, *i->value);
+            } catch (Error & e) {
+                e.addTrace(state.positions[i->pos], "while %s the `outPath` attribute", WhileTryingToUse{*i->value});
+                throw;
+            }
+        }
+        /* Can't peel more. (no `__toString`, no `outPath`).
+           If we came through a `__toString` call at any depth, this violates
+           the string-return contract. (usually not enforced) */
+        if (checkToStringReturn && cameThroughToString)
+            state
+                .error<TypeError>(
+                    "`__toString` must return a string, but got %1%: %2%",
+                    showType(v),
+                    ValuePrinter(state, v, errorPrintOptions))
+                .atPos(pos)
+                .debugThrow();
+        return std::forward<Cb>(cb)(&v, cameThroughToString);
+    };
+    return peel(pos, v);
+}
 
 } // namespace nix

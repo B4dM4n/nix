@@ -26,7 +26,7 @@ void parseCmdLine(
     const Strings & args,
     fun<bool(Strings::iterator & arg, const Strings::iterator & end)> parseArg);
 
-void printVersion(const std::string & programName);
+[[noreturn]] void printVersion(const std::string & programName);
 
 /**
  * Ugh.  No better place to put this.
@@ -75,9 +75,7 @@ public:
     ~RunPager();
 
 private:
-#ifndef _WIN32 // TODO re-enable on Windows, once we can start processes.
     Pid pid;
-#endif
     Descriptor std_out;
 };
 

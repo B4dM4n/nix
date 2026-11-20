@@ -95,7 +95,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
             auto attrPathS = state->symbols.resolve({attrPath});
             auto attrPathStr = attrPath.to_string(*state);
 
-            Activity act(*logger, lvlInfo, actUnknown, fmt("evaluating '%s'", attrPathStr));
+            Activity act(*logger, lvlTalkative, actUnknown, fmt("evaluating '%s'", attrPathStr));
             try {
                 auto recurse = [&]() {
                     for (const auto & attr : cursor.getAttrs()) {
@@ -155,12 +155,12 @@ struct CmdSearch : InstallableValueCommand, MixJSON
                         } else {
                             if (results > 1)
                                 logger->cout("");
-                            logger->cout(
+                            logger->coutStyled(
                                 "* %s%s",
                                 wrap("\e[0;1m", hiliteMatches(attrPathStr, attrPathMatches, ANSI_GREEN, "\e[0;1m")),
                                 optionalBracket(" (", name.version, ")"));
                             if (description != "")
-                                logger->cout(
+                                logger->coutStyled(
                                     "  %s", hiliteMatches(description, descriptionMatches, ANSI_GREEN, ANSI_NORMAL));
                         }
                     }
@@ -186,7 +186,7 @@ struct CmdSearch : InstallableValueCommand, MixJSON
             }
         };
 
-        for (auto & cursor : installable->getCursors(*state))
+        for (auto & cursor : installable->getCursors(*state, AutoCall::Yes))
             visit(*cursor, cursor->getAttrPath(), true);
 
         if (json)
