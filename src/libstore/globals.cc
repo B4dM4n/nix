@@ -381,7 +381,7 @@ void BaseSetting<Builders>::appendOrSet(Builders newValue, bool append)
     if (!append)
         value.clear();
     if (!value.empty())
-        value.append("\n");
+        value.append(";");
     value.append(newValue);
 }
 
